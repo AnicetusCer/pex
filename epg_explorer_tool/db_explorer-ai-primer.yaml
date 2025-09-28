@@ -1,7 +1,7 @@
 db_tools:
   explorer:
     description: |
-      The `db_explorer.rs` (previously `debug.rs`) binary is a utility for inspecting
+      The `db_explorer.rs` binary is a utility for inspecting
       and exporting Plex’s SQLite database (`plex_epg.db`). It allows you to quickly
       view table structures, dump rows, and test queries before adding logic to
       `main.rs`.
