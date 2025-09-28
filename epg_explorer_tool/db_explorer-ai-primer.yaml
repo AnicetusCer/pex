@@ -1,0 +1,68 @@
+db_tools:
+  explorer:
+    description: |
+      The `db_explorer.rs` (previously `debug.rs`) binary is a utility for inspecting
+      and exporting Plex’s SQLite database (`plex_epg.db`). It allows you to quickly
+      view table structures, dump rows, and test queries before adding logic to
+      `main.rs`.
+    usage:
+      - To run:
+        ```powershell
+        cargo run --bin db_explorer <table_name> [limit]
+        ```
+        Example:
+        ```powershell
+        cargo run --bin db_explorer metadata_items 10
+        ```
+      - `<table_name>` is the SQLite table you want to explore.
+      - `[limit]` is optional; it limits the number of rows printed.
+
+    output:
+      - Prints:
+        - The name of the table
+        - Column names
+        - Row values (NULLs, text, numbers, JSON fields, etc.)
+      - Can also export results to a file if enabled (future enhancement).
+    
+    notes:
+      - Uses `rusqlite` to query Plex’s `plex_epg.db`.
+      - Can parse JSON-like fields with `serde_json` for readability.
+      - Intended for debugging / data discovery, not for production logic.
+
+  database:
+    plex_epg:
+      description: |
+        The Plex database (`plex_epg.db`) contains multiple tables. The most
+        important so far is `metadata_items` (stores movies, shows, seasons,
+        episodes) and related tables (`media_subscriptions`, `custom_channels`).
+      key_tables:
+        - metadata_items:
+            purpose: "Stores all media entries (movies, shows, seasons, episodes)."
+            important_fields:
+              - id: Primary key
+              - guid: Plex identifier (e.g., `plex://movie/...`)
+              - title: Movie or episode name
+              - summary: Description
+              - user_thumb_url: Poster/thumb image
+              - user_art_url: Background artwork
+              - originally_available_at: Air/release date
+              - metadata_type:
+                  1: Movie
+                  2: Show
+                  3: Season
+                  4: Episode
+        - custom_channels:
+            purpose: "Stores user-defined channels and their properties."
+        - media_subscriptions:
+            purpose: "Defines relationships between metadata items and channels/playlists."
+
+  workflow:
+    - Step 1: Use `db_explorer` to check table data and understand schema.
+    - Step 2: Identify correct fields for ordering (e.g., `originally_available_at`).
+    - Step 3: Once verified, update `main.rs` to use correct query/ordering.
+    - Step 4: If unsure, return to `db_explorer` for validation.
+
+  reminder:
+    - Always keep `db_explorer.rs` around for schema debugging.
+    - Run it whenever something in `main.rs` crashes or you’re unsure which fields to query.
+    - This tool is your **safety net**.

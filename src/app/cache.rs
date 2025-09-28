@@ -1,0 +1,283 @@
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use image::{GenericImageView, ImageFormat};
+use reqwest::blocking::Client;
+use tracing::warn;
+
+use crate::config::load_config;
+
+// Chosen once on first call
+use std::sync::OnceLock;
+static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn cache_dir() -> PathBuf {
+    CACHE_DIR_ONCE
+        .get_or_init(|| {
+            let cfg = load_config();
+            // cfg.cache_dir: Option<String> — use default when None
+            let mut path = normalize_dir(PathBuf::from(
+                cfg.cache_dir.as_deref().unwrap_or(".pex_cache"),
+            ));
+
+            if let Err(e) = fs::create_dir_all(&path) {
+                warn!("failed to create cache dir {}: {e}", path.display());
+                // Fall back to local folder if creation failed
+                path = PathBuf::from(".pex_cache");
+                let _ = fs::create_dir_all(&path);
+            }
+            path
+        })
+        .clone()
+}
+
+pub fn url_to_cache_key(url: &str) -> String {
+    format!("{:x}", md5::compute(url.as_bytes()))
+}
+
+// for legacy file names we used the basename without extension as the key
+#[allow(dead_code)]
+pub fn basename_key(url: &str) -> String {
+    Path::new(url)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| url_to_cache_key(url))
+}
+
+/// Return (width, height, RGBA8 bytes) from either an image file (.png/.jpg/.jpeg/.webp)
+/// or a raw rgba file we now write as: 8-byte header (u32 LE width, u32 LE height) + bytes.
+pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String> {
+    let p = Path::new(path);
+    if !p.exists() { return Err("not found".into()); }
+    if let Some(ext) = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+        if ext == "rgba" {
+            let mut f = fs::File::open(p).map_err(|e| format!("open rgba: {e}"))?;
+            let mut header = [0u8; 8];
+            f.read_exact(&mut header).map_err(|e| format!("read header: {e}"))?;
+            let w = u32::from_le_bytes([header[0],header[1],header[2],header[3]]);
+            let h = u32::from_le_bytes([header[4],header[5],header[6],header[7]]);
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| format!("read body: {e}"))?;
+            return Ok((w,h,buf));
+        }
+    }
+    // Fallback: decode via image crate
+    let img = image::ImageReader::open(p)
+        .map_err(|e| format!("open image {}: {e}", p.display()))?
+        .with_guessed_format()
+        .map_err(|e| format!("guess format {}: {e}", p.display()))?
+        .decode()
+        .map_err(|e| format!("decode {}: {e}", p.display()))?;
+    let (w,h) = img.dimensions();
+    let rgba = img.to_rgba8().to_vec();
+    Ok((w,h,rgba))
+}
+
+pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
+    let base = cache_dir();
+    let candidates = [
+        format!("{}.png", key),
+        format!("{}.jpg", key),
+        format!("{}.jpeg", key),
+        format!("{}.webp", key),
+        format!("{}.rgba", key),
+        format!("rgba_{}.rgba", key),
+    ];
+    for c in candidates {
+        let p = base.join(c);
+        if p.exists() { return Some(p); }
+    }
+    None
+}
+
+/// Download, normalize to PNG or RGBA and store in cache. Returns the stored path.
+pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let resp = client.get(url).send().map_err(|e| format!("GET {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} for {url}", resp.status()));
+    }
+    let body = resp.bytes().map_err(|e| format!("read body: {e}"))?.to_vec();
+
+    // Try decode with image crate
+    match image::load_from_memory(&body) {
+        Ok(img) => {
+            let out = cache_dir().join(format!("{key}.png"));
+            let mut f = fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
+            let mut png_bytes: Vec<u8> = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+                .map_err(|e| format!("encode png: {e}"))?;
+            f.write_all(&png_bytes).map_err(|e| format!("write {}: {e}", out.display()))?;
+            Ok(out)
+        }
+        Err(e) => {
+            warn!("image decode failed for {url}: {e}; storing raw");
+            // Store as rgba with w/h header if we really fail (rare)
+            let out = cache_dir().join(format!("{key}.rgba"));
+            let mut f = fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
+            // We don't know w/h here; write zeros so loader will reject gracefully
+            f.write_all(&0u32.to_le_bytes()).map_err(|e| format!("write hdr: {e}"))?;
+            f.write_all(&0u32.to_le_bytes()).map_err(|e| format!("write hdr: {e}"))?;
+            f.write_all(&body).map_err(|e| format!("write {}: {e}", out.display()))?;
+            Ok(out)
+        }
+    }
+}
+
+/// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
+/// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
+/// This writes `<cache_dir>/<key>.jpg`.
+/// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
+/// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
+/// This writes `<cache_dir>/<key>.jpg`.
+pub fn download_and_store_resized(
+    url: &str,
+    key: &str,
+    max_width: u32,
+    quality: u8,
+) -> Result<std::path::PathBuf, String> {
+    use std::{fs, io::Write};
+    use image::{DynamicImage, imageops::FilterType};
+    use reqwest::blocking::Client;
+
+    let dest = cache_dir().join(format!("{key}.jpg"));
+
+    // If already present, return immediately.
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    // Download bytes
+    let client = Client::builder()
+        .user_agent("pex_new/resize-prefetch")
+        .build()
+        .map_err(|e| format!("reqwest client build: {e}"))?;
+
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("download bytes: {e}"))?;
+
+    // Try to decode the image
+    let img = match image::load_from_memory(&bytes) {
+        Ok(img) => img,
+        Err(_) => {
+            // Fallback to original path via existing helper
+            return download_and_store(url, key);
+        }
+    };
+
+    // Resize if needed, keep aspect
+    let (w, h) = img.dimensions();
+    let out: DynamicImage = if w > max_width {
+        let new_h = ((h as f32) * (max_width as f32 / w as f32)).round().max(1.0) as u32;
+        img.resize_exact(max_width, new_h, FilterType::CatmullRom)
+    } else {
+        img
+    };
+
+    // Encode JPEG with requested quality
+    let mut jpeg_bytes: Vec<u8> = Vec::new();
+    {
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+        encoder
+            .encode_image(&out)
+            .map_err(|e| format!("jpeg encode: {e}"))?;
+    }
+
+    // Ensure cache dir exists and write atomically-ish
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = dest.with_extension("jpg.part");
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create tmp: {e}"))?;
+        f.write_all(&jpeg_bytes).map_err(|e| format!("write: {e}"))?;
+    }
+    fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
+
+    Ok(dest)
+}
+
+/// Same as `download_and_store_resized` but reuses a provided reqwest Client
+/// for connection pooling (faster parallel downloads).
+pub fn download_and_store_resized_with_client(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    key: &str,
+    max_width: u32,
+    quality: u8,
+) -> Result<std::path::PathBuf, String> {
+    use std::{fs, io::Write};
+    use image::{DynamicImage, imageops::FilterType};
+
+    let dest = cache_dir().join(format!("{key}.jpg"));
+
+    // If already present, return immediately.
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    // Download bytes using shared client
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("download bytes: {e}"))?;
+
+    // Try to decode the image
+    let img = match image::load_from_memory(&bytes) {
+        Ok(img) => img,
+        Err(_) => {
+            // Fallback to original path via existing helper
+            return super::download_and_store(url, key);
+        }
+    };
+
+    // Resize if needed, keep aspect
+    let (w, h) = img.dimensions();
+    let out: DynamicImage = if w > max_width {
+        let new_h = ((h as f32) * (max_width as f32 / w as f32)).round().max(1.0) as u32;
+        img.resize_exact(max_width, new_h, FilterType::CatmullRom)
+    } else {
+        img
+    };
+
+    // Encode JPEG with requested quality
+    let mut jpeg_bytes: Vec<u8> = Vec::new();
+    {
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+        encoder
+            .encode_image(&out)
+            .map_err(|e| format!("jpeg encode: {e}"))?;
+    }
+
+    // Ensure cache dir exists and write atomically-ish
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = dest.with_extension("jpg.part");
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create tmp: {e}"))?;
+        f.write_all(&jpeg_bytes).map_err(|e| format!("write: {e}"))?;
+    }
+    fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
+
+    Ok(dest)
+}
+
+fn normalize_dir(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    let fixed = s.replace("\\\\", "\\").replace('/', "\\");
+    PathBuf::from(fixed)
+}
