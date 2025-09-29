@@ -1,5 +1,5 @@
-use pex::config::load_config;
-use rusqlite::{Connection, Result, types::ValueRef};
+use pex_new::config::load_config;
+use rusqlite::{types::ValueRef, Connection, Result};
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -27,11 +27,11 @@ fn main() -> Result<()> {
     println!("Opening Plex DB: plex_epg.db");
 
     let config = load_config();
-    let db_path = if config.plex_db_local.is_empty() {
-        "plex_epg.db".to_string()
-    } else {
-        config.plex_db_local
-    };
+    let db_path = config
+        .plex_db_local
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "plex_epg.db".to_string());
     let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare(&format!("SELECT * FROM {} LIMIT {}", table, limit))?;
 
@@ -50,10 +50,7 @@ fn main() -> Result<()> {
                 ValueRef::Null => "NULL".to_string(),
                 ValueRef::Integer(i) => i.to_string(),
                 ValueRef::Real(f) => f.to_string(),
-                ValueRef::Text(bytes) => {
-                    let raw = String::from_utf8_lossy(bytes).to_string();
-                    raw
-                }
+                ValueRef::Text(bytes) => String::from_utf8_lossy(bytes).to_string(),
                 ValueRef::Blob(_) => "<BLOB>".to_string(),
             };
             values.push(value);

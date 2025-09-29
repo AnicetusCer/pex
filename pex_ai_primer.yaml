@@ -1,3 +1,5 @@
+# Updated: 2025-09-28
+
 human_goals:
   description: Create a Plex-browser–style interface for Plex EPG data, focused first on "to be aired" films.
   requirements:
@@ -7,97 +9,98 @@ human_goals:
     - Sorting/filters: by genre.
     - Day window selector: 2 days (default), 7 days, 14 days, All.
     - Cross-reference EPG films with local filesystem libraries to dim/hide films already owned.
-  ways_of_working:
-    - Provide code as whole-function replacements (drop-in), not line-by-line patches.
-    - Make small, incremental changes toward the goals above.
+
+ways_of_working:
+  - Provide code as whole-function replacements (drop-in), not line-by-line patches.
+  - Make small, incremental changes toward the goals above.
+  - Never block the UI thread; keep frames moving (ctx.request_repaint).
 
 project_status:
   repo_area: src/app/mod.rs (main UI + data flow)
   high_level_flow:
     1: App starts (eframe/egui).
-    2: Poster preparation "warm-up": copy EPG DB if needed; scan EPG for (title,poster_url); ensure poster cache on disk.
-    3: Cache-only prefetch builds textures from disk for fast initial grid render.
-    4: Main UI shows grid (with optional early grid while prefetch completes).
-  current_focus: Make startup stable/smooth; decouple heavy I/O from UI; prep posters up-front.
+    2: Poster preparation "warm-up": copy EPG DB if needed; scan EPG for (title, poster_url, begins_at, year, channel); ensure poster cache on disk.
+    3: Cache-only prefetch builds textures from disk for fast initial grid render (lazy uploads + prewarm).
+    4: Main UI shows grouped-by-day grid (with early grid allowed while prefetch completes).
+  current_focus: Startup smoothness and early responsiveness; prep posters and cache up-front; keep UI interactive while assets load.
 
 architecture:
   threads_and_channels:
     poster_prep_thread:
       purpose: Phase 2+3 warm-up. Emits status + final manifest.
-      tx_type: PrepMsg { Info(String) | Done(Vec<(title,url,key)>) | Error(String) } via mpsc channel.
+      tx_type: PrepMsg { Info(String) | Done(Vec<(title,url,key,begins_at?,year?,channel?)>) | Error(String) } via mpsc channel.
     prefetch_workers:
-      purpose: LOAD poster bytes (from cache or network fallback) and produce GPU textures.
+      purpose: Ensure poster bytes exist on disk (cache hit or network fallback). No GPU work off-thread.
       concurrency: WORKER_COUNT (const, default 8).
       result_channel: PrefetchDone { row_idx, key, result<PathBuf, String> }.
     ui_thread:
       responsibilities:
-        - drives frames (ctx.request_repaint) to prevent Windows "Not Responding".
+        - drives frames (ctx.request_repaint).
         - polls poster_prep channel (poll_prep).
         - when manifest arrives, starts prefetch (start_prefetch).
-        - drains completions in small batches per frame (poll_prefetch_done), updates textures/state/progress.
-  phases:
-    boot_phase_enum: [Starting, CheckingNew, Caching, Ready]
-    data_phase_enum (Phase):
-      - Starting, FreshnessCheck, CopyingDb, OpeningDb, QueryingDb, ScanningRows, Deduplicating, PrefetchQueue, Prefetching, Ready
-    notes: boot_phase governs the calm splash during prep; Phase is retained for detailed status (optional).
-  caching:
-    dir: .pex_cache under repo (see cache::cache_dir()).
-    policy:
-      - Prefer cached resized JPEG (RESIZE_MAX_W x quality).
-      - If missing, download resize; fallback to original if resize fails.
-      - During warm-up we ensure presence-on-disk; during prefetch we map cache->GPU textures.
-  configuration:
-    file: config.json (load_config()).
-    keys: plex_db_local (required), plex_db_source (optional for daily copy).
-  SQL:
-    variants:
-      - SQL_POSTERS_USER_THUMB (new Plex schema): uses m.user_thumb_url
-      - SQL_POSTERS_THUMB (fallback): uses m.thumb_url
-    order: ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-    limit_usage:
-      - Warm-up: pass [i64::MAX] because the SQL includes LIMIT ?1 (acts as no-limit).
-      - Range-limited scans (legacy): pass DayRange.limit().
-  data_models:
-    PosterRow: { title, url, key, tex: Option<TextureHandle>, state: Pending|Ready|Failed }
-    DayRange: { Two|Seven|Fourteen|All } with .label() and .limit()
+        - drains completions in small batches per frame (poll_prefetch_done).
+        - lazily uploads textures when cards are about to be shown (try_lazy_upload_row) + prewarm_first_screen.
+
+phases:
+  boot_phase_enum: [Starting, CheckingNew, Caching, Ready]
+  phase_enum (optional UI status): [Prefetching, Ready]
+
+data_models:
+  PosterRow:
+    fields:
+      - title: String
+      - url: String
+      - key: String                # cache key from URL
+      - airing: Option<SystemTime> # from media_items.begins_at (UNIX seconds)
+      - year: Option<i32>          # from metadata_items.year
+      - channel: Option<String>    # parsed from media_items.extra_data (at:channelCallSign/title)
+      - path: Option<PathBuf>      # cached image path on disk
+      - tex: Option<TextureHandle> # GPU texture (UI thread only)
+      - state: PosterState { Pending|Cached|Ready|Failed }
+  DayRange: { Two|Seven|Fourteen|All } with .limit() for view window.
+
+db_fields_and_sql:
+  - Use JOIN between metadata_items (movies: metadata_type=1) and media_items.
+  - Selected columns: m.title, m.user_thumb_url (or m.thumb_url), mi.begins_at, m.year, mi.extra_data
+  - ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
+  - LIMIT ?1 → pass [i64::MAX] to emulate no-limit during warm-up.
+  - Channel is extracted from media_items.extra_data JSON-like string keys:
+      * "at:channelCallSign" preferred
+      * fallback "at:channelTitle"
+    If missing, fallback to host-based heuristic from URL (best-effort).
 
 ui:
   framework: egui (eframe).
   screens:
     splash_prep:
-      shows: static title "Poster preparation…", spinner, latest status line, cache path.
-      purpose: calm, non-blocking splash while warm-up runs.
+      - shows: static title "Poster preparation…", spinner, status line, cache path.
+      - calm, non-blocking while warm-up runs.
     main_grid:
-      panels:
-        top_bar:
-          - Day window selector (2d/7d/14d/All) – changes view only (no rescans).
-          - (Future) genre filter and sort controls.
-        grid:
-          - Card size ~140x210 poster + title text region.
-          - Early grid allowed (SHOW_GRID_EARLY=true) once MIN_READY_BEFORE_GRID posters ready.
-        right_panel (future):
-          - Selected card details, bigger poster, description, genres, IMDb rating.
-  performance_smoothing:
-    - request_repaint every frame.
-    - MAX_DONE_PER_FRAME caps how many completed posters are processed per frame (avoid long stalls).
-    - Small sleeps/yields inside heavy loops (copy_with_progress, warm-up loop) to share time slice.
+      top_bar:
+        - Day window selector (2d/7d/14d/All) – view-only (no rescans).
+        - (Future) genre filter and sort controls.
+      grid:
+        - Grouped by day using begins_at bucket; divider label "Friday 3rd Sep".
+        - Card shows:
+            Title (YYYY)
+            <Channel>
+            <HH:MM>   # UTC time for now
+        - Early grid allowed (SHOW_GRID_EARLY=true) once MIN_READY_BEFORE_GRID posters are ready.
+      performance:
+        - Lazy texture upload during layout (try_lazy_upload_row) with MAX_UPLOADS_PER_FRAME cap.
+        - prewarm_first_screen uploads some textures right after prep completes.
+        - progress and completion batching via MAX_DONE_PER_FRAME to maintain frame pacing.
 
-key_functions:
-  # warm-up pipeline
-  - start_poster_prep(self):
-      summary: Launches background prep: copy DB if needed; query titles/poster URLs; ensure cache; return manifest.
-  - poll_prep(self, ctx):
-      summary: Polls PrepMsg channel; updates splash text; on Done, populates rows and calls start_prefetch().
+caching:
+  dir: .pex_cache under repo (see cache::cache_dir()).
+  policy:
+    - Prefer cached resized JPEG (RESIZE_MAX_W x quality).
+    - If missing, download resize; fallback to original if resize fails.
+    - Warm-up ensures presence-on-disk; UI maps cache → GPU lazily.
 
-  # prefetch/textures
-  - start_prefetch(self, ctx):
-      summary: Spawns N workers; for each row sends (idx,key,url,cached_path); builds textures on completion.
-  - poll_prefetch_done(self, ctx):
-      summary: Drains up to MAX_DONE_PER_FRAME; sets row.tex/Ready/Failed; updates progress/status.
-
-  # (legacy/aux)
-  - start_db_scan(self): older async loader (retained but optional); now warm-up provides the rows.
-  - load_rows_via_plex_join(self, db_path, limit): small blocking helper; unused in normal path.
+configuration:
+  file: config.json (load_config()).
+  keys: plex_db_local (required), plex_db_source (optional for daily copy).
 
 constants_and_tunables:
   WORKER_COUNT: 8
@@ -107,23 +110,25 @@ constants_and_tunables:
   MIN_READY_BEFORE_GRID: 24
   STATUS_EMIT_EVERY_MS: 120
   MAX_DONE_PER_FRAME: 12
+  MAX_UPLOADS_PER_FRAME: 4
+  PREWARM_UPLOADS: 12
   DIAG_FAKE_STARTUP: false
 
 known_gotchas:
   - SQL contains "LIMIT ?1"; always pass a parameter (use [i64::MAX] in warm-up to emulate no-limit).
-  - When adding new DayRange values/methods, ensure it derives Copy + Eq + PartialEq if used in egui selectable_value.
-  - Keep GPU texture creation on UI thread via PexApp::load_texture_from_path.
+  - Channel: `media_items.extra_data` is a JSON-like string; we use a tiny substring parser to avoid serde_json in hot path.
+  - All GPU texture creation must occur on the UI thread.
+  - Keep prefetch/downloads off the UI thread. Do not block the UI with file or network I/O.
+  - Dead code cleanup: old `StartupMsg` and unused `Phase` variants removed; avoid reintroducing them.
 
 near_term_todos:
-  - Right-side detail panel implementation (selected card data, poster, metadata).
-  - Grouping in grid by day-of-week with horizontal dividers (needs begins_at or airing timestamp and grouping pass).
-  - Genre filter infrastructure (ingest genres from DB, attach to PosterRow).
+  - Right-side detail panel: selected card details, larger poster, description (metadata_items.summary), genres (tags_genre), IMDb.
+  - Genre filter: ingest `tags_genre` and filter UI.
   - Filesystem cross-reference:
-      plan:
-        - configurable library root(s).
-        - normalize titles/year (e.g., "Movie (Year)") → match against filenames.
-        - mark PosterRow as owned (dim card or hide via filter).
-  - Optional: remove start_db_scan and Phase plumbing if warm-up fully replaces it.
+      * configurable library roots
+      * normalize titles/year (e.g., "Movie (Year)") → match against filenames
+      * mark PosterRow as owned (dim card or hide via filter)
+  - (Optional) Persist small manifest (title/year/key/channel/begins_at) to disk to skip DB open on cold boot.
 
 dev_guidelines:
   code_changes:
@@ -132,7 +137,7 @@ dev_guidelines:
   robustness:
     - Never block UI thread with file/network I/O.
     - Throttle status updates to ~8/s (STATUS_EMIT_EVERY_MS).
-    - Use small sleeps/yields in long loops to keep system responsive.
+    - Small sleeps/yields inside heavy loops (copy_with_progress, warm-up loop) to share time slice.
 
 build_run:
   command: cargo run
