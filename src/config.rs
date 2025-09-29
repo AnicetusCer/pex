@@ -1,12 +1,24 @@
 use std::{fs, path::PathBuf};
 
-use tracing::info;
+use serde::Deserialize;
+use tracing::{info, warn};
+
+#[derive(Clone, Debug, Default)]
+pub struct UiOverrides {
+    pub hide_owned: Option<bool>,
+    pub dim_owned: Option<bool>,
+    pub schedule_window: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub plex_db_local: Option<String>,
     pub cache_dir: Option<String>,
     pub plex_db_source: Option<String>,
+    pub library_roots: Vec<String>,
+    pub hide_owned_by_default: bool,
+    pub dim_owned_by_default: bool,
+    pub ui: UiOverrides,
 }
 
 impl Default for AppConfig {
@@ -15,43 +27,72 @@ impl Default for AppConfig {
             plex_db_local: Some("plex_epg.db".into()),
             cache_dir: None,
             plex_db_source: None,
+            library_roots: Vec::new(),
+            hide_owned_by_default: false,
+            dim_owned_by_default: false,
+            ui: UiOverrides::default(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUi {
+    hide_owned: Option<bool>,
+    dim_owned: Option<bool>,
+    schedule_window: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+    plex_db_local: Option<String>,
+    cache_dir: Option<String>,
+    plex_db_source: Option<String>,
+    library_roots: Option<Vec<String>>,
+    hide_owned_by_default: Option<bool>,
+    dim_owned_by_default: Option<bool>,
+    ui: Option<RawUi>,
 }
 
 pub fn load_config() -> AppConfig {
     let cfg_path = PathBuf::from("config.json");
-    if let Ok(s) = fs::read_to_string(&cfg_path) {
-        // naive parsing (expects flat keys; we avoid pulling serde here)
-        let mut cfg = AppConfig::default();
-        if s.contains("\"plex_db_local\"") {
-            if let Some(v) = extract_string(&s, "plex_db_local") { cfg.plex_db_local = Some(v); }
-        }
-        if s.contains("\"cache_dir\"") {
-            if let Some(v) = extract_string(&s, "cache_dir") { cfg.cache_dir = Some(v); }
-        }
-                if s.contains("\"plex_db_source\"") {
-            if let Some(v) = extract_string(&s, "plex_db_source") {
-                cfg.plex_db_source = Some(v);
-            }
-        }
-        info!("Loaded config from config.json");
-        cfg
-    } else {
-        info!("No config.json found; using defaults");
-        AppConfig::default()
-    }
-}
+    let mut cfg = AppConfig::default();
 
-fn extract_string(src: &str, key: &str) -> Option<String> {
-    // extremely small helper; not robust JSON, just for this file
-    let needle = format!("\"{}\"", key);
-    let idx = src.find(&needle)?;
-    let rest = &src[idx + needle.len()..];
-    let colon = rest.find(':')?;
-    let rest = &rest[colon+1..];
-    let first_quote = rest.find('"')?;
-    let rest = &rest[first_quote+1..];
-    let second_quote = rest.find('"')?;
-    Some(rest[..second_quote].replace("\\\\", "\\").replace("\\\"", "\""))
+    match fs::read_to_string(&cfg_path) {
+        Ok(raw) => match serde_json::from_str::<RawConfig>(&raw) {
+            Ok(parsed) => {
+                if parsed.plex_db_local.is_some() {
+                    cfg.plex_db_local = parsed.plex_db_local;
+                }
+                if parsed.cache_dir.is_some() {
+                    cfg.cache_dir = parsed.cache_dir;
+                }
+                if parsed.plex_db_source.is_some() {
+                    cfg.plex_db_source = parsed.plex_db_source;
+                }
+                if let Some(list) = parsed.library_roots {
+                    cfg.library_roots = list;
+                }
+                if let Some(flag) = parsed.hide_owned_by_default {
+                    cfg.hide_owned_by_default = flag;
+                }
+                if let Some(flag) = parsed.dim_owned_by_default {
+                    cfg.dim_owned_by_default = flag;
+                }
+                if let Some(ui) = parsed.ui {
+                    cfg.ui.hide_owned = ui.hide_owned;
+                    cfg.ui.dim_owned = ui.dim_owned;
+                    cfg.ui.schedule_window = ui.schedule_window;
+                }
+                info!("Loaded config from {}", cfg_path.display());
+            }
+            Err(err) => {
+                warn!("Failed to parse config.json ({}). Using defaults.", err);
+            }
+        },
+        Err(_) => {
+            info!("No config.json found; using defaults");
+        }
+    }
+
+    cfg
 }

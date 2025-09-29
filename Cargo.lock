@@ -3173,6 +3173,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

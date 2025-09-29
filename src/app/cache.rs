@@ -50,17 +50,25 @@ pub fn basename_key(url: &str) -> String {
 /// or a raw rgba file we now write as: 8-byte header (u32 LE width, u32 LE height) + bytes.
 pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String> {
     let p = Path::new(path);
-    if !p.exists() { return Err("not found".into()); }
-    if let Some(ext) = p.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()) {
+    if !p.exists() {
+        return Err("not found".into());
+    }
+    if let Some(ext) = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    {
         if ext == "rgba" {
             let mut f = fs::File::open(p).map_err(|e| format!("open rgba: {e}"))?;
             let mut header = [0u8; 8];
-            f.read_exact(&mut header).map_err(|e| format!("read header: {e}"))?;
-            let w = u32::from_le_bytes([header[0],header[1],header[2],header[3]]);
-            let h = u32::from_le_bytes([header[4],header[5],header[6],header[7]]);
+            f.read_exact(&mut header)
+                .map_err(|e| format!("read header: {e}"))?;
+            let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+            let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| format!("read body: {e}"))?;
-            return Ok((w,h,buf));
+            f.read_to_end(&mut buf)
+                .map_err(|e| format!("read body: {e}"))?;
+            return Ok((w, h, buf));
         }
     }
     // Fallback: decode via image crate
@@ -70,9 +78,9 @@ pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String>
         .map_err(|e| format!("guess format {}: {e}", p.display()))?
         .decode()
         .map_err(|e| format!("decode {}: {e}", p.display()))?;
-    let (w,h) = img.dimensions();
+    let (w, h) = img.dimensions();
     let rgba = img.to_rgba8().to_vec();
-    Ok((w,h,rgba))
+    Ok((w, h, rgba))
 }
 
 pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
@@ -87,7 +95,9 @@ pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
     ];
     for c in candidates {
         let p = base.join(c);
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
     None
 }
@@ -99,32 +109,44 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = client.get(url).send().map_err(|e| format!("GET {url}: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("GET {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {} for {url}", resp.status()));
     }
-    let body = resp.bytes().map_err(|e| format!("read body: {e}"))?.to_vec();
+    let body = resp
+        .bytes()
+        .map_err(|e| format!("read body: {e}"))?
+        .to_vec();
 
     // Try decode with image crate
     match image::load_from_memory(&body) {
         Ok(img) => {
             let out = cache_dir().join(format!("{key}.png"));
-            let mut f = fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
+            let mut f =
+                fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             let mut png_bytes: Vec<u8> = Vec::new();
             img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
                 .map_err(|e| format!("encode png: {e}"))?;
-            f.write_all(&png_bytes).map_err(|e| format!("write {}: {e}", out.display()))?;
+            f.write_all(&png_bytes)
+                .map_err(|e| format!("write {}: {e}", out.display()))?;
             Ok(out)
         }
         Err(e) => {
             warn!("image decode failed for {url}: {e}; storing raw");
             // Store as rgba with w/h header if we really fail (rare)
             let out = cache_dir().join(format!("{key}.rgba"));
-            let mut f = fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
+            let mut f =
+                fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             // We don't know w/h here; write zeros so loader will reject gracefully
-            f.write_all(&0u32.to_le_bytes()).map_err(|e| format!("write hdr: {e}"))?;
-            f.write_all(&0u32.to_le_bytes()).map_err(|e| format!("write hdr: {e}"))?;
-            f.write_all(&body).map_err(|e| format!("write {}: {e}", out.display()))?;
+            f.write_all(&0u32.to_le_bytes())
+                .map_err(|e| format!("write hdr: {e}"))?;
+            f.write_all(&0u32.to_le_bytes())
+                .map_err(|e| format!("write hdr: {e}"))?;
+            f.write_all(&body)
+                .map_err(|e| format!("write {}: {e}", out.display()))?;
             Ok(out)
         }
     }
@@ -142,9 +164,9 @@ pub fn download_and_store_resized(
     max_width: u32,
     quality: u8,
 ) -> Result<std::path::PathBuf, String> {
-    use std::{fs, io::Write};
-    use image::{DynamicImage, imageops::FilterType};
+    use image::{imageops::FilterType, DynamicImage};
     use reqwest::blocking::Client;
+    use std::{fs, io::Write};
 
     let dest = cache_dir().join(format!("{key}.jpg"));
 
@@ -178,7 +200,9 @@ pub fn download_and_store_resized(
     // Resize if needed, keep aspect
     let (w, h) = img.dimensions();
     let out: DynamicImage = if w > max_width {
-        let new_h = ((h as f32) * (max_width as f32 / w as f32)).round().max(1.0) as u32;
+        let new_h = ((h as f32) * (max_width as f32 / w as f32))
+            .round()
+            .max(1.0) as u32;
         img.resize_exact(max_width, new_h, FilterType::CatmullRom)
     } else {
         img
@@ -187,7 +211,8 @@ pub fn download_and_store_resized(
     // Encode JPEG with requested quality
     let mut jpeg_bytes: Vec<u8> = Vec::new();
     {
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, quality);
         encoder
             .encode_image(&out)
             .map_err(|e| format!("jpeg encode: {e}"))?;
@@ -200,7 +225,8 @@ pub fn download_and_store_resized(
     let tmp = dest.with_extension("jpg.part");
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("create tmp: {e}"))?;
-        f.write_all(&jpeg_bytes).map_err(|e| format!("write: {e}"))?;
+        f.write_all(&jpeg_bytes)
+            .map_err(|e| format!("write: {e}"))?;
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
@@ -216,8 +242,8 @@ pub fn download_and_store_resized_with_client(
     max_width: u32,
     quality: u8,
 ) -> Result<std::path::PathBuf, String> {
+    use image::{imageops::FilterType, DynamicImage};
     use std::{fs, io::Write};
-    use image::{DynamicImage, imageops::FilterType};
 
     let dest = cache_dir().join(format!("{key}.jpg"));
 
@@ -246,7 +272,9 @@ pub fn download_and_store_resized_with_client(
     // Resize if needed, keep aspect
     let (w, h) = img.dimensions();
     let out: DynamicImage = if w > max_width {
-        let new_h = ((h as f32) * (max_width as f32 / w as f32)).round().max(1.0) as u32;
+        let new_h = ((h as f32) * (max_width as f32 / w as f32))
+            .round()
+            .max(1.0) as u32;
         img.resize_exact(max_width, new_h, FilterType::CatmullRom)
     } else {
         img
@@ -269,7 +297,8 @@ pub fn download_and_store_resized_with_client(
     let tmp = dest.with_extension("jpg.part");
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("create tmp: {e}"))?;
-        f.write_all(&jpeg_bytes).map_err(|e| format!("write: {e}"))?;
+        f.write_all(&jpeg_bytes)
+            .map_err(|e| format!("write: {e}"))?;
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
