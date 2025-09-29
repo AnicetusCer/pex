@@ -38,6 +38,7 @@ SELECT
   m.user_thumb_url,
   mi.begins_at,
   m.year,
+  m.tags_genre,
   mi.extra_data
 FROM metadata_items m
 LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
@@ -54,6 +55,7 @@ SELECT
   m.thumb_url,
   mi.begins_at,
   m.year,
+  m.tags_genre,
   mi.extra_data
 FROM metadata_items m
 LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
@@ -63,6 +65,7 @@ WHERE m.metadata_type = 1
 ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
 LIMIT ?1
 "#;
+
 
 // ---- DB helpers ----
 fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
@@ -195,10 +198,11 @@ where
 #[derive(Debug)]
 enum PrepMsg {
     Info(String),
-    // (title, url, key, begins_at_opt, year_opt, channel_opt)
-    Done(Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>)>),
+    // (title, url, key, begins_at_opt, year_opt, tags_genre_opt, channel_opt)
+    Done(Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)>),
     Error(String),
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Prefetching,
@@ -225,18 +229,27 @@ enum PosterState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DayRange {
     Two,
+    Four,
+    Five,
     Seven,
     Fourteen,
-    All,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Time,
+    Title,
+    Channel,
+    Genre,
+}
 struct PosterRow {
     title: String,
     url: String,
     key: String,
     airing: Option<SystemTime>,
     year: Option<i32>,
-    channel: Option<String>,      // quick indicator from hostname for now
+    channel: Option<String>,
+    genres: Vec<String>,          // ← NEW
     path: Option<PathBuf>,
     tex: Option<TextureHandle>,
     state: PosterState,
@@ -252,6 +265,7 @@ impl PosterRow {
             airing,
             year: None,
             channel: None,
+            genres: Vec::new(),    // ← NEW
             path: None,
             tex: None,
             state: PosterState::Pending,
@@ -303,6 +317,31 @@ pub struct PexApp {
 
     work_tx: Option<Sender<(usize, String, String, Option<PathBuf>)>>, // (row_idx, key, url, cached_path)
     done_rx: Option<Receiver<PrefetchDone>>,
+
+    // --- control flags (UI only; not wired yet) ---
+    hide_owned: bool,
+    dim_owned: bool,
+
+    // search/filter/sort controls
+    search_query: String,
+
+    // channel filter
+    show_channel_filter_popup: bool,
+    selected_channels: std::collections::BTreeSet<String>,
+
+    // sorting
+    sort_key: SortKey,
+    sort_desc: bool,
+
+    // poster size (UI only for now)
+    poster_width_ui: f32, // e.g., card width in px
+
+    // concurrency (UI placeholder; not applied to workers yet)
+    worker_count_ui: usize,
+
+    // --- prefs autosave ---
+    prefs_dirty: bool,
+    prefs_last_write: Instant,
 }
 
 impl Default for PexApp {
@@ -337,6 +376,24 @@ impl Default for PexApp {
 
             work_tx: None,
             done_rx: None,
+
+            hide_owned: false,
+            dim_owned: false,
+
+            search_query: String::new(),
+
+            show_channel_filter_popup: false,
+            selected_channels: std::collections::BTreeSet::new(),
+
+            sort_key: SortKey::Time,
+            sort_desc: false,
+
+            poster_width_ui: 140.0, // matches current card_w
+            worker_count_ui: WORKER_COUNT, // show the current worker count
+
+            prefs_dirty: false,
+            prefs_last_write: Instant::now(),
+
         }
     }
 }
@@ -345,11 +402,158 @@ impl Default for PexApp {
 impl PexApp {
     // ----- tiny helpers ----
 
-/// Derive a “small” variant cache key from the base key (separate file entry).
-fn small_key(base: &str) -> String {
-    format!("{base}__s")
+    /// Derive a “small” variant cache key from the base key (separate file entry).
+    fn small_key(base: &str) -> String {
+        format!("{base}__s")
+    }
+
+    fn mark_dirty(&mut self) {
+    self.prefs_dirty = true;
 }
 
+fn maybe_save_prefs(&mut self) {
+    // debounce a bit to avoid writing every frame
+    if self.prefs_dirty && self.prefs_last_write.elapsed() >= Duration::from_millis(300) {
+        self.save_prefs();
+        self.prefs_dirty = false;
+        self.prefs_last_write = Instant::now();
+    }
+}
+
+}
+
+// Path to UI prefs file (module scope)
+fn prefs_path() -> PathBuf {
+    cache_dir().join("ui_prefs.txt")
+}
+
+
+// --- enum <-> str helpers (no serde needed) ---
+impl DayRange {
+    fn as_str(self) -> &'static str {
+        match self {
+            DayRange::Two => "2",
+            DayRange::Four => "4",
+            DayRange::Five => "5",
+            DayRange::Seven => "7",
+            DayRange::Fourteen => "14",
+        }
+    }
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "2" => Some(DayRange::Two),
+            "4" => Some(DayRange::Four),
+            "5" => Some(DayRange::Five),
+            "7" => Some(DayRange::Seven),
+            "14" => Some(DayRange::Fourteen),
+            _ => None,
+        }
+    }
+}
+
+impl SortKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            SortKey::Time => "time",
+            SortKey::Title => "title",
+            SortKey::Channel => "channel",
+            SortKey::Genre => "genre",
+        }
+    }
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "time" => Some(SortKey::Time),
+            "title" => Some(SortKey::Title),
+            "channel" => Some(SortKey::Channel),
+            "genre" => Some(SortKey::Genre),
+            _ => None,
+        }
+    }
+}
+
+impl PexApp {
+    fn load_prefs(&mut self) {
+        let path = prefs_path();
+        let Ok(txt) = fs::read_to_string(&path) else { return; };
+
+        for line in txt.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            let Some((k, v)) = line.split_once('=') else { continue; };
+            let k = k.trim();
+            let v = v.trim();
+
+            match k {
+                "day_range" => if let Some(dr) = DayRange::from_str(v) { self.current_range = dr; },
+                "search" => self.search_query = v.to_string(),
+                "sort_key" => if let Some(sk) = SortKey::from_str(v) { self.sort_key = sk; },
+                "sort_desc" => self.sort_desc = matches!(v, "1" | "true" | "yes"),
+                "poster_w" => if let Ok(n) = v.parse::<f32>() { self.poster_width_ui = n.clamp(120.0, 220.0); },
+                "workers" => if let Ok(n) = v.parse::<usize>() { self.worker_count_ui = n.clamp(1, 32); },
+                "hide_owned" => self.hide_owned = matches!(v, "1" | "true" | "yes"),
+                "dim_owned" => self.dim_owned = matches!(v, "1" | "true" | "yes"),
+                "channels" => {
+                    self.selected_channels.clear();
+                    for ch in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        self.selected_channels.insert(ch.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_prefs(&self) {
+        let path = prefs_path();
+        let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
+
+        // CSV for channels; escape commas minimally by replacing with a space
+        let channels_csv = if self.selected_channels.is_empty() {
+            String::new()
+        } else {
+            self.selected_channels
+                .iter()
+                .map(|s| s.replace(',', " "))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let txt = format!(
+            "# pex ui prefs\n\
+             day_range={}\n\
+             search={}\n\
+             sort_key={}\n\
+             sort_desc={}\n\
+             poster_w={:.1}\n\
+             workers={}\n\
+             hide_owned={}\n\
+             dim_owned={}\n\
+             channels={}\n",
+            self.current_range.as_str(),
+            self.search_query,
+            self.sort_key.as_str(),
+            if self.sort_desc { "1" } else { "0" },
+            self.poster_width_ui,
+            self.worker_count_ui,
+            if self.hide_owned { "1" } else { "0" },
+            if self.dim_owned { "1" } else { "0" },
+            channels_csv,
+        );
+
+        let _ = fs::write(path, txt);
+    }
+
+fn parse_genres(tags: &str) -> Vec<String> {
+    let mut v: Vec<String> = tags
+        .split('|')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    v.sort();      // stable display/sort
+    v.dedup();
+    v
+}
 
 fn day_bucket(ts: SystemTime) -> i64 {
     let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
@@ -457,9 +661,10 @@ fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
     let now_bucket = Self::day_bucket(SystemTime::now());
     let max_bucket_opt: Option<i64> = match self.current_range {
         DayRange::Two => Some(now_bucket + 2),
+        DayRange::Four => Some(now_bucket + 4),
+        DayRange::Five => Some(now_bucket + 5),
         DayRange::Seven => Some(now_bucket + 7),
         DayRange::Fourteen => Some(now_bucket + 14),
-        DayRange::All => None,
     };
 
     let targets: Vec<usize> = self.rows.iter().enumerate()
@@ -564,10 +769,10 @@ fn start_poster_prep(&mut self) {
 
         if DIAG_FAKE_STARTUP {
             send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
-            let fake: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>)> = vec![
-                ("Blade Runner".into(), "https://example.com/a.jpg".into(), url_to_cache_key("https://example.com/a.jpg"), None, Some(1982), Some("ITV2".into())),
-                ("Alien".into(),        "https://example.com/b.jpg".into(), url_to_cache_key("https://example.com/b.jpg"), None, Some(1979), Some("ITV2".into())),
-                ("Arrival".into(),      "https://example.com/c.jpg".into(), url_to_cache_key("https://example.com/c.jpg"), None, Some(2016), Some("ITV2".into())),
+            let fake: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = vec![
+                ("Blade Runner".into(), "https://example.com/a.jpg".into(), url_to_cache_key("https://example.com/a.jpg"), None, Some(1982), Some("Sci-Fi|Thriller".into()), Some("ITV2".into())),
+                ("Alien".into(),        "https://example.com/b.jpg".into(), url_to_cache_key("https://example.com/b.jpg"), None, Some(1979), Some("Sci-Fi|Horror".into()),   Some("ITV2".into())),
+                ("Arrival".into(),      "https://example.com/c.jpg".into(), url_to_cache_key("https://example.com/c.jpg"), None, Some(2016), Some("Sci-Fi|Drama".into()),    Some("ITV2".into())),
             ];
             send(PrepMsg::Done(fake));
             return;
@@ -633,22 +838,23 @@ fn start_poster_prep(&mut self) {
             Err(e) => { send(PrepMsg::Error(format!("query failed: {e}"))); return; }
         };
 
-        let mut list: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>)> = Vec::new();
+        let mut list: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = Vec::new();
         let mut last_emit = Instant::now();
 
         while let Ok(Some(row)) = q.next() {
-            let title: Option<String>  = row.get(0).ok().flatten();
-            let url:   Option<String>  = row.get(1).ok().flatten();
-            let begins:Option<i64>     = row.get(2).ok().flatten();
-            let year:  Option<i32>     = row.get(3).ok().flatten();
-            let extra: Option<String>  = row.get(4).ok().flatten();
+            let title:  Option<String> = row.get(0).ok().flatten();
+            let url:    Option<String> = row.get(1).ok().flatten();
+            let begins: Option<i64>    = row.get(2).ok().flatten();
+            let year:   Option<i32>    = row.get(3).ok().flatten();
+            let tags:   Option<String> = row.get(4).ok().flatten(); // m.tags_genre
+            let extra:  Option<String> = row.get(5).ok().flatten(); // mi.extra_data
 
             if let (Some(t), Some(u)) = (title, url) {
                 let tt = t.trim();
                 if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
                     let key = url_to_cache_key(&u);
                     let ch = extra.as_deref().and_then(parse_channel_from_extra);
-                    list.push((tt.to_owned(), u, key, begins, year, ch));
+                    list.push((tt.to_owned(), u, key, begins, year, tags, ch));
                     if last_emit.elapsed() >= Duration::from_millis(600) {
                         send(PrepMsg::Info(format!("Found {} posters…", list.len())));
                         last_emit = Instant::now();
@@ -690,23 +896,28 @@ fn poll_prep(&mut self, ctx: &eg::Context) {
                 Ok(PrepMsg::Done(list)) => {
                     self.rows = list.into_iter()
                         // (title, url, base_key, begins_opt, year_opt, channel_opt)
-                        .map(|(t, u, base_k, ts_opt, year_opt, ch_opt)| {
+                        .map(|(t, u, base_k, ts_opt, year_opt, tags_opt, ch_opt)| {
                             let airing  = ts_opt.map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64));
                             let channel = ch_opt.or_else(|| Self::host_from_url(&u));
                             let small_k = Self::small_key(&base_k);
-                            let path    = find_any_by_key(&small_k); // record cached file path once
-                            // compute state BEFORE moving `path` into the struct
-                            let state = if path.is_some() { PosterState::Cached } else { PosterState::Pending };
+                            let path    = find_any_by_key(&small_k);
+                            let state   = if path.is_some() { PosterState::Cached } else { PosterState::Pending };
+                            let genres = tags_opt
+                                .as_deref()
+                                .map(Self::parse_genres)
+                                .unwrap_or_default();
+
                             PosterRow {
                                 title: t,
                                 url: u,
-                                key: small_k,    // use small variant key everywhere
+                                key: small_k,
                                 airing,
                                 year: year_opt,
                                 channel,
-                                path,            // move here
+                                genres,      // now in scope
+                                path,
                                 tex: None,
-                                state,           // and use the precomputed state
+                                state,
                             }
                         })
                         .collect();
@@ -834,7 +1045,7 @@ fn start_prefetch(&mut self, ctx: &eg::Context) {
         }
     };
 
-    for _ in 0..WORKER_COUNT {
+    for _ in 0..self.worker_count_ui {
         let work_rx = std::sync::Arc::clone(&work_rx);
         let done_tx = done_tx.clone();
         let client = std::sync::Arc::clone(&client);
@@ -937,6 +1148,11 @@ fn poll_prefetch_done(&mut self, ctx: &eg::Context) {
         ctx.request_repaint();
     }
 }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_prefs();
+    }
+
 }
 
 // ========== App impl ==========
@@ -947,6 +1163,8 @@ fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
 
     // First frame
     if !self.did_init {
+        self.load_prefs();
+        self.prefs_dirty = false;
         self.did_init = true;
         self.loading_message = "Starting…".into();
         self.heartbeat_last = Instant::now();
@@ -997,20 +1215,147 @@ fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
     eg::CentralPanel::default().show(ctx, |ui| {
         // Top bar: Day window selector (view-only)
         ui.horizontal(|ui| {
-            ui.label("Window:");
-            let mut changed = false;
+            // Day range dropdown
+            let mut changed_day = false;
+            eg::ComboBox::from_id_source("day_window_combo")
+                .selected_text(match self.current_range {
+                    DayRange::Two => "2 days",
+                    DayRange::Four => "4 days",
+                    DayRange::Five => "5 days",
+                    DayRange::Seven => "7 days",
+                    DayRange::Fourteen => "14 days",
+                })
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut self.current_range, DayRange::Two, "2 days").clicked() { changed_day = true; }
+                    if ui.selectable_value(&mut self.current_range, DayRange::Four, "4 days").clicked() { changed_day = true; }
+                    if ui.selectable_value(&mut self.current_range, DayRange::Five, "5 days").clicked() { changed_day = true; }
+                    if ui.selectable_value(&mut self.current_range, DayRange::Seven, "7 days").clicked() { changed_day = true; }
+                    if ui.selectable_value(&mut self.current_range, DayRange::Fourteen, "14 days").clicked() { changed_day = true; }
+                });
+            if changed_day { self.mark_dirty(); }
 
-            let mut pick = self.current_range;
-            changed |= ui.selectable_value(&mut pick, DayRange::Two, "2d").clicked();
-            changed |= ui.selectable_value(&mut pick, DayRange::Seven, "7d").clicked();
-            changed |= ui.selectable_value(&mut pick, DayRange::Fourteen, "14d").clicked();
-            changed |= ui.selectable_value(&mut pick, DayRange::All, "All").clicked();
+            ui.separator();
 
-            if changed && pick != self.current_range {
-                self.current_range = pick;
+            // Search field (UI only)
+            let resp = ui.add(
+                eg::TextEdit::singleline(&mut self.search_query)
+                    .hint_text("Title…")
+                    .desired_width(160.0),
+            );
+            if resp.changed() { self.mark_dirty(); }
+            // (no filtering yet; this just captures text)
+
+            ui.separator();
+
+            // Channel filter popup trigger (UI only)
+            if ui.button("Channel filter…").clicked() {
+                self.show_channel_filter_popup = true;
             }
-        });
-        ui.separator();
+
+            ui.separator();
+
+            // Sort by (UI only)
+            let mut changed_sort = false;
+            eg::ComboBox::from_id_source("sort_by_combo")
+                .selected_text(match self.sort_key {
+                    SortKey::Time => "Sort: Time",
+                    SortKey::Title => "Sort: Title",
+                    SortKey::Channel => "Sort: Channel",
+                    SortKey::Genre => "Sort: Genre",
+                })
+                .show_ui(ui, |ui| {
+                    if ui.selectable_value(&mut self.sort_key, SortKey::Time, "Time").clicked() { changed_sort = true; }
+                    if ui.selectable_value(&mut self.sort_key, SortKey::Title, "Title").clicked() { changed_sort = true; }
+                    if ui.selectable_value(&mut self.sort_key, SortKey::Channel, "Channel").clicked() { changed_sort = true; }
+                    if ui.selectable_value(&mut self.sort_key, SortKey::Genre, "Genre").clicked() { changed_sort = true; }
+                });
+            if changed_sort { self.mark_dirty(); }
+
+            if ui.checkbox(&mut self.sort_desc, "Desc").changed() { self.mark_dirty(); }
+
+            ui.separator();
+
+            // Poster size (UI only)
+            ui.label("Poster:");
+            let w_resp = ui.add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px"));
+            if w_resp.changed() {
+                self.mark_dirty();
+            }
+            ui.separator();
+
+            // Workers (concurrency) — UI only; applies to next prefetch
+            ui.label("Workers:");
+            let workers_resp = ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32));
+            if workers_resp.changed() {
+                self.mark_dirty();
+            }
+            workers_resp.on_hover_text(
+                "How many posters download in parallel.\n\
+                Higher = faster on fast networks, but may cause server throttling \
+                or CPU/disk contention.\n\
+                Typical: 8–16.\n\
+                • Slow/remote server: 4–8\n\
+                • Fast LAN/NAS: 12–24\n\
+                Note: new value applies to the next prefetch session.",
+            );
+
+                if self.prefetch_started && self.loading_progress < 1.0 {
+                    ui.add_space(6.0);
+                    ui.label(
+                        eg::RichText::new("(new value applies to next prefetch)")
+                            .italics()
+                            .weak(),
+                    );
+                }
+
+                ui.separator();
+            }); // ← close ui.horizontal here ✅
+
+            if self.show_channel_filter_popup {
+            // collect unique channels
+            let mut channels: Vec<String> = self.rows
+                .iter()
+                .filter_map(|r| r.channel.clone())
+                .collect();
+            channels.sort();
+            channels.dedup();
+
+            // use a local open flag, not the field
+            let mut popup_open = self.show_channel_filter_popup;
+            let mut request_close = false;
+
+            eg::Window::new("Channel filter")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(260.0)
+                .open(&mut popup_open)
+                .show(ctx, |ui| {
+                    ui.label("Select channels to include (UI only; not filtering yet):");
+                    ui.separator();
+                    eg::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    for ch in channels.iter() {
+                        let mut checked = self.selected_channels.contains(ch);
+                        if ui.checkbox(&mut checked, ch).clicked() {
+                            if checked {
+                                self.selected_channels.insert(ch.clone());
+                            } else {
+                                self.selected_channels.remove(ch);
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                    });
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        request_close = true; // don't touch popup_open in the closure
+                    }
+                });
+
+            if request_close {
+                popup_open = false;
+            }
+            self.show_channel_filter_popup = popup_open;
+        }
 
         // Decide whether to show early splash
         let show_splash = !self.should_show_grid();
@@ -1050,17 +1395,42 @@ fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
         let now_bucket = Self::day_bucket(SystemTime::now());
         let max_bucket_opt: Option<i64> = match self.current_range {
             DayRange::Two => Some(now_bucket + 2),
+            DayRange::Four => Some(now_bucket + 4),
+            DayRange::Five => Some(now_bucket + 5),
             DayRange::Seven => Some(now_bucket + 7),
             DayRange::Fourteen => Some(now_bucket + 14),
-            DayRange::All => None,
         };
+
+// Precompute filter flags
+let query = self.search_query.to_lowercase();
+let use_query = !query.is_empty();
+let have_channel_filter = !self.selected_channels.is_empty();
 
         let mut filtered: Vec<(usize, i64)> = self.rows.iter().enumerate()
             .filter_map(|(idx, row)| {
+                // time window
                 let ts = row.airing?;
                 let b = Self::day_bucket(ts);
                 if b < now_bucket { return None; }
                 if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
+
+                // search by title (case-insensitive substring)
+                if use_query && !row.title.to_lowercase().contains(&query) {
+                    return None;
+                }
+
+                // include-only channel filter (if any are selected)
+                if have_channel_filter {
+                    if let Some(ch) = &row.channel {
+                        if !self.selected_channels.contains(ch) {
+                            return None;
+                        }
+                    } else {
+                        // row has no channel → exclude when filter active
+                        return None;
+                    }
+                }
+
                 Some((idx, b))
             })
             .collect();
@@ -1090,28 +1460,59 @@ fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
 
         // Layout parameters (once)
         let available = ui.available_width() - 8.0;
-        let card_w: f32 = 140.0;
-        let card_h: f32 = 140.0 * 1.5 + 36.0;
+        let card_w: f32 = self.poster_width_ui;        // ← from the slider
+        let card_h: f32 = card_w * 1.5 + 36.0;         // keep ratio + text space
         let cols = (available / card_w.max(1.0)).floor().max(1.0) as usize;
 
         // Bounded texture uploads per frame
         let mut uploads_left = MAX_UPLOADS_PER_FRAME;
 
         eg::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            for (bucket, idxs) in groups {
-                // Divider with day label
-                ui.add_space(8.0);
-                ui.separator();
-                let label = Self::format_day_label(bucket);
-                ui.heading(label);
-                ui.add_space(4.0);
+        for (bucket, mut idxs) in groups {
+            // ---- Intra-day sort according to control panel ----
+            match self.sort_key {
+                SortKey::Time => {
+                    idxs.sort_by_key(|&i| {
+                        self.rows[i].airing
+                            .map(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs())
+                            .unwrap_or(u64::MAX)
+                    });
+                }
+                SortKey::Title => {
+                    idxs.sort_by(|&a, &b| self.rows[a].title.cmp(&self.rows[b].title));
+                }
+                SortKey::Channel => {
+                    idxs.sort_by(|&a, &b| {
+                        let ca = self.rows[a].channel.as_deref().unwrap_or("");
+                        let cb = self.rows[b].channel.as_deref().unwrap_or("");
+                        ca.cmp(cb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                    });
+                }
+                SortKey::Genre => {
+                    idxs.sort_by(|&a, &b| {
+                        let ga = self.rows[a].genres.first().map(|s| s.as_str()).unwrap_or("");
+                        let gb = self.rows[b].genres.first().map(|s| s.as_str()).unwrap_or("");
+                        ga.cmp(gb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                    });
+                }
+            } // ← add this brace to close the match ✅
 
-                // A grid per day
-                eg::Grid::new(format!("grid_day_{bucket}"))
-                    .num_columns(cols)
-                    .spacing([8.0, 8.0])
-                    .show(ui, |ui| {
-                        for (i, idx) in idxs.into_iter().enumerate() {
+            if self.sort_desc {
+                idxs.reverse();
+            }
+
+            // Divider with day label
+            ui.add_space(8.0);
+            ui.separator();
+            let label = Self::format_day_label(bucket);
+            ui.heading(label);
+            ui.add_space(4.0);
+
+            eg::Grid::new(format!("grid_day_{bucket}"))
+                .num_columns(cols)
+                .spacing([8.0, 8.0])
+                .show(ui, |ui| {
+                    for (i, idx) in idxs.into_iter().enumerate() {
                             let (rect, _resp) = ui.allocate_exact_size(
                                 eg::vec2(card_w, card_h),
                                 eg::Sense::click(),
@@ -1182,6 +1583,7 @@ fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
             }
         });
     });
+    self.maybe_save_prefs();
 }
 
 }
