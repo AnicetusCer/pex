@@ -1,15 +1,138 @@
-use super::data::Film;
+// src/app/filters.rs
+use std::time::SystemTime;
 
-pub fn normalize_title(s: &str) -> String { s.trim().to_lowercase() }
+use super::{DayRange, SortKey};
 
-pub fn collect_genres(films: &[Film]) -> Vec<String> {
-    use std::collections::BTreeSet; let mut set=BTreeSet::new();
-    for f in films { if let Some(tags)=&f.tags_genre { for g in tags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) { set.insert(g.to_string()); } } }
-    set.into_iter().collect()
+impl crate::app::PexApp {
+    /// Build grouped indices for the grid: per-day buckets with intra-day sorting applied.
+    /// Returns Vec of (day_bucket, indices_for_that_day)
+    pub(crate) fn build_grouped_indices(&self) -> Vec<(i64, Vec<usize>)> {
+        let now_bucket = crate::app::utils::day_bucket(SystemTime::now());
+        let max_bucket_opt = max_bucket_for_range(self.current_range, now_bucket);
+
+        // Precompute filters
+        let query = self.search_query.to_lowercase();
+        let use_query = !query.is_empty();
+        let have_channel_filter = !self.selected_channels.is_empty();
+
+        // 1) Filter + attach day bucket
+        let mut filtered: Vec<(usize, i64)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                // time window
+                let ts = row.airing?;
+                let b = crate::app::utils::day_bucket(ts);
+                if b < now_bucket {
+                    return None;
+                }
+                if let Some(max_b) = max_bucket_opt {
+                    if b >= max_b {
+                        return None;
+                    }
+                }
+
+                // title search
+                if use_query && !row.title.to_lowercase().contains(&query) {
+                    return None;
+                }
+
+                // include-only channel filter
+                if have_channel_filter {
+                    if let Some(ch) = &row.channel {
+                        if !self.selected_channels.contains(ch) {
+                            return None;
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+
+                // hide owned
+                if self.hide_owned && row.owned {
+                    return None;
+                }
+
+                Some((idx, b))
+            })
+            .collect();
+
+        // 2) Sort by (day bucket, then title) for stable grouping
+        filtered.sort_by(|a, b| {
+            let (ai, ab) = a;
+            let (bi, bb) = b;
+            ab.cmp(bb)
+                .then_with(|| self.rows[*ai].title.cmp(&self.rows[*bi].title))
+        });
+
+        // 3) Group contiguous buckets
+        let mut groups: Vec<(i64, Vec<usize>)> = Vec::new();
+        let mut cur_key: Option<i64> = None;
+        for (idx, bucket) in filtered {
+            if cur_key != Some(bucket) {
+                groups.push((bucket, Vec::new()));
+                cur_key = Some(bucket);
+            }
+            if let Some((_, v)) = groups.last_mut() {
+                v.push(idx);
+            }
+        }
+
+        // 4) Intra-day sorting based on current SortKey (+ optional desc)
+        for (_bucket, idxs) in groups.iter_mut() {
+            self.sort_intra_day(idxs);
+            if self.sort_desc {
+                idxs.reverse();
+            }
+        }
+
+        groups
+    }
+
+    /// Sort a day's indices according to the current SortKey.
+    fn sort_intra_day(&self, idxs: &mut Vec<usize>) {
+        match self.sort_key {
+            SortKey::Time => {
+                idxs.sort_by_key(|&i| {
+                    self.rows[i]
+                        .airing
+                        .map(|ts| {
+                            ts.duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                        })
+                        .unwrap_or(u64::MAX)
+                });
+            }
+            SortKey::Title => idxs.sort_by(|&a, &b| self.rows[a].title.cmp(&self.rows[b].title)),
+            SortKey::Channel => {
+                idxs.sort_by(|&a, &b| {
+                    let ca = self.rows[a].channel.as_deref().unwrap_or("");
+                    let cb = self.rows[b].channel.as_deref().unwrap_or("");
+                    ca.cmp(cb)
+                        .then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                });
+            }
+            SortKey::Genre => {
+                idxs.sort_by(|&a, &b| {
+                    let ga = self.rows[a].genres.first().map(|s| s.as_str()).unwrap_or("");
+                    let gb = self.rows[b].genres.first().map(|s| s.as_str()).unwrap_or("");
+                    ga.cmp(gb)
+                        .then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                });
+            }
+        }
+    }
 }
 
-pub fn filtered_indices(films: &[Film], selected_genre: Option<&str>) -> Vec<usize> {
-    let mut out=Vec::new();
-    for (i,f) in films.iter().enumerate() { if let Some(g)=selected_genre { let ok=f.tags_genre.as_deref().map(|t| t.contains(g)).unwrap_or(false); if ok { out.push(i);} } else { out.push(i);} }
-    out
+/// Map the current DayRange to a max day-bucket (exclusive upper bound).
+fn max_bucket_for_range(range: DayRange, now_bucket: i64) -> Option<i64> {
+    match range {
+        DayRange::Two => Some(now_bucket + 2),
+        DayRange::Four => Some(now_bucket + 4),
+        DayRange::Five => Some(now_bucket + 5),
+        DayRange::Seven => Some(now_bucket + 7),
+        DayRange::Fourteen => Some(now_bucket + 14),
+    }
 }

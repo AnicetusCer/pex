@@ -8,7 +8,8 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::config::load_config;
 use crate::app::cache::url_to_cache_key;
-use crate::app::PrepMsg;
+use crate::app::{PrepMsg, PrepItem};   // <- use the re-export from app::types
+use eframe::egui as eg;                // <- gives us eg::Context
 
 // --- local SQL (newer plex uses user_thumb_url; older uses thumb_url) ---
 const SQL_POSTERS_USER_THUMB: &str = r#"
@@ -79,15 +80,13 @@ fn last_sync_marker_path(local_db: &str) -> String {
 }
 
 fn fresh_enough(marker_path: &str) -> io::Result<bool> {
-    match fs::metadata(marker_path) {
-        Ok(meta) => {
-            let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let age = SystemTime::now().duration_since(m).unwrap_or_default();
-            Ok(age.as_secs() < MIN_COPY_INTERVAL_HOURS * 3600)
-        }
-        Err(_) => Ok(false),
-    }
+    fs::metadata(marker_path).map_or(Ok(false), |meta| {
+        let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let age = SystemTime::now().duration_since(m).unwrap_or_default();
+        Ok(age.as_secs() < MIN_COPY_INTERVAL_HOURS * 3600)
+    })
 }
+
 
 fn touch_last_sync(marker_path: &str) -> io::Result<()> {
     fs::write(marker_path, b"ok")
@@ -135,7 +134,7 @@ where
         copied += n as u64;
 
         std::thread::yield_now();
-        if copied % (64 * 1024 * 1024) == 0 {
+        if copied.is_multiple_of(64 * 1024 * 1024) {
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -168,7 +167,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         if DIAG_FAKE_STARTUP {
             send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
-            let fake: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = vec![
+            let fake: Vec<PrepItem> = vec![
                 ("Blade Runner".into(), "https://example.com/a.jpg".into(), url_to_cache_key("https://example.com/a.jpg"), None, Some(1982), Some("Sci-Fi|Thriller".into()), Some("ITV2".into())),
                 ("Alien".into(),        "https://example.com/b.jpg".into(), url_to_cache_key("https://example.com/b.jpg"), None, Some(1979), Some("Sci-Fi|Horror".into()),   Some("ITV2".into())),
                 ("Arrival".into(),      "https://example.com/c.jpg".into(), url_to_cache_key("https://example.com/c.jpg"), None, Some(2016), Some("Sci-Fi|Drama".into()),    Some("ITV2".into())),
@@ -185,12 +184,12 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         };
 
         // Optional daily copy from source to local
-        if let Some(src_path) = cfg.plex_db_source.clone() {
-            match needs_db_update_daily(&src_path, &db_path) {
+        if let Some(src_path) = cfg.plex_db_source.as_deref() {
+            match needs_db_update_daily(src_path, &db_path) {
                 Ok(true) => {
                     send(PrepMsg::Info("Updating local EPG DB…".into()));
                     let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_with_progress(&src_path, &db_path, |_c,_t,_p,_mbps|{});
+                    let _ = copy_with_progress(src_path, &db_path, |_c,_t,_p,_mbps|{});
                     let _ = touch_last_sync(&marker);
                 }
                 Ok(false) => send(PrepMsg::Info("Local EPG DB fresh — skipping update.".into())),
@@ -238,7 +237,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             Err(e) => { send(PrepMsg::Error(format!("query failed: {e}"))); return; }
         };
 
-        let mut list: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = Vec::new();
+        let mut list: Vec<PrepItem> = Vec::new();
         let mut last_emit = Instant::now();
 
         while let Ok(Some(row)) = q.next() {
@@ -269,4 +268,120 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         send(PrepMsg::Done(list));
     });
+}
+
+impl crate::app::PexApp {
+    /// Phase 2+3: poster prep warm-up (one-shot on app launch)
+    pub(crate) fn start_poster_prep(&mut self) {
+        if self.prep_started { return; }
+        self.prep_started = true;
+        self.boot_phase = super::BootPhase::CheckingNew;
+        self.set_status("Checking for new posters…");
+        self.last_item_msg.clear();
+
+        let (tx, rx) = std::sync::mpsc::channel::<crate::app::PrepMsg>();
+        self.prep_rx = Some(rx);
+
+        // Hand off all the work to the prep module
+        crate::app::prep::spawn_poster_prep(tx);
+    }
+
+    pub(crate) fn poll_prep(&mut self, ctx: &eg::Context) {
+        use std::sync::mpsc::TryRecvError;
+        const MAX_MSGS: usize = 16;
+
+        let mut seen_any = false;
+        let mut processed = 0;
+
+        if let Some(rx) = self.prep_rx.take() {
+            let mut keep: Option<std::sync::mpsc::Receiver<crate::app::PrepMsg>> = Some(rx);
+
+            while let Some(r) = keep.as_ref() {
+                if processed >= MAX_MSGS { break; }
+                match r.try_recv() {
+                    Ok(crate::app::PrepMsg::Info(s)) => {
+                        self.set_status(s);
+                        if !matches!(self.boot_phase, crate::app::BootPhase::Caching | crate::app::BootPhase::Ready) {
+                            self.boot_phase = crate::app::BootPhase::Caching;
+                        }
+                        processed += 1;
+                        seen_any = true;
+                    }
+                    Ok(crate::app::PrepMsg::Done(list)) => {
+                        // Convert manifest rows into UI rows
+                        self.rows = list
+                            .into_iter()
+                            .map(|(t, u, base_k, ts_opt, year_opt, tags_opt, ch_opt)| {
+                                let airing  = ts_opt.map(|ts| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(ts as u64));
+                                let channel_raw = ch_opt.or_else(|| crate::app::utils::host_from_url(&u));
+                                let channel = channel_raw.map(|c| crate::app::utils::humanize_channel(&c));
+
+                                let small_k = Self::small_key(&base_k);
+                                let path    = crate::app::cache::find_any_by_key(&small_k);
+                                let state   = if path.is_some() { crate::app::PosterState::Cached } else { crate::app::PosterState::Pending };
+                                let genres  = tags_opt.as_deref().map(crate::app::utils::parse_genres).unwrap_or_default();
+
+                                crate::app::PosterRow {
+                                    title: t,
+                                    url: u,
+                                    key: small_k,
+                                    airing,
+                                    year: year_opt,
+                                    channel,
+                                    genres,
+                                    path,
+                                    tex: None,
+                                    state,
+                                    owned: false, // filled in by apply_owned_flags()
+                                }
+                            })
+                            .collect();
+
+                        // Warm-start: upload last hotset first (bounded)
+                        if let Some(hs) = self.last_hotset.take() {
+                            for row in &mut self.rows {
+                                if let Some(p) = hs.get(&row.key) {
+                                    if p.exists() {
+                                        row.path = Some(p.clone());
+                                        row.state = crate::app::PosterState::Cached;
+                                    }
+                                }
+                            }
+                            let mut uploaded = 0usize;
+                            for i in 0..self.rows.len() {
+                                if uploaded >= crate::app::PREWARM_UPLOADS { break; }
+                                let should_upload = self.rows.get(i).is_some_and(|row| hs.contains_key(&row.key));
+                                if should_upload && self.try_lazy_upload_row(ctx, i) {
+                                    uploaded += 1;
+                                }
+                            }
+                        }
+
+                        // Owned flags (if ready)
+                        self.apply_owned_flags();
+
+                        self.boot_phase = crate::app::BootPhase::Ready;
+                        self.set_status(format!("Poster prep complete. {} items ready.", self.rows.len()));
+
+                        self.start_prefetch(ctx);
+                        self.prewarm_first_screen(ctx);
+
+                        keep = None;
+                        seen_any = true;
+                    }
+                    Ok(crate::app::PrepMsg::Error(e)) => {
+                        self.set_status(format!("Poster prep error: {e}"));
+                        keep = None;
+                        seen_any = true;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => { keep = None; break; }
+                }
+            }
+
+            if let Some(rx_back) = keep { self.prep_rx = Some(rx_back); }
+        }
+
+        if seen_any { ctx.request_repaint(); }
+    }
 }

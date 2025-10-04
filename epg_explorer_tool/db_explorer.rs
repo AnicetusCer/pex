@@ -29,10 +29,11 @@ fn main() -> Result<()> {
     let config = load_config();
     let db_path = config
         .plex_db_local
-        .clone()
+        .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "plex_epg.db".to_string());
-    let conn = Connection::open(&db_path)?;
+        .unwrap_or("plex_epg.db");
+
+    let conn = Connection::open(db_path)?;
     let mut stmt = conn.prepare(&format!("SELECT * FROM {} LIMIT {}", table, limit))?;
 
     // Grab column names now so stmt borrow is released

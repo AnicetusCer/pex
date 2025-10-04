@@ -1,84 +1,146 @@
-# Updated: 2025-09-28
+version: 1
+updated: 2025-10-04
 
-db_tools:
-  explorer:
-    description: |
-      The `db_explorer.rs` binary is a utility for inspecting and exporting Plex’s SQLite database
-      (`plex_epg.db`). It lets you quickly view table structures, dump rows, and test queries before
-      wiring them into the app.
-    usage:
-      - Run:
-        powershell: |
-          cargo run --bin db_explorer <table_name> [limit]
-        examples:
-          - cargo run --bin db_explorer metadata_items 10
-          - cargo run --bin db_explorer media_items 10
-          - cargo run --bin db_explorer media_subscriptions 20
-      - `<table_name>`: table to inspect
-      - `[limit]`: optional row count
-    output:
-      - Table name
-      - Column names
-      - Row values (NULLs, text, numbers, JSON-ish fields, etc.)
-    notes:
-      - Uses `rusqlite` to query `plex_epg.db`.
-      - Useful for validating column presence and contents (e.g., `mi.extra_data`, `m.year`).
+human:
+  goals:
+    - Make it trivial to inspect the Plex EPG DB the GUI depends on.
+    - Quickly confirm which columns exist (newer vs older Plex variants).
+    - Export quick samples to text when debugging.
+  ways_of_working:
+    - Prefer minimal, readable SQL.
+    - Don’t mutate the DB: read-only queries only.
+    - Keep CLI usage short and consistent with the GUI config.
 
-database:
-  plex_epg:
-    key_tables:
-      metadata_items:
-        purpose: "Stores media (movies/shows/seasons/episodes)."
-        important_fields:
-          - id
-          - metadata_type (1=Movie, 2=Show, 3=Season, 4=Episode)
-          - title
-          - summary
-          - user_thumb_url (new) / thumb_url (legacy)
-          - originally_available_at
-          - year
-          - added_at
-          - tags_genre (pipe-delimited)
-      media_items:
-        purpose: "Carries airing info for EPG rows and the per-row channel metadata blob."
-        important_fields:
-          - metadata_item_id (FK → metadata_items.id)
-          - begins_at (UNIX seconds; schedule start)
-          - ends_at (UNIX seconds; schedule end)
-          - extra_data (JSON-like string)
-            keys_of_interest:
-              - "at:channelCallSign"  (preferred short channel)
-              - "at:channelTitle"     (often like '006 ITV2', we trim prefix)
-              - "at:channelThumb"     (logo URL)
-              - "at:channelVcn"       (virtual channel number)
-              - "at:gridKey"
-              - "at:protocol"
+purpose: >
+  Small CLI to dump rows/columns from any table in the Plex EPG sqlite.
+  Used to validate schemas (e.g., `user_thumb_url` vs `thumb_url`) and inspect
+  fields the app relies on (title, poster URL, begins_at, year, genres, channel).
 
-app_query_contract:
-  # What the main app expects to SELECT
-  select_columns:
-    - m.title
-    - m.user_thumb_url OR m.thumb_url (fallback)
-    - mi.begins_at
-    - m.year
-    - mi.extra_data
-  ordering:
-    - ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-  limit:
-    - The SQL uses "LIMIT ?1". For warm-up we pass [i64::MAX] to emulate no-limit.
-  channel_extraction:
-    - Parse from mi.extra_data:
-      * Prefer "at:channelCallSign"; fallback to "at:channelTitle".
-      * If channelTitle like "006 ITV2", trim leading vcn to "ITV2".
-    - If extra_data missing, fallback to URL hostname (best-effort).
+usage:
+  basic:
+    - cargo run --bin db_explorer metadata_items 10
+    - cargo run --bin db_explorer media_items 20 --out dump.txt
+  args:
+    - <table>: string (required)
+    - [limit]: number (default 5)
+    - [--out file]: optional path to write output
 
-workflow:
-  - Use `db_explorer` to confirm schema/columns.
-  - Validate that `mi.extra_data` is populated and contains the channel keys listed above.
-  - Once verified, ensure the main SQL selects `mi.extra_data` and parse channel accordingly.
-  - Re-run app and confirm cards display: "Title (YYYY)", channel, "HH:MM".
+db_resolution:
+  order:
+    - load_config().plex_db_local if non-empty
+    - else use "./plex_epg.db"
+  mirrors_gui:
+    - Same `config.json` as GUI (so both read the same DB).
 
-reminders:
-  - Always pass a parameter for LIMIT (?1), even if set to i64::MAX.
-  - Avoid blocking the UI; heavy I/O and networking must stay in background threads.
-  - We do not deserialize extra_data with serde_json in the hot path; a tiny substring parser suffices for the keys we need.
+field_reference:  # ← PRIME: where to find what the GUI needs
+  posters:
+    table: metadata_items AS m
+    columns:
+      - m.user_thumb_url (newer Plex) — may not exist on old DBs
+      - m.thumb_url      (fallback)
+    filter: m.metadata_type = 1 AND url column IS NOT NULL AND url <> ''
+    sql_examples:
+      - |
+        -- Prefer user_thumb_url (newer DBs)
+        SELECT m.title, m.user_thumb_url
+        FROM metadata_items m
+        WHERE m.metadata_type = 1
+          AND m.user_thumb_url IS NOT NULL
+          AND m.user_thumb_url <> ''
+        LIMIT 20;
+      - |
+        -- Fallback if user_thumb_url missing
+        SELECT m.title, m.thumb_url
+        FROM metadata_items m
+        WHERE m.metadata_type = 1
+          AND m.thumb_url IS NOT NULL
+          AND m.thumb_url <> ''
+        LIMIT 20;
+  schedule_time:
+    join:
+      - m.id ↔ mi.metadata_item_id
+    columns:
+      - mi.begins_at (Unix seconds)  # may be NULL; GUI falls back to added_at ordering in prep
+      - m.added_at   (as secondary ordering in prep SQL)
+    sql_example: |
+      SELECT m.title, mi.begins_at, m.added_at
+      FROM metadata_items m
+      LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
+      WHERE m.metadata_type = 1
+      ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
+      LIMIT 20;
+  year_and_genres:
+    table: metadata_items AS m
+    columns:
+      - m.year
+      - m.tags_genre  # pipe-separated: "Sci-Fi|Drama"
+    sql_example: |
+      SELECT m.title, m.year, m.tags_genre
+      FROM metadata_items m
+      WHERE m.metadata_type = 1
+      LIMIT 20;
+  channel_from_extra_data:
+    source:
+      - media_items.extra_data (opaque string with key/value pairs)
+    keys:
+      - "at:channelCallSign"
+      - "at:channelTitle"
+    parsing:
+      - Extract value between quotes for the given key; if there’s a leading code and a space,
+        keep the right side (e.g., "001 BBC One" → "BBC One").
+    sql_example: |
+      SELECT mi.extra_data
+      FROM media_items mi
+      WHERE mi.extra_data IS NOT NULL AND mi.extra_data <> ''
+      LIMIT 5;
+
+db_inspection_workflows:
+  confirm_poster_column:
+    steps:
+      - Try `SELECT user_thumb_url FROM metadata_items LIMIT 1;`
+      - If error/NULLs, fall back to `thumb_url`.
+  channel_field_presence:
+    steps:
+      - `SELECT COUNT(*) FROM media_items WHERE extra_data LIKE '%"at:channelCallSign"%';`
+      - If 0, try `"at:channelTitle"`.
+  sanity_check_time_range:
+    steps:
+      - `SELECT MIN(mi.begins_at), MAX(mi.begins_at) FROM media_items mi;`
+      - Inspect sample titles around "now":
+        - |
+          SELECT m.title, mi.begins_at
+          FROM metadata_items m
+          JOIN media_items mi ON mi.metadata_item_id = m.id
+          WHERE mi.begins_at BETWEEN strftime('%s','now') - 86400 AND strftime('%s','now') + 86400
+          LIMIT 50;
+
+ties_to_gui:
+  prep.rs alignment:
+    - Uses the same joins/filters as above.
+    - Prefers `user_thumb_url`, falls back to `thumb_url`.
+    - Orders by `COALESCE(mi.begins_at, m.added_at)`.
+    - Parses `mi.extra_data` for channel.
+    - Dedupes titles (case-insensitive) before sending `PrepMsg::Done(Vec<PrepItem>)`.
+  mod.rs expectations:
+    - Receives `PrepItem` and derives `small_key = base_cache_key + "__s"`.
+    - Calls `find_any_by_key(small_key)` to reattach cached path if present.
+    - Prefetches missing small posters; UI does lazy texture upload.
+
+export_format:
+  stdout:
+    - Header: `--- Table: <table> ---`
+    - Columns: `Columns: ["c1", "c2", ...]`
+    - Rows: Rust Vec-format per row, with typed values:
+      - NULL, integer, real, UTF-8 text, "<BLOB>"
+  file:
+    - Use `--out path` to write the same text to a file.
+
+safety_notes:
+  - Read-only access: do not issue UPDATE/DELETE; the tool never writes to the DB.
+  - Beware of tables with large blobs; limit your queries.
+  - Respect Windows paths from `config.json`.
+
+quick_commands:
+  - Posters sample (new): cargo run --bin db_explorer metadata_items 10
+  - Media extras sample:  cargo run --bin db_explorer media_items 5
+  - Export:               cargo run --bin db_explorer metadata_items 50 --out posters.txt

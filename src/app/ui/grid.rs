@@ -1,0 +1,164 @@
+// src/app/ui/grid.rs
+use eframe::egui as eg;
+
+pub const H_SPACING: f32 = 4.0;
+pub const V_SPACING: f32 = 10.0;
+
+fn draw_corner_badge(p: &eframe::egui::Painter, rect: eg::Rect, label: &str) {
+    if label.is_empty() { return; }
+    let pad = 6.0;
+    let r = eg::Rect::from_min_size(eg::pos2(rect.left() + pad, rect.top() + pad), eg::vec2(48.0, 20.0));
+
+    let visuals = p.ctx().style().visuals.clone();
+    let bg = visuals.extreme_bg_color.gamma_multiply(0.92);
+    let fg = visuals.strong_text_color();
+
+    p.rect_filled(r, eg::Rounding::same(6.0), bg);
+    p.rect_stroke(r, eg::Rounding::same(6.0), eg::Stroke::new(1.0, fg));
+    p.text(r.center(), eg::Align2::CENTER_CENTER, label, eg::FontId::monospace(12.0), fg);
+}
+
+impl crate::app::PexApp {
+// src/app/ui/grid.rs
+    pub(crate) fn ui_render_grouped_grid(&mut self, ui: &mut eg::Ui, ctx: &eg::Context) {
+        let groups = self.build_grouped_indices();
+
+        let card_w: f32 = self.poster_width_ui;
+        let text_h: f32 = 56.0;
+        let card_h: f32 = card_w * 1.5 + text_h;
+
+        let mut uploads_left = super::super::MAX_UPLOADS_PER_FRAME;
+
+        eg::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            for (bucket, idxs) in groups {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.heading(crate::app::utils::format_day_label(bucket));
+                ui.add_space(4.0);
+
+                let avail = ui.available_width();
+                let cols = ((avail + crate::app::ui::grid::H_SPACING) / (card_w + crate::app::ui::grid::H_SPACING))
+                    .floor()
+                    .max(1.0) as usize;
+
+                // center grid
+                let used = cols as f32 * card_w + (cols.saturating_sub(1)) as f32 * crate::app::ui::grid::H_SPACING;
+                let left_pad = ((avail - used) * 0.5).max(0.0);
+                if left_pad > 0.0 { ui.add_space(left_pad); }
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = eg::vec2(crate::app::ui::grid::H_SPACING, crate::app::ui::grid::V_SPACING);
+
+                    let mut col = 0usize;
+                    for idx in idxs {
+                        if col > 0 && col % cols == 0 {
+                            ui.end_row();
+                        }
+
+                        ui.allocate_ui_with_layout(
+                            eg::vec2(card_w, card_h),
+                            eg::Layout::top_down(eg::Align::Min),
+                            |ui| {
+                                ui.set_min_size(eg::vec2(card_w, card_h));
+                                let rect = ui.max_rect();
+
+                                // selection
+                                let id = eg::Id::new(("card_sel", idx));
+                                if ui.interact(rect, id, eg::Sense::click()).clicked() {
+                                    self.selected_idx = Some(idx);
+                                }
+
+                                // opportunistic upload
+                                if uploads_left > 0 && self.try_lazy_upload_row(ctx, idx) {
+                                    uploads_left -= 1;
+                                }
+
+                                // rects
+                                let poster_rect = eg::Rect::from_min_max(
+                                    rect.min,
+                                    eg::pos2(rect.min.x + card_w, rect.min.y + card_w * 1.5),
+                                );
+                                let text_rect = eg::Rect::from_min_max(
+                                    eg::pos2(rect.min.x, poster_rect.max.y),
+                                    rect.max,
+                                );
+
+                                if let Some(row) = self.rows.get(idx) {
+                                    // poster
+                                    if let Some(tex) = &row.tex {
+                                        ui.painter().image(
+                                            tex.id(),
+                                            poster_rect,
+                                            eg::Rect::from_min_max(eg::pos2(0.0, 0.0), eg::pos2(1.0, 1.0)),
+                                            eg::Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(poster_rect, 6.0, eg::Color32::from_gray(40));
+                                    }
+
+                                    // dim owned overlay
+                                    if row.owned && self.dim_owned {
+                                        let a = (self.dim_strength_ui.clamp(0.10, 0.90) * 255.0) as u8;
+                                        ui.painter().rect_filled(poster_rect, 6.0, eg::Color32::from_black_alpha(a));
+                                    }
+
+                                    // HD badge (use local helper)
+                                    {
+                                        let tags_joined = if !row.genres.is_empty() { Some(row.genres.join("|")) } else { None };
+                                        let is_broadcast_hd = crate::app::utils::infer_broadcast_hd(
+                                            tags_joined.as_deref(),
+                                            row.channel.as_deref(),
+                                        );
+
+                                        let owned_key = Self::make_owned_key(&row.title, row.year);
+                                        let owned_is_hd = self.owned_hd_keys
+                                            .as_ref()
+                                            .map_or(false, |set| set.contains(&owned_key));
+
+                                        let better_hd_available = row.owned && !owned_is_hd && is_broadcast_hd;
+                                        let badge = if better_hd_available { "HD ↑" } else if is_broadcast_hd { "HD" } else { "" };
+
+                                        if !badge.is_empty() {
+                                            draw_corner_badge(ui.painter(), poster_rect, badge);
+                                        }
+                                    }
+
+                                    // label
+                                    let title_line = match row.year {
+                                        Some(y) => format!("{} ({})", row.title, y),
+                                        None => row.title.clone(),
+                                    };
+                                    let ch = row.channel.as_deref()
+                                        .map(crate::app::utils::humanize_channel)
+                                        .unwrap_or_else(|| "—".into());
+                                    let tm = row.airing
+                                        .map(crate::app::utils::hhmm_utc)
+                                        .unwrap_or_else(|| "—".into());
+                                    let label_text = format!("{title}\n{ch}\n{tm} UTC", title = title_line);
+
+                                    ui.allocate_ui_at_rect(text_rect, |ui| {
+                                        ui.add(eg::Label::new(eg::RichText::new(label_text).size(14.0)).wrap());
+                                    });
+
+                                    if self.selected_idx == Some(idx) {
+                                        ui.painter().rect_stroke(
+                                            rect.shrink(1.0),
+                                            6.0,
+                                            eg::Stroke::new(2.0, eg::Color32::YELLOW),
+                                        );
+                                    }
+                                }
+                            },
+                        );
+
+                        col += 1;
+                    }
+
+                    ui.end_row();
+                });
+            }
+        });
+    }
+
+}
+

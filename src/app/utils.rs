@@ -1,5 +1,6 @@
 // src/app/util.rs
 use std::time::SystemTime;
+use std::path::Path;
 
 pub(crate) fn normalize_title(s: &str) -> String {
     let s = s.to_lowercase();
@@ -25,11 +26,26 @@ pub(crate) fn day_bucket(ts: SystemTime) -> i64 {
     secs / 86_400
 }
 
-pub(crate) fn weekday_full_from_bucket(bucket: i64) -> &'static str {
+pub(crate) const fn weekday_full_from_bucket(bucket: i64) -> &'static str {
     let idx = ((bucket + 4).rem_euclid(7)) as usize; // 1970-01-01 was Thursday
     const NAMES: [&str; 7] = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
     NAMES[idx]
 }
+
+pub(crate) const fn civil_from_days(z0: i64) -> (i32, u32, u32) {
+    let z = z0 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let y = y + (m <= 2) as i64;
+    (y as i32, m as u32, d as u32)
+}
+
 
 pub(crate) fn month_short_name(m: u32) -> &'static str {
     const M: [&str; 12] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -39,20 +55,6 @@ pub(crate) fn month_short_name(m: u32) -> &'static str {
 pub(crate) fn ordinal_suffix(d: u32) -> &'static str {
     if (11..=13).contains(&(d % 100)) { return "th"; }
     match d % 10 { 1 => "st", 2 => "nd", 3 => "rd", _ => "th" }
-}
-
-pub(crate) fn civil_from_days(z0: i64) -> (i32, u32, u32) {
-    let z = z0 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365*yoe + yoe/4 - yoe/100);
-    let mp = (5*doy + 2) / 153;
-    let d = doy - (153*mp + 2)/5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let y = y + (m <= 2) as i64;
-    (y as i32, m as u32, d as u32)
 }
 
 pub(crate) fn format_day_label(bucket: i64) -> String {
@@ -90,4 +92,97 @@ pub(crate) fn parse_genres(tags: &str) -> Vec<String> {
     v.sort();
     v.dedup();
     v
+}
+
+/// Make a channel label friendlier:
+/// - drop leading virtual channel numbers like "006 "
+/// - replace '_' and '-' with spaces; collapse spaces
+/// - if it looks like a hostname (e.g., "itv.com"), use the primary label ("ITV")
+/// - uppercase simple lowercase words (e.g. "itv2" -> "ITV2")
+pub fn humanize_channel(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+
+    // Remove leading digits/spaces like "006 ITV2"
+    let mut cut = 0usize;
+    for (i, ch) in s.char_indices() {
+        if ch.is_ascii_digit() || ch.is_whitespace() {
+            cut = i + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if cut > 0 && cut < s.len() {
+        s = s[cut..].to_string();
+    }
+
+    // Replace separators, collapse spaces
+    s = s.replace(['_', '-'], " ");
+    while s.contains("  ") {
+        s = s.replace("  ", " ");
+    }
+    s = s.trim().to_string();
+
+    // If it looks like a hostname, pick a friendly label
+    if s.contains('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        let mut parts: Vec<&str> = s.split('.').collect();
+        parts.retain(|p| !p.is_empty() && *p != "www");
+        if let Some(name) = parts.first() {
+            let up = name.to_ascii_uppercase();
+            if up.len() >= 2 {
+                return up;
+            }
+        }
+    }
+
+    // Uppercase basic lowercase labels
+    if s.chars().any(|c| c.is_ascii_lowercase())
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c.is_whitespace())
+    {
+        s = s.to_ascii_uppercase();
+    }
+
+    if s.is_empty() { "—".into() } else { s }
+}
+
+/// Very cheap HD inference from tags/channel.
+/// We treat >=720p or “HD/UHD/4K/HDR” as HD. No serde; all substring checks.
+pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool {
+    let mut hd = false;
+
+    if let Some(tags) = tags_genre {
+        let t = tags.to_ascii_lowercase();
+        // order from strongest to loosest signals
+        for needle in ["2160", "uhd", "4k", "1080", "hdr", "720", " hd ", "(hd)", "[hd]"] {
+            if t.contains(needle) {
+                hd = true;
+                break;
+            }
+        }
+    }
+    if !hd {
+        if let Some(ch) = channel {
+            let c = ch.trim().to_ascii_lowercase();
+            // Common channel naming: "BBC One HD", "ITV2 HD"
+            if c.ends_with(" hd") || c.contains(" hd ") {
+                hd = true;
+            }
+        }
+    }
+    hd
+}
+
+/// Heuristic for “is this file HD?” based on filename/path only (>=720p).
+/// Returns Some(true/false) if we can tell, or None if unknown.
+pub fn is_path_hd(p: &Path) -> Option<bool> {
+    let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
+    // Prefer positive checks first.
+    if name.contains("2160p") || name.contains("uhd") || name.contains("4k")
+        || name.contains("1080p") || name.contains("720p") || name.contains("hdr")
+    {
+        return Some(true);
+    }
+    if name.contains("480p") || name.contains("sd ") || name.ends_with(".avi") {
+        return Some(false);
+    }
+    None
 }
