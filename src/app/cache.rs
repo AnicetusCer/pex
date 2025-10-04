@@ -151,10 +151,6 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
         }
     }
 }
-
-/// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
-/// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
-/// This writes `<cache_dir>/<key>.jpg`.
 /// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
 /// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
 /// This writes `<cache_dir>/<key>.jpg`.
@@ -265,7 +261,7 @@ pub fn download_and_store_resized_with_client(
         Ok(img) => img,
         Err(_) => {
             // Fallback to original path via existing helper
-            return super::download_and_store(url, key);
+            return download_and_store(url, key);
         }
     };
 

@@ -1,201 +1,198 @@
-# Updated: 2025-09-29
+version: 1
+updated: 2025-10-04
 
-human_goals:
-  description: Create a Plex-browser–style interface for Plex EPG data, focused first on "to be aired" films.
-  requirements:
-    - Group films by day-of-week the film will air, with a horizontal day divider between groups.
-    - Each grid card shows: title, year, channel, and start time (UTC for now).
-    - A right-hand detail panel (planned) shows: bigger poster, title/year/channel/time, description, genre(s), IMDb review.
-    - Sorting/filters: by time, title, channel, genre; include-only channel filter; search by title.
-    - Day window selector: 2, 4, 5, 7, 14 days (view-only; no rescans).
-    - Cross-reference with local libraries to dim/hide owned films (planned).
+human:
+  goals:
+    - Keep the app snappy: fast first paint, smooth scrolling, minimal blocking on the UI thread.
+    - Make pragmatic, incremental improvements without breaking working flows.
+    - Favor small patches that compile and pass clippy over big refactors.
+    - Keep Windows users happy (paths, perf, default config).
+  ways_of_working:
+    - Provide the human with full function replaces if the function is resonably small (< 50 lines).
+    - When providing targeted code chanegs give the human the context of where to put the code.  
+    - Run: "cargo run" often; keep it compiling between changes.
+    - Lint: "cargo clippy --all-targets --all-features -- -W clippy::all -W clippy::nursery".
+    - Prefer focused diffs; avoid churn and needless renames.
+    - Keep existing behavior unless there’s a clear UX win.
+    - If you must add types, prefer local type aliases (e.g., "type WorkItem = ...") over new modules.
 
-ways_of_working:
-  - Provide code as whole-function replacements (drop-in), not line-by-line patches.
-  - Make small, incremental changes toward the goals above.
-  - Never block the UI thread; keep frames moving (`ctx.request_repaint`).
-  - Use defensive DB access (optional columns, fallback SQL).
-  - Keep GPU texture creation on the UI thread only.
+project:
+  purpose: >
+    EGUI app that scans a Plex EPG DB, builds a poster list, ensures cached “small” posters exist,
+    and lazily uploads textures to render a grouped grid (fast perceived startup).
+  binaries:
+    - pex (GUI)
+    - db_explorer (CLI helper in epg_explorer_tool/)
+  layout: |
+    src/
+      app/
+        mod.rs         # app state + orchestration + egui App impl
+        cache.rs       # cache dir, url_to_cache_key, download & resized-store, raw RGBA loader
+        prep.rs        # read-only DB scan -> Vec<PrepItem>, optional daily copy
+        prefs.rs       # load/save UI prefs & hotset manifest
+        utils.rs       # day buckets, time formatting, title normalization, genre parsing, channel humanizer
+        gfx.rs         # texture upload helpers
+        filters.rs     # (legacy) genre helpers; keep minimal
+        types.rs       # enums & re-exported message/type aliases for app
+        owned.rs       # background "owned" scan and application of flags
+        prefetch.rs    # worker pool to fetch/resize posters
+        detail.rs      # right-side details panel (snapped width)
+        ui/
+          mod.rs       # splash + UI composition
+          topbar.rs    # range/search/sort/owned controls & channel filter popup
+          grid.rs      # grouped poster grid (fixed rows; centered; clipped labels)
+      config.rs        # AppConfig + load_config()
+    epg_explorer_tool/
+      db_explorer.rs   # CLI to inspect DB tables
+    Cargo.toml
 
-project_status:
-  repo_area: src/app/mod.rs (main UI + data flow)
-  high_level_flow:
-    1: App starts (eframe/egui).
-    2: Warm-up: optional daily copy of Plex DB → open read-only → scan EPG: (title, url, begins_at, year, tags_genre, channel).
-    3: Prefetch workers ensure a SMALL resized poster is on disk; UI lazily uploads textures when needed (plus prewarm).
-    4: Main UI shows grouped-by-day grid; early grid allowed before all prefetch completes for snappy perception.
-  current_focus: Startup smoothness and early responsiveness; poster caching; UI prefs persistence.
-
-architecture:
-  threads_and_channels:
-    poster_prep_thread:
-      purpose: Phase 2+3 warm-up. Emits status + final manifest (no downloads).
-      tx_type: PrepMsg:
+runtime_model:
+  threads_channels:
+    - UI thread: egui paint/input, status updates; lazy texture uploads.
+    - Prep thread: app::prep::spawn_poster_prep(tx).
+    - Owned-scan thread: DFS over library_roots → normalized "title:year" keys.
+    - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive/HTTP2).
+  messages:
+    - PrepMsg:
         - Info(String)
-        - Done(Vec<(title, url, base_key, begins_at?, year?, tags_genre?, channel?)>)
+        - Done(Vec<PrepItem>)
         - Error(String)
-    prefetch_workers:
-      purpose: Ensure poster bytes exist on disk (download+resize if missing); no GPU work off-thread.
-      count: worker_count_ui (default from const WORKER_COUNT).
-      result_channel: PrefetchDone { row_idx, result: Result<PathBuf, String> }.
-    ui_thread:
-      responsibilities:
-        - drives frames (ctx.request_repaint).
-        - polls warm-up channel (poll_prep).
-        - starts prefetch (start_prefetch) after manifest.
-        - drains completions in small batches (poll_prefetch_done).
-        - lazily uploads textures for visible cards (try_lazy_upload_row) + prewarm_first_screen.
+    - OwnedMsg:
+        - Info(String)
+        - Done(HashSet<String>)   # normalized "title:year"
+        - Error(String)
+    - WorkItem: "(row_idx, key, url, cached_path_opt)"
+    - PrefetchDone: "{ row_idx, result: Result<PathBuf, String> }"
+  prep_item_schema:
+    - title: String
+    - url: String
+    - base_cache_key: String
+    - begins_at_unix: Option<i64>
+    - year: Option<i32>
+    - tags_genre: Option<String>
+    - channel: Option<String>  # from media_items.extra_data (call sign/title)
 
-phases:
-  boot_phase_enum: [Starting, CheckingNew, Caching, Ready]
-  phase_enum (UI status): [Prefetching, Ready]
-  early_grid_policy:
-    SHOW_GRID_EARLY: true
-    MIN_READY_BEFORE_GRID: 24
+flow:
+  first_frame:
+    - load_prefs() from "<cache_dir>/ui_prefs.txt"
+    - start_owned_scan()
+    - start_poster_prep()
+    - show splash with status heartbeat
+  prep_done_in_ui:
+    - Map PrepItem → PosterRow
+    - Derive small_key = base_key + "__s"
+    - Try find_any_by_key(small_key) to attach cached path
+    - Load "hotset.txt", attach known paths, prewarm textures
+    - apply_owned_flags() if owned keys ready
+    - start_prefetch(ctx)
+    - prewarm_first_screen(ctx)
+  prefetch:
+    - Queue “near-term” shows first (next 2 days), then the rest
+    - Workers:
+        - download_and_store_resized_with_client(width=320, quality=75) → "<key>.jpg"
+        - Fallback to download_and_store (original size)
+    - UI lazily uploads textures (throttled by MAX_UPLOADS_PER_FRAME)
 
-data_models:
-  PosterRow:
-    fields:
-      - title: String
-      - url: String
-      - key: String                # cache key; SMALL variant uses "{base}__s"
-      - airing: Option<SystemTime> # from mi.begins_at (UNIX seconds)
-      - year: Option<i32>          # from m.year
-      - channel: Option<String>    # from mi.extra_data ("at:channelCallSign" / "at:channelTitle") or URL host fallback
-      - genres: Vec<String>        # parsed from m.tags_genre via '|' split (dedup, sorted)
-      - path: Option<PathBuf>      # cached image path on disk
-      - tex: Option<TextureHandle> # GPU texture (UI thread only)
-      - state: PosterState { Pending|Cached|Ready|Failed }
-
-  Enums:
-    DayRange: [Two, Four, Five, Seven, Fourteen]
-    SortKey: [Time, Title, Channel, Genre]
-    PosterState: [Pending, Cached, Ready, Failed]
-
-db_fields_and_sql:
-  tables: metadata_items (m), media_items (mi)
-  filter: m.metadata_type = 1 (movies)
-  columns:
-    - m.title
-    - m.user_thumb_url (fallback m.thumb_url)
-    - mi.begins_at
-    - m.year
-    - m.tags_genre
-    - mi.extra_data
-  order: ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-  limit: LIMIT ?1 (use [i64::MAX] during warm-up for no-limit behavior)
-  channel_extract: tiny substring parser (no serde_json) prefers "at:channelCallSign", fallback "at:channelTitle".
-
-caching:
-  dir: <repo>/.pex_cache (see cache::cache_dir()).
-  small_variant:
-    key_suffix: "__s"
-    size: RESIZE_MAX_W wide (portrait sanity check)
-    policy:
-      - Try download_and_store_resized_with_client() → JPEG (quality=RESIZE_QUALITY).
-      - Fallback to download_and_store() (original) on resize failure.
-  texture_uploads:
-    - lazy during layout for visible cards
-    - bounded per frame (MAX_UPLOADS_PER_FRAME)
-    - prewarm_first_screen uploads a handful just after warm-up
+config:
+  file: config.json
+  keys:
+    - plex_db_local: "Path to local plex EPG sqlite"
+    - plex_db_source: "Optional source DB to daily copy from"
+    - cache_dir: "Poster/prefs cache root"
+    - library_roots: "Dirs to scan for 'owned' titles"
+  persistence:
+    prefs_path: "<cache_dir>/ui_prefs.txt"
+    prefs_fields:
+      - day_range: "2|4|5|7|14"
+      - search: "<string>"
+      - sort_key: "time|title|channel|genre"
+      - sort_desc: "0|1"
+      - poster_w: "<f32 120..220>"
+      - workers: "<usize 1..32>"
+      - hide_owned: "0|1"
+      - dim_owned: "0|1"
+      - dim_strength: "<0.10..0.90>"
+      - channels: "CSV of included channels"
+    hotset_path: "<cache_dir>/hotset.txt"
+    hotset_line: "<cache_key>\t<abs_path>"
+  cache_keys:
+    - base_key: "derived from URL (e.g., md5)"
+    - small_key: "base_key + '__s'"
+    - files:
+        - "<key>.jpg"  # resized small
+        - "<key>.rgba" # raw RGBA (loader supports)
 
 ui:
-  framework: egui (eframe)
-  splash:
-    - "Poster preparation…" heading
-    - spinner
-    - status line (throttled)
-    - cache path
-  main_grid:
-    top_bar:
-      - Day range ComboBox (Two/Four/Five/Seven/Fourteen) — view window only (does not trigger rescan).
-      - Search (single-line) — filters titles (case-insensitive substring).
-      - Channel filter popup — include-only filter based on selected channels.
-      - Sort controls — SortKey (Time, Title, Channel, Genre) + Desc toggle.
-      - Poster width slider (120–220 px).
-      - Workers slider (1–32) — affects next prefetch session; tooltip explains trade-offs.
-    cards:
-      label:
-        - line1: Title (YYYY)
-        - line2: <CHANNEL>
-        - line3: <HH:MM> (UTC)
-      aspect guard: reject non-portrait-ish images (ar ∉ [0.55, 0.80])
-    grouping:
-      - group by day bucket (days since epoch)
-      - divider label: "Friday 3rd Sep"
-    performance:
-      - MAX_DONE_PER_FRAME completions processed per frame
-      - MAX_UPLOADS_PER_FRAME texture uploads per frame
-      - PREWARM_UPLOADS eager uploads post-warm-up
+  filters:
+    - day_range: [2, 4, 5, 7, 14] relative to now (day buckets)
+    - search: "substring on title (lowercased)"
+    - channel_filter: "include-only; configured via popup; saved as CSV in prefs"
+    - owned: { hide_owned: bool, dim_owned: bool, dim_strength: 0.10..0.90 }
+  sort:
+    - key: [time, title, channel, genre]
+    - desc: togglable
+  layout:
+    grid:
+      card:
+        width: "poster_width_ui (120..220; default 140)"
+        height: "card_w * 1.5 + 56 (poster + 3-line label)"
+        selection: "yellow stroke on selected"
+        label: "clipped to text rect; never bleeds into neighbors; title(year) / humanized channel / HH:MM UTC"
+      spacing:
+        # Horizontal spacing used for column math & panel snapping; keep single source of truth.
+        H_SPACING: 2.0
+        V_SPACING: 10.0
+      behavior:
+        - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
+        - "Center grid by adding left pad; gaps remain tight"
+        - "Fixed-size cards; force ui.end_row() at column boundary → no diagonal rows"
+        - "Bounded lazy texture uploads per frame"
+    details_panel:
+      side: "right"
+      width: "resizable; snapped to multiples of (poster_width_ui + H_SPACING)"
+      min_max: "min 260; max clamp to ~45% of screen and snap; prevents covering grid"
+      content: "poster preview, title(year), channel+time line, owned flag, genres"
+      note: "current width stored in-memory (field: detail_panel_width); snapping keeps grid aligned"
 
-persistence:
-  ui_prefs_file: "<cache_dir>/ui_prefs.txt"
-  format: simple key=value lines (no serde)
-  keys:
-    - day_range = {"2","4","5","7","14"}
-    - search = string
-    - sort_key = {"time","title","channel","genre"}
-    - sort_desc = {"0","1"}
-    - poster_w = float (clamped 120..220)
-    - workers = usize (clamped 1..32)
-    - hide_owned = {"0","1"}            # planned usage
-    - dim_owned = {"0","1"}             # planned usage
-    - channels = CSV of channel names (commas in names replaced with spaces)
-  behavior:
-    - load_prefs() on first frame before warm-up
-    - mark_dirty() whenever a control changes
-    - maybe_save_prefs() debounced (~300ms) once per frame
-    - save_prefs() again on on_exit()
+perf:
+  constants:
+    - WORKER_COUNT = 16 (default into UI)
+    - RESIZE_MAX_W = 320
+    - RESIZE_QUALITY = 75
+    - SHOW_GRID_EARLY = true
+    - MIN_READY_BEFORE_GRID = 24
+    - STATUS_EMIT_EVERY_MS = 120
+    - MAX_DONE_PER_FRAME = 12
+    - MAX_UPLOADS_PER_FRAME = 4
+    - PREWARM_UPLOADS = 24
+  notes:
+    - One shared blocking HTTP client (keep-alive + HTTP/2).
+    - Prioritize near-term airings when queuing.
+    - Throttle GPU uploads per frame.
 
-configuration:
-  file: config.json (load_config())
-  keys:
-    - plex_db_local (required)
-    - plex_db_source (optional; if set, copy to local daily when stale; writes .last_sync marker)
-  copy:
-    - big-buffered copy_with_progress() with brief yields to stay responsive
-    - write to "<dst>.tmp", then rename; touch "<dst>.last_sync"
+style_and_clippy:
+  enforce:
+    - Prefer "Self::" inside impls.
+    - Take "&Path" (not "&PathBuf") in helpers.
+    - Use ".is_some_and", "map_or_else" where it improves clarity.
+  allowed:
+    - "clippy::missing_const_for_fn" for tiny mutators (e.g., mark_dirty()).
+    - "clippy::too_long_first_doc_paragraph" in legacy docs (or split with a blank line).
+  gotchas:
+    - Do not reintroduce removed fields (e.g., first_ready_at).
+    - Keep: "type WorkItem = (usize, String, String, Option<PathBuf>);".
 
-constants_and_tunables:
-  WORKER_COUNT: 16            # default UI workers
-  RESIZE_MAX_W: 320           # small poster width
-  RESIZE_QUALITY: 75
-  SHOW_GRID_EARLY: true
-  MIN_READY_BEFORE_GRID: 24
-  STATUS_EMIT_EVERY_MS: 120
-  MAX_DONE_PER_FRAME: 12
-  MAX_UPLOADS_PER_FRAME: 4
-  PREWARM_UPLOADS: 24
-  DIAG_FAKE_STARTUP: false
+troubleshooting:
+  - duplicate [[bin]] name/path: "One block per bin in Cargo.toml."
+  - unresolved pex_new: "Use pex::app::PexApp or import PexApp."
+  - missing Path: "add use std::path::Path."
+  - function defined multiple times: "deduplicate helpers (e.g., civil_from_days)."
+  - splash never ends:
+      - ensure plex_db_local exists and is valid sqlite
+      - if using plex_db_source, verify path and last-sync marker behavior
+      - watch PrepMsg::Info / OwnedMsg::Info logs for progress
 
-queueing_and_priority:
-  - prefetch queues near-term airings first (next 2 days), then the rest, preserving stable order.
-
-known_gotchas:
-  - Always pass a LIMIT parameter in SQL (even if using i64::MAX).
-  - Some Plex DBs use m.thumb_url instead of m.user_thumb_url; code has fallback prepare.
-  - `media_items.extra_data` is JSON-like; substring parser is intentionally minimal.
-  - All texture creation must be on the UI thread.
-  - Don’t block the UI thread with file/network I/O; workers + channels handle this.
-
-near_term_todos:
-  - Right-side detail panel with larger poster, summary, genres, IMDb review.
-  - Genre filter UI (now we ingest tags_genre and sort by genre; add UI to filter by genre).
-  - Filesystem cross-reference:
-      * configurable library roots
-      * title/year normalization
-      * PosterRow marking (e.g., owned: bool), dim/hide behavior driven by prefs.
-  - Optional: persist a tiny manifest (title/year/key/channel/begins_at) to skip DB open on cold boot.
-
-dev_guidelines:
-  code_changes:
-    - Submit whole-function replacements for major methods: start_poster_prep, poll_prep, start_prefetch, poll_prefetch_done, update, etc.
-    - Keep changes incremental; avoid broad refactors unless necessary.
-  robustness:
-    - Throttle status updates (~8/s).
-    - Yield/sleep in heavy loops (copy, long scans) to keep OS scheduler happy.
-    - Use small per-frame budgets for uploads/completions.
-
-build_run:
-  command: cargo run
-  platform: Windows (msvc); network shares supported. Large buffered copy with brief sleeps to remain responsive.
+open_todos:
+  - Persist detail_panel_width in prefs (read/write key e.g., "detail_w") so the snap width survives restarts.
+  - Use a single spacing constant across grid & detail snap (prefer ui/grid.rs::H_SPACING; remove duplicate GUTTER_X).
+  - Consider optional per-row time labels (local timezone toggle) once config is ready.
