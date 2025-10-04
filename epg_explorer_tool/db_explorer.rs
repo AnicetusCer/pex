@@ -1,4 +1,4 @@
-use pex_new::config::load_config;
+use pex::config::load_config;
 use rusqlite::{types::ValueRef, Connection, Result};
 use std::env;
 use std::fs::File;
