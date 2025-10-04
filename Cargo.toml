@@ -1,8 +1,8 @@
 [package]
-name = "pex_new"
+name = "pex"
 version = "0.1.0"
 edition = "2021"
-default-run = "pex_new"
+default-run = "pex"
 
 [dependencies]
 # GUI

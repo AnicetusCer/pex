@@ -12,7 +12,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|_cc| {
             // PexApp must be in crate::app and implement Default + eframe::App
-            Ok(Box::new(pex_new::app::PexApp::default()))
+            Ok(Box::new(pex::app::PexApp::default()))
         }),
     )
 }
