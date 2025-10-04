@@ -2,13 +2,10 @@
 
 // ---- Standard lib imports ----
 use std::{fs, io};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
-use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
-
 
 // ---- Crates ----
 use eframe::egui::{self as eg, ColorImage, TextureHandle};
@@ -17,9 +14,12 @@ use eframe::egui::{self as eg, ColorImage, TextureHandle};
 pub mod cache;
 use crate::app::cache::{
     cache_dir, download_and_store, download_and_store_resized_with_client, find_any_by_key,
-    load_rgba_raw_or_image, url_to_cache_key,
+    load_rgba_raw_or_image
 };
 use crate::config::load_config;
+
+pub mod utils;
+pub mod prep;
 
 // ---- Tunables ----
 const WORKER_COUNT: usize = 16;        // up from 8 — tune freely (8–32 typical)
@@ -28,174 +28,9 @@ const RESIZE_QUALITY: u8 = 75;
 const SHOW_GRID_EARLY: bool = true;
 const MIN_READY_BEFORE_GRID: usize = 24;
 const STATUS_EMIT_EVERY_MS: u64 = 120;
-const DIAG_FAKE_STARTUP: bool = false;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
-
-// Two SQL variants (newer plex uses user_thumb_url; older uses thumb_url)
-const SQL_POSTERS_USER_THUMB: &str = r#"
-SELECT
-  m.title,
-  m.user_thumb_url,
-  mi.begins_at,
-  m.year,
-  m.tags_genre,
-  mi.extra_data
-FROM metadata_items m
-LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
-WHERE m.metadata_type = 1
-  AND m.user_thumb_url IS NOT NULL
-  AND m.user_thumb_url <> ''
-ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-LIMIT ?1
-"#;
-
-const SQL_POSTERS_THUMB: &str = r#"
-SELECT
-  m.title,
-  m.thumb_url,
-  mi.begins_at,
-  m.year,
-  m.tags_genre,
-  mi.extra_data
-FROM metadata_items m
-LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
-WHERE m.metadata_type = 1
-  AND m.thumb_url IS NOT NULL
-  AND m.thumb_url <> ''
-ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-LIMIT ?1
-"#;
-
-
-// ---- DB helpers ----
-fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-        [name],
-        |_row| Ok(()),
-    )
-    .is_ok()
-}
-
-/// Extract channel string from `media_items.extra_data` JSON-ish blob.
-/// Prefers `at:channelCallSign`, falls back to `at:channelTitle`.
-fn parse_channel_from_extra(extra: &str) -> Option<String> {
-    // very light substring extraction to avoid pulling in serde_json
-    fn find_val(hay: &str, key: &str) -> Option<String> {
-        let needle = format!("\"{}\":\"", key);
-        let start = hay.find(&needle)? + needle.len();
-        let rest = &hay[start..];
-        let end = rest.find('"')?;
-        let val = &rest[..end];
-        if val.is_empty() { None } else { Some(val.to_string()) }
-    }
-    find_val(extra, "at:channelCallSign")
-        .or_else(|| find_val(extra, "at:channelTitle"))
-        .map(|s| {
-            // compact "006 ITV2" → "ITV2"
-            if let Some((_, right)) = s.split_once(' ') { right.to_string() } else { s }
-        })
-}
-
-/// How often we allow a fresh copy from source
-const MIN_COPY_INTERVAL_HOURS: u64 = 24;
-
-/// `.last_sync` marker file path for a given local DB path
-fn last_sync_marker_path(local_db: &str) -> String {
-    format!("{}.last_sync", local_db)
-}
-
-/// Is the last sync younger than MIN_COPY_INTERVAL_HOURS?
-fn fresh_enough(marker_path: &str) -> io::Result<bool> {
-    match fs::metadata(marker_path) {
-        Ok(meta) => {
-            let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let age = SystemTime::now().duration_since(m).unwrap_or_default();
-            Ok(age.as_secs() < MIN_COPY_INTERVAL_HOURS * 3600)
-        }
-        Err(_) => Ok(false),
-    }
-}
-
-/// Update the `.last_sync` marker (touch)
-fn touch_last_sync(marker_path: &str) -> io::Result<()> {
-    fs::write(marker_path, b"ok")
-}
-
-/// Decide if we should copy today; if marker is fresh (<24h) skip immediately.
-fn needs_db_update_daily(src: &str, dst: &str) -> io::Result<bool> {
-    if fresh_enough(&last_sync_marker_path(dst))? {
-        return Ok(false);
-    }
-
-    let src_meta = fs::metadata(src)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("src meta: {e}")))?;
-    let dst_meta = match fs::metadata(dst) {
-        Ok(m) => m,
-        Err(_) => return Ok(true), // no local db yet
-    };
-
-    if src_meta.len() != dst_meta.len() {
-        return Ok(true);
-    }
-    let src_m = src_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let dst_m = dst_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    Ok(src_m > dst_m)
-}
-
-/// Big-buffer copy with progress callback. Writes to `dst.tmp` then renames.
-fn copy_with_progress<F>(src: &str, dst: &str, mut on_prog: F) -> io::Result<()>
-where
-    F: FnMut(u64, u64, f32, f64), // bytes_copied, total, pct, mbps
-{
-    let mut in_f = fs::File::open(src)?;
-    let total = in_f.metadata()?.len();
-
-    let tmp_path = format!("{}.tmp", dst);
-    let mut out_f = fs::File::create(&tmp_path)?;
-
-    // 8 MiB chunks (keeps UI responsive on network shares)
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-    let mut copied: u64 = 0;
-    let started = Instant::now();
-    let mut last_emit = Instant::now();
-
-    loop {
-        let n = in_f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out_f.write_all(&buf[..n])?;
-        copied += n as u64;
-
-        std::thread::yield_now();
-        if copied % (64 * 1024 * 1024) == 0 {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
-        if last_emit.elapsed() >= Duration::from_millis(150) {
-            let secs = started.elapsed().as_secs_f64().max(0.001);
-            let mbps = (copied as f64 / (1024.0 * 1024.0)) / secs;
-            let pct = if total > 0 { copied as f32 / total as f32 } else { 1.0 };
-            on_prog(copied, total, pct, mbps);
-            last_emit = Instant::now();
-        }
-    }
-
-    // Ensure progress hits 100%
-    {
-        let secs = started.elapsed().as_secs_f64().max(0.001);
-        let mbps = (copied as f64 / (1024.0 * 1024.0)) / secs;
-        on_prog(copied, total, 1.0, mbps);
-    }
-
-    out_f.flush()?;
-    drop(out_f);
-    fs::rename(&tmp_path, dst)?;
-    Ok(())
-}
 
 #[derive(Debug)]
 enum OwnedMsg {
@@ -205,7 +40,7 @@ enum OwnedMsg {
 }
 
 #[derive(Debug)]
-enum PrepMsg {
+pub(crate) enum PrepMsg {
     Info(String),
     // (title, url, key, begins_at_opt, year_opt, tags_genre_opt, channel_opt)
     Done(Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)>),
@@ -263,25 +98,6 @@ struct PosterRow {
     tex: Option<TextureHandle>,
     state: PosterState,
     owned: bool,
-}
-
-impl PosterRow {
-    fn new(title: String, url: String, airing: Option<SystemTime>) -> Self {
-        let key = url_to_cache_key(&url);
-        Self {
-            title,
-            url,
-            key,
-            airing,
-            year: None,
-            channel: None,
-            genres: Vec::new(),
-            path: None,
-            tex: None,
-            state: PosterState::Pending,
-            owned: false,
-        }
-    }
 }
 
 struct PrefetchDone {
@@ -445,27 +261,8 @@ fn maybe_save_prefs(&mut self) {
     }
 }
 
-fn normalize_title(s: &str) -> String {
-    let s = s.to_lowercase();
-    let s = s.replace(['.', '_', '-', ':', '–', '—', '(', ')', '[', ']'], " ");
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn make_owned_key(title: &str, year: Option<i32>) -> String {
-    format!("{}:{}", Self::normalize_title(title), year.unwrap_or_default())
-}
-
-fn find_year_in_str(s: &str) -> Option<i32> {
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len().saturating_sub(3) {
-        if bytes[i].is_ascii_digit() && bytes[i+1].is_ascii_digit()
-            && bytes[i+2].is_ascii_digit() && bytes[i+3].is_ascii_digit() {
-            if let Ok(val) = s[i..i+4].parse::<i32>() {
-                if (1900..=2099).contains(&val) { return Some(val); }
-            }
-        }
-    }
-    None
+    format!("{}:{}", utils::normalize_title(title), year.unwrap_or_default())
 }
 
 fn start_owned_scan(&mut self) {
@@ -516,7 +313,7 @@ fn start_owned_scan(&mut self) {
                 if !is_video_ext(&path) { continue; }
 
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                let year = Self::find_year_in_str(&stem);
+                let year = utils::find_year_in_str(&stem);
                 let title = if let Some(y) = year { stem.replace(&y.to_string(), " ") } else { stem };
                 let key = Self::make_owned_key(&title, year);
                 keys.insert(key);
@@ -736,93 +533,6 @@ fn save_prefs(&self) {
     let _ = fs::write(path, txt);
 }
 
-
-fn parse_genres(tags: &str) -> Vec<String> {
-    let mut v: Vec<String> = tags
-        .split('|')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    v.sort();      // stable display/sort
-    v.dedup();
-    v
-}
-
-fn day_bucket(ts: SystemTime) -> i64 {
-    let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    secs / 86_400
-}
-
-fn weekday_full_from_bucket(bucket: i64) -> &'static str {
-    // 1970-01-01 was Thursday
-    let idx = ((bucket + 4).rem_euclid(7)) as usize;
-    const NAMES: [&str; 7] = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-    NAMES[idx]
-}
-
-fn month_short_name(m: u32) -> &'static str {
-    const M: [&str; 12] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-    M[(m.saturating_sub(1)).min(11) as usize]
-}
-
-/// Ordinal suffix for English (1st, 2nd, 3rd, 4th, …)
-fn ordinal_suffix(d: u32) -> &'static str {
-    if (11..=13).contains(&(d % 100)) { return "th"; }
-    match d % 10 {
-        1 => "st",
-        2 => "nd",
-        3 => "rd",
-        _ => "th",
-    }
-}
-
-/// Convert days since 1970-01-01 (our bucket) into (year, month, day).
-/// Algorithm: Howard Hinnant's civil_from_days.
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719468;
-    let era = (z >= 0).then(|| z).unwrap_or(z - 146096) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365*yoe + yoe/4 - yoe/100);
-    let mp = (5*doy + 2) / 153;
-    let d = doy - (153*mp + 2)/5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let y = y + (m <= 2) as i64;
-    (y as i32, m as u32, d as u32)
-}
-
-/// Format divider label like "Friday 3rd Sep" from a day bucket.
-fn format_day_label(bucket: i64) -> String {
-    let (_y, m, d) = Self::civil_from_days(bucket);
-    let wd = Self::weekday_full_from_bucket(bucket);
-    format!("{} {}{} {}", wd, d, Self::ordinal_suffix(d), Self::month_short_name(m))
-}
-
-/// HH:MM (UTC) from airing SystemTime
-fn hhmm_utc(ts: SystemTime) -> String {
-    let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    let hm = (secs % 86_400 + 86_400) % 86_400; // handle negatives just in case
-    let h = hm / 3600;
-    let m = (hm % 3600) / 60;
-    format!("{:02}:{:02}", h, m)
-}
-
-/// Very light hostname extraction for channel hint (no extra deps).
-fn host_from_url(u: &str) -> Option<String> {
-    // find "://"
-    let start = u.find("://").map(|i| i + 3).unwrap_or(0);
-    let rest = &u[start..];
-    let end = rest.find('/').unwrap_or(rest.len());
-    if end == 0 { return None; }
-    let host = &rest[..end];
-    if host.is_empty() { return None; }
-    // compress to something short: first label uppercased, or the host itself
-    let ch = host.split('.').next().unwrap_or(host).to_uppercase();
-    Some(ch)
-}
-
 /// Try to upload texture for a single row if a cached file exists (small variant).
 /// Returns true if a texture was uploaded this call.
 fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
@@ -852,7 +562,7 @@ fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
 /// Upload a handful of textures immediately for the first visible window (fast perception).
 fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
     // Only target near-future rows (for 2d/7d/etc.) and take the first PREWARM_UPLOADS
-    let now_bucket = Self::day_bucket(SystemTime::now());
+    let now_bucket = utils::day_bucket(SystemTime::now());
     let max_bucket_opt: Option<i64> = match self.current_range {
         DayRange::Two => Some(now_bucket + 2),
         DayRange::Four => Some(now_bucket + 4),
@@ -863,7 +573,7 @@ fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
 
     let targets: Vec<usize> = self.rows.iter().enumerate()
         .filter_map(|(idx, row)| {
-            let b = row.airing.map(Self::day_bucket)?;
+            let b = row.airing.map(utils::day_bucket)?;
             if b < now_bucket { return None; }
             if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
             Some(idx)
@@ -892,57 +602,6 @@ fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
         }
     }
 
-#[allow(dead_code)]
-fn load_rows_via_plex_join(&mut self, db_path: &str, limit: usize) -> Result<(), String> {
-    let conn = Connection::open(db_path).map_err(|e| format!("open db: {e}"))?;
-    if !(table_exists(&conn, "metadata_items") && table_exists(&conn, "media_items")) {
-        return Err("required tables missing (metadata_items, media_items)".into());
-    }
-
-    // Try modern schema first; fall back to older 'thumb_url'
-    let mut st = conn
-        .prepare(SQL_POSTERS_USER_THUMB)
-        .or_else(|e1| {
-            let msg = e1.to_string();
-            if msg.contains("no such column") && msg.contains("user_thumb_url") {
-                conn.prepare(SQL_POSTERS_THUMB).map_err(|e2| {
-                    format!("prepare failed:\n{}\n(fallback failed: {})", e1, e2)
-                })
-            } else {
-                Err(e1).map_err(|e| format!("prepare failed: {e}"))
-            }
-        })?;
-
-    let mut rows = st.query([limit as i64]).map_err(|e| format!("query: {e}"))?;
-
-    // Harvest rows defensively
-    let mut out: Vec<(String, String)> = Vec::new();
-    while let Ok(Some(row)) = rows.next() {
-        let title_opt: Option<String> = row.get(0).ok().flatten();
-        let poster_opt: Option<String> = row.get(1).ok().flatten();
-        if let (Some(title), Some(poster)) = (title_opt, poster_opt) {
-            let t = title.trim();
-            if !t.is_empty() && (poster.starts_with("http://") || poster.starts_with("https://")) {
-                out.push((t.to_owned(), poster));
-            }
-        }
-    }
-
-    if out.is_empty() {
-        return Err("query returned 0 posters".into());
-    }
-
-    // Deduplicate by title (case-insensitive), keep order
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|(t, _)| seen.insert(t.to_ascii_lowercase()));
-
-    self.rows = out
-        .into_iter()
-        .map(|(t, u)| PosterRow::new(t, u, None)) // NOTE: pass None for airing in legacy helper
-        .collect();
-    Ok(())
-}
-
 /// Phase 2+3: poster prep warm-up (one-shot on app launch)
 fn start_poster_prep(&mut self) {
     if self.prep_started { return; }
@@ -954,116 +613,8 @@ fn start_poster_prep(&mut self) {
     let (tx, rx) = mpsc::channel::<PrepMsg>();
     self.prep_rx = Some(rx);
 
-    let cfg = load_config();
-    let db_path_opt = cfg.plex_db_local.clone();
-    let src_path_opt = cfg.plex_db_source.clone();
-
-    std::thread::spawn(move || {
-        let send = |m: PrepMsg| { let _ = tx.send(m); };
-
-        if DIAG_FAKE_STARTUP {
-            send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
-            let fake: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = vec![
-                ("Blade Runner".into(), "https://example.com/a.jpg".into(), url_to_cache_key("https://example.com/a.jpg"), None, Some(1982), Some("Sci-Fi|Thriller".into()), Some("ITV2".into())),
-                ("Alien".into(),        "https://example.com/b.jpg".into(), url_to_cache_key("https://example.com/b.jpg"), None, Some(1979), Some("Sci-Fi|Horror".into()),   Some("ITV2".into())),
-                ("Arrival".into(),      "https://example.com/c.jpg".into(), url_to_cache_key("https://example.com/c.jpg"), None, Some(2016), Some("Sci-Fi|Drama".into()),    Some("ITV2".into())),
-            ];
-            send(PrepMsg::Done(fake));
-            return;
-        }
-
-        // (A) Resolve DB path
-        let db_path = match db_path_opt {
-            Some(p) => p,
-            None => { send(PrepMsg::Error("No plex_db_local set in config.json".into())); return; }
-        };
-
-        // (B) Optional daily copy
-        if let Some(src_path) = src_path_opt {
-            match needs_db_update_daily(&src_path, &db_path) {
-                Ok(true) => {
-                    send(PrepMsg::Info("Updating local EPG DB…".into()));
-                    let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_with_progress(&src_path, &db_path, |_c,_t,_p,_mbps|{});
-                    let _ = touch_last_sync(&marker);
-                }
-                Ok(false) => send(PrepMsg::Info("Local EPG DB fresh — skipping update.".into())),
-                Err(e) => send(PrepMsg::Info(format!("Freshness check failed (continuing): {e}"))),
-            }
-        } else {
-            send(PrepMsg::Info("Using existing local EPG DB.".into()));
-        }
-
-        // (C) Open DB read-only
-        let conn = match Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) {
-            Ok(c) => c,
-            Err(e) => { send(PrepMsg::Error(format!("open db failed: {e}"))); return; }
-        };
-        let _ = conn.busy_timeout(Duration::from_secs(10));
-        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
-
-        if !(table_exists(&conn, "metadata_items") && table_exists(&conn, "media_items")) {
-            send(PrepMsg::Error("required tables missing (metadata_items, media_items)".into()));
-            return;
-        }
-
-        // (D) SQL with fallback (NOTE: includes mi.extra_data for channel extraction)
-        let mut st = match conn.prepare(SQL_POSTERS_USER_THUMB) {
-            Ok(s) => s,
-            Err(e1) => {
-                if e1.to_string().contains("user_thumb_url") {
-                    match conn.prepare(SQL_POSTERS_THUMB) {
-                        Ok(s) => s,
-                        Err(e2) => { send(PrepMsg::Error(format!("prepare failed: {e1} / fallback: {e2}"))); return; }
-                    }
-                } else {
-                    send(PrepMsg::Error(format!("prepare failed: {e1}"))); return;
-                }
-            }
-        };
-
-        // (E) Harvest rows — NO DOWNLOADING HERE
-        send(PrepMsg::Info("Scanning EPG…".into()));
-        let mut q = match st.query([i64::MAX]) {
-            Ok(r) => r,
-            Err(e) => { send(PrepMsg::Error(format!("query failed: {e}"))); return; }
-        };
-
-        let mut list: Vec<(String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>)> = Vec::new();
-        let mut last_emit = Instant::now();
-
-        while let Ok(Some(row)) = q.next() {
-            let title:  Option<String> = row.get(0).ok().flatten();
-            let url:    Option<String> = row.get(1).ok().flatten();
-            let begins: Option<i64>    = row.get(2).ok().flatten();
-            let year:   Option<i32>    = row.get(3).ok().flatten();
-            let tags:   Option<String> = row.get(4).ok().flatten(); // m.tags_genre
-            let extra:  Option<String> = row.get(5).ok().flatten(); // mi.extra_data
-
-            if let (Some(t), Some(u)) = (title, url) {
-                let tt = t.trim();
-                if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
-                    let key = url_to_cache_key(&u);
-                    let ch = extra.as_deref().and_then(parse_channel_from_extra);
-                    list.push((tt.to_owned(), u, key, begins, year, tags, ch));
-                    if last_emit.elapsed() >= Duration::from_millis(600) {
-                        send(PrepMsg::Info(format!("Found {} posters…", list.len())));
-                        last_emit = Instant::now();
-                    }
-                }
-            }
-        }
-
-        // (F) Dedupe by title (stable)
-        let mut seen = std::collections::HashSet::new();
-        list.retain(|(t, ..)| seen.insert(t.to_ascii_lowercase()));
-
-        // (G) Hand results to UI (workers will download in parallel)
-        send(PrepMsg::Done(list));
-    });
+    // Hand off all the work to the new module
+    crate::app::prep::spawn_poster_prep(tx);
 }
 
 fn poll_prep(&mut self, ctx: &eg::Context) {
@@ -1074,7 +625,7 @@ fn poll_prep(&mut self, ctx: &eg::Context) {
     let mut processed = 0;
 
     if let Some(rx) = self.prep_rx.take() {
-        let mut keep = Some(rx);
+        let mut keep: Option<Receiver<PrepMsg>> = Some(rx);
 
         while let Some(r) = keep.as_ref() {
             if processed >= MAX_MSGS { break; }
@@ -1091,11 +642,11 @@ fn poll_prep(&mut self, ctx: &eg::Context) {
                     self.rows = list.into_iter()
                         .map(|(t, u, base_k, ts_opt, year_opt, tags_opt, ch_opt)| {
                             let airing  = ts_opt.map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64));
-                            let channel = ch_opt.or_else(|| Self::host_from_url(&u));
+                            let channel = ch_opt.or_else(|| utils::host_from_url(&u));
                             let small_k = Self::small_key(&base_k);
                             let path    = find_any_by_key(&small_k);
                             let state   = if path.is_some() { PosterState::Cached } else { PosterState::Pending };
-                            let genres = tags_opt.as_deref().map(Self::parse_genres).unwrap_or_default();
+                            let genres = tags_opt.as_deref().map(utils::parse_genres).unwrap_or_default();
 
                             PosterRow {
                                 title: t,
@@ -1248,7 +799,7 @@ fn start_prefetch(&mut self, ctx: &eg::Context) {
 
     // Build ONE shared client (connection pooling + keep-alive + HTTP/2 multiplexing)
     let client = match reqwest::blocking::Client::builder()
-        .user_agent("pex_new/prefetch")
+        .user_agent("pex/prefetch")
         .timeout(Duration::from_secs(20))
         .http2_adaptive_window(true)
         .pool_max_idle_per_host(16)
@@ -1296,13 +847,13 @@ fn start_prefetch(&mut self, ctx: &eg::Context) {
     }
 
     // Queue strategy: near-term airings FIRST (2d window), then the rest (stable order).
-    let now_bucket = Self::day_bucket(SystemTime::now());
+    let now_bucket = utils::day_bucket(SystemTime::now());
     let soon_cutoff = now_bucket + 2; // prioritize next 2 days
 
     // collect indices with a priority flag
     let mut indices: Vec<(bool, usize)> = self.rows.iter().enumerate()
         .map(|(i, r)| {
-            let prio = r.airing.map(|ts| Self::day_bucket(ts) < soon_cutoff).unwrap_or(false);
+            let prio = r.airing.map(|ts| utils::day_bucket(ts) < soon_cutoff).unwrap_or(false);
             (prio, i)
         })
         .collect();
@@ -1606,7 +1157,7 @@ impl eframe::App for PexApp {
             }
 
             // ---- Grouped grid by day-of-week ----
-            let now_bucket = Self::day_bucket(SystemTime::now());
+            let now_bucket = utils::day_bucket(SystemTime::now());
             let max_bucket_opt: Option<i64> = match self.current_range {
                 DayRange::Two => Some(now_bucket + 2),
                 DayRange::Four => Some(now_bucket + 4),
@@ -1624,7 +1175,7 @@ impl eframe::App for PexApp {
                 .filter_map(|(idx, row)| {
                     // time window
                     let ts = row.airing?;
-                    let b = Self::day_bucket(ts);
+                    let b = utils::day_bucket(ts);
                     if b < now_bucket { return None; }
                     if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
 
@@ -1710,7 +1261,7 @@ impl eframe::App for PexApp {
 
                     ui.add_space(8.0);
                     ui.separator();
-                    let label = Self::format_day_label(bucket);
+                    let label = utils::format_day_label(bucket);
                     ui.heading(label);
                     ui.add_space(4.0);
 
@@ -1771,7 +1322,7 @@ impl eframe::App for PexApp {
                                         lines.push_str(&format!("\n{}", ch));
                                     }
                                     if let Some(ts) = row.airing {
-                                        lines.push_str(&format!("\n{}", Self::hhmm_utc(ts)));
+                                        lines.push_str(&format!("\n{}", utils::hhmm_utc(ts)));
                                     }
 
                                     ui.painter().text(
