@@ -3170,6 +3170,7 @@ dependencies = [
  "itertools 0.13.0",
  "md5",
  "once_cell",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

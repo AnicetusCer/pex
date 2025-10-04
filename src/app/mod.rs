@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashSet;
+
 
 // ---- Crates ----
 use eframe::egui::{self as eg, ColorImage, TextureHandle};
@@ -196,6 +198,13 @@ where
 }
 
 #[derive(Debug)]
+enum OwnedMsg {
+    Info(String),
+    Done(std::collections::HashSet<String>), // normalized "title:year" keys
+    Error(String),
+}
+
+#[derive(Debug)]
 enum PrepMsg {
     Info(String),
     // (title, url, key, begins_at_opt, year_opt, tags_genre_opt, channel_opt)
@@ -249,10 +258,11 @@ struct PosterRow {
     airing: Option<SystemTime>,
     year: Option<i32>,
     channel: Option<String>,
-    genres: Vec<String>,          // ← NEW
+    genres: Vec<String>,
     path: Option<PathBuf>,
     tex: Option<TextureHandle>,
     state: PosterState,
+    owned: bool,
 }
 
 impl PosterRow {
@@ -265,10 +275,11 @@ impl PosterRow {
             airing,
             year: None,
             channel: None,
-            genres: Vec::new(),    // ← NEW
+            genres: Vec::new(),
             path: None,
             tex: None,
             state: PosterState::Pending,
+            owned: false,
         }
     }
 }
@@ -322,6 +333,13 @@ pub struct PexApp {
     hide_owned: bool,
     dim_owned: bool,
 
+    // darken strength for dimming (0.10–0.90)
+    dim_strength_ui: f32,
+
+    // background owned scan
+    owned_rx: Option<Receiver<OwnedMsg>>,
+    owned_keys: Option<HashSet<String>>,
+
     // search/filter/sort controls
     search_query: String,
 
@@ -342,6 +360,8 @@ pub struct PexApp {
     // --- prefs autosave ---
     prefs_dirty: bool,
     prefs_last_write: Instant,
+
+    last_hotset: Option<std::collections::HashMap<String, PathBuf>>,
 }
 
 impl Default for PexApp {
@@ -379,6 +399,10 @@ impl Default for PexApp {
 
             hide_owned: false,
             dim_owned: false,
+            dim_strength_ui: 0.6, // sensible default, darker not lighter
+
+            owned_rx: None,
+            owned_keys: None,
 
             search_query: String::new(),
 
@@ -394,6 +418,7 @@ impl Default for PexApp {
             prefs_dirty: false,
             prefs_last_write: Instant::now(),
 
+            last_hotset: load_hotset_manifest().ok(),
         }
     }
 }
@@ -420,6 +445,143 @@ fn maybe_save_prefs(&mut self) {
     }
 }
 
+fn normalize_title(s: &str) -> String {
+    let s = s.to_lowercase();
+    let s = s.replace(['.', '_', '-', ':', '–', '—', '(', ')', '[', ']'], " ");
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn make_owned_key(title: &str, year: Option<i32>) -> String {
+    format!("{}:{}", Self::normalize_title(title), year.unwrap_or_default())
+}
+
+fn find_year_in_str(s: &str) -> Option<i32> {
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(3) {
+        if bytes[i].is_ascii_digit() && bytes[i+1].is_ascii_digit()
+            && bytes[i+2].is_ascii_digit() && bytes[i+3].is_ascii_digit() {
+            if let Ok(val) = s[i..i+4].parse::<i32>() {
+                if (1900..=2099).contains(&val) { return Some(val); }
+            }
+        }
+    }
+    None
+}
+
+fn start_owned_scan(&mut self) {
+    if self.owned_rx.is_some() { return; }
+    let (tx, rx) = mpsc::channel::<OwnedMsg>();
+    self.owned_rx = Some(rx);
+
+    std::thread::spawn(move || {
+        // read config for library_roots (Vec<String>)
+        let cfg = load_config();
+        let roots: Vec<PathBuf> = cfg.library_roots
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+
+        if roots.is_empty() {
+            let _ = tx.send(OwnedMsg::Info("No library_roots in config.json; owned scan skipped.".into()));
+            let _ = tx.send(OwnedMsg::Done(HashSet::new()));
+            return;
+        }
+
+        let mut keys = HashSet::new();
+
+        // stack DFS to avoid recursion blowups
+// stack DFS to avoid recursion blowups
+    for root in roots {
+        if !root.exists() {
+            let _ = tx.send(OwnedMsg::Info(format!(
+                "Owned scan: missing root {}", root.display()
+            )));
+            continue;
+        }
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let iter = match fs::read_dir(&dir) {
+                Ok(it) => it,
+                Err(e) => {
+                    let _ = tx.send(OwnedMsg::Error(format!(
+                        "Owned scan: read_dir failed at {}: {e}", dir.display()
+                    )));
+                    continue;
+                }
+            };
+
+            for ent in iter.flatten() {
+                let path = ent.path();
+                if path.is_dir() { stack.push(path); continue; }
+                if !is_video_ext(&path) { continue; }
+
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let year = Self::find_year_in_str(&stem);
+                let title = if let Some(y) = year { stem.replace(&y.to_string(), " ") } else { stem };
+                let key = Self::make_owned_key(&title, year);
+                keys.insert(key);
+            }
+
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+        let _ = tx.send(OwnedMsg::Done(keys));
+
+        // local helper (no extra deps)
+        fn is_video_ext(p: &PathBuf) -> bool {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            matches!(ext.as_str(), "mkv"|"mp4"|"avi"|"mov"|"mpg"|"mpeg"|"m4v"|"wmv")
+        }
+    });
+}
+
+fn apply_owned_flags(&mut self) {
+    let Some(keys) = &self.owned_keys else { return; };
+    for row in &mut self.rows {
+        let key = Self::make_owned_key(&row.title, row.year); // <-- add `Self::`
+        row.owned = keys.contains(&key);
+    }
+}
+
+fn poll_owned_scan(&mut self, ctx: &eg::Context) {
+    use std::sync::mpsc::TryRecvError;
+
+    // Take the receiver out so we can mutate `self` freely while we read from it.
+    let Some(rx) = self.owned_rx.take() else { return; };
+
+    loop {
+        match rx.try_recv() {
+            Ok(OwnedMsg::Info(s)) => {
+                self.set_status(s);
+                // keep listening; there may be more messages
+            }
+            Ok(OwnedMsg::Done(set)) => {
+                self.owned_keys = Some(set);
+                self.apply_owned_flags();
+                // all done; drop rx and don't put it back
+                ctx.request_repaint();
+                break;
+            }
+            Ok(OwnedMsg::Error(e)) => {
+                self.set_status(format!("Owned scan error: {e}"));
+                // error — drop rx and don't put it back
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                // Nothing to read right now — put rx back so we'll poll again later.
+                self.owned_rx = Some(rx);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => {
+                // Worker thread ended — drop rx (leave as None) and stop polling.
+                break;
+            }
+        }
+    }
+    // If we get here, rx is dropped and `owned_rx` stays None (scan finished or errored).
+}
+
 }
 
 // Path to UI prefs file (module scope)
@@ -427,6 +589,23 @@ fn prefs_path() -> PathBuf {
     cache_dir().join("ui_prefs.txt")
 }
 
+fn hotset_manifest_path() -> PathBuf {
+    cache_dir().join("hotset.txt")
+}
+
+fn load_hotset_manifest() -> io::Result<std::collections::HashMap<String, PathBuf>> {
+    let p = hotset_manifest_path();
+    let txt = fs::read_to_string(&p)?;
+    let mut out = std::collections::HashMap::new();
+    for line in txt.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            if !k.is_empty() && !v.is_empty() {
+                out.insert(k.to_string(), PathBuf::from(v));
+            }
+        }
+    }
+    Ok(out)
+}
 
 // --- enum <-> str helpers (no serde needed) ---
 impl DayRange {
@@ -472,76 +651,91 @@ impl SortKey {
 }
 
 impl PexApp {
-    fn load_prefs(&mut self) {
-        let path = prefs_path();
-        let Ok(txt) = fs::read_to_string(&path) else { return; };
+fn load_prefs(&mut self) {
+    let path = prefs_path();
+    let Ok(txt) = fs::read_to_string(&path) else { return; };
 
-        for line in txt.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
-            let Some((k, v)) = line.split_once('=') else { continue; };
-            let k = k.trim();
-            let v = v.trim();
+    for line in txt.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let Some((k, v)) = line.split_once('=') else { continue; };
+        let k = k.trim();
+        let v = v.trim();
 
-            match k {
-                "day_range" => if let Some(dr) = DayRange::from_str(v) { self.current_range = dr; },
-                "search" => self.search_query = v.to_string(),
-                "sort_key" => if let Some(sk) = SortKey::from_str(v) { self.sort_key = sk; },
-                "sort_desc" => self.sort_desc = matches!(v, "1" | "true" | "yes"),
-                "poster_w" => if let Ok(n) = v.parse::<f32>() { self.poster_width_ui = n.clamp(120.0, 220.0); },
-                "workers" => if let Ok(n) = v.parse::<usize>() { self.worker_count_ui = n.clamp(1, 32); },
-                "hide_owned" => self.hide_owned = matches!(v, "1" | "true" | "yes"),
-                "dim_owned" => self.dim_owned = matches!(v, "1" | "true" | "yes"),
-                "channels" => {
-                    self.selected_channels.clear();
-                    for ch in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                        self.selected_channels.insert(ch.to_string());
-                    }
+        match k {
+            "day_range" => if let Some(dr) = DayRange::from_str(v) { self.current_range = dr; },
+            "search" => self.search_query = v.to_string(),
+            "sort_key" => if let Some(sk) = SortKey::from_str(v) { self.sort_key = sk; },
+            "sort_desc" => self.sort_desc = matches!(v, "1" | "true" | "yes"),
+            "poster_w" => if let Ok(n) = v.parse::<f32>() { self.poster_width_ui = n.clamp(120.0, 220.0); },
+            "workers" => if let Ok(n) = v.parse::<usize>() { self.worker_count_ui = n.clamp(1, 32); },
+            "hide_owned" => self.hide_owned = matches!(v, "1" | "true" | "yes"),
+            "dim_owned" => self.dim_owned = matches!(v, "1" | "true" | "yes"),
+            // NEW:
+            "dim_strength" => if let Ok(n) = v.parse::<f32>() { self.dim_strength_ui = n.clamp(0.10, 0.90); },
+            "channels" => {
+                self.selected_channels.clear();
+                for ch in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    self.selected_channels.insert(ch.to_string());
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
+}
 
-    fn save_prefs(&self) {
-        let path = prefs_path();
-        let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
-
-        // CSV for channels; escape commas minimally by replacing with a space
-        let channels_csv = if self.selected_channels.is_empty() {
-            String::new()
-        } else {
-            self.selected_channels
-                .iter()
-                .map(|s| s.replace(',', " "))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-
-        let txt = format!(
-            "# pex ui prefs\n\
-             day_range={}\n\
-             search={}\n\
-             sort_key={}\n\
-             sort_desc={}\n\
-             poster_w={:.1}\n\
-             workers={}\n\
-             hide_owned={}\n\
-             dim_owned={}\n\
-             channels={}\n",
-            self.current_range.as_str(),
-            self.search_query,
-            self.sort_key.as_str(),
-            if self.sort_desc { "1" } else { "0" },
-            self.poster_width_ui,
-            self.worker_count_ui,
-            if self.hide_owned { "1" } else { "0" },
-            if self.dim_owned { "1" } else { "0" },
-            channels_csv,
-        );
-
-        let _ = fs::write(path, txt);
+fn save_hotset_manifest(&self, max_items: usize) -> io::Result<()> {
+    // record up to N posters that already have textures this run
+    let mut lines = Vec::new();
+    for row in self.rows.iter().filter(|r| r.tex.is_some()).take(max_items) {
+        if let Some(p) = &row.path {
+            lines.push(format!("{}\t{}", row.key, p.display()));
+        }
     }
+    fs::write(hotset_manifest_path(), lines.join("\n"))
+}
+
+fn save_prefs(&self) {
+    let path = prefs_path();
+    let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
+
+    let channels_csv = if self.selected_channels.is_empty() {
+        String::new()
+    } else {
+        self.selected_channels
+            .iter()
+            .map(|s| s.replace(',', " "))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    let txt = format!(
+        "# pex ui prefs\n\
+         day_range={}\n\
+         search={}\n\
+         sort_key={}\n\
+         sort_desc={}\n\
+         poster_w={:.1}\n\
+         workers={}\n\
+         hide_owned={}\n\
+         dim_owned={}\n\
+         dim_strength={:.2}\n\
+         channels={}\n",
+        self.current_range.as_str(),
+        self.search_query,
+        self.sort_key.as_str(),
+        if self.sort_desc { "1" } else { "0" },
+        self.poster_width_ui,
+        self.worker_count_ui,
+        if self.hide_owned { "1" } else { "0" },
+        if self.dim_owned { "1" } else { "0" },
+        self.dim_strength_ui,
+        channels_csv,
+    );
+
+    let _ = fs::write(path, txt);
+}
+
 
 fn parse_genres(tags: &str) -> Vec<String> {
     let mut v: Vec<String> = tags
@@ -895,17 +1089,13 @@ fn poll_prep(&mut self, ctx: &eg::Context) {
                 }
                 Ok(PrepMsg::Done(list)) => {
                     self.rows = list.into_iter()
-                        // (title, url, base_key, begins_opt, year_opt, channel_opt)
                         .map(|(t, u, base_k, ts_opt, year_opt, tags_opt, ch_opt)| {
                             let airing  = ts_opt.map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64));
                             let channel = ch_opt.or_else(|| Self::host_from_url(&u));
                             let small_k = Self::small_key(&base_k);
                             let path    = find_any_by_key(&small_k);
                             let state   = if path.is_some() { PosterState::Cached } else { PosterState::Pending };
-                            let genres = tags_opt
-                                .as_deref()
-                                .map(Self::parse_genres)
-                                .unwrap_or_default();
+                            let genres = tags_opt.as_deref().map(Self::parse_genres).unwrap_or_default();
 
                             PosterRow {
                                 title: t,
@@ -914,18 +1104,53 @@ fn poll_prep(&mut self, ctx: &eg::Context) {
                                 airing,
                                 year: year_opt,
                                 channel,
-                                genres,      // now in scope
+                                genres,
                                 path,
                                 tex: None,
                                 state,
+                                owned: false, // will be filled by apply_owned_flags()
                             }
                         })
                         .collect();
+            
+                    // Warm-start: if we have a saved hotset, attach cached paths & upload those first
+                    if let Some(hs) = self.last_hotset.take() {
+                        // 1) Attach cached paths and mark as Cached
+                        for row in &mut self.rows {
+                            if let Some(p) = hs.get(&row.key) {
+                                if p.exists() {
+                                    row.path = Some(p.clone());       // skip disk lookup
+                                    row.state = PosterState::Cached;  // ready for GPU upload
+                                }
+                            }
+                        }
+
+                        // 2) Upload those hot posters right away (bounded)
+                        let mut uploaded = 0usize;
+                        for i in 0..self.rows.len() {
+                            if uploaded >= PREWARM_UPLOADS { break; }
+
+                            // Compute this in a tiny scope so the immutable borrow ends
+                            let should_upload = {
+                                if let Some(row) = self.rows.get(i) {
+                                    hs.contains_key(&row.key)
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if should_upload && self.try_lazy_upload_row(ctx, i) {
+                                uploaded += 1;
+                            }
+                        }
+                    }
+
+                    // mark ownership if the index is ready
+                    self.apply_owned_flags();
 
                     self.boot_phase = BootPhase::Ready;
                     self.set_status(format!("Poster prep complete. {} items ready.", self.rows.len()));
 
-                    // Start workers (will fetch any missing small files), and prewarm first screen
                     self.start_prefetch(ctx);
                     self.prewarm_first_screen(ctx);
 
@@ -1149,441 +1374,428 @@ fn poll_prefetch_done(&mut self, ctx: &eg::Context) {
     }
 }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.save_prefs();
-    }
-
 }
 
 // ========== App impl ==========
 impl eframe::App for PexApp {
-fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
-    // Keep frames moving so Windows never flags "Not Responding"
-    ctx.request_repaint();
+    fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
+        // Keep frames moving so Windows never flags "Not Responding"
+        ctx.request_repaint();
 
-    // First frame
-    if !self.did_init {
-        self.load_prefs();
-        self.prefs_dirty = false;
-        self.did_init = true;
-        self.loading_message = "Starting…".into();
-        self.heartbeat_last = Instant::now();
-        self.heartbeat_dots = 0;
+        // First frame
+        if !self.did_init {
+            self.load_prefs();
+            self.prefs_dirty = false;
+            self.did_init = true;
+            self.loading_message = "Starting…".into();
+            self.heartbeat_last = Instant::now();
+            self.heartbeat_dots = 0;
 
-        // One-shot warm-up: check/copy DB, harvest rows, ensure cache
-        self.start_poster_prep();
-    }
-
-    // Drive warm-up progress
-    self.poll_prep(ctx);
-
-    // If warm-up not finished, show calm splash and return
-    if self.boot_phase != BootPhase::Ready {
-        eg::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.heading("Poster preparation…");
-                ui.add(eg::Spinner::new().size(16.0));
-                ui.separator();
-                ui.label(&self.loading_message);
-                ui.monospace(format!("Cache: {}", cache_dir().display()));
-            });
-        });
-        return;
-    }
-
-    // If prefetch still running, keep polling completions
-    if self.prefetch_started && self.loading_progress < 1.0 {
-        self.poll_prefetch_done(ctx);
-    }
-    if self.prefetch_started && self.loading_progress >= 1.0 && !self.rows.is_empty() {
-        if !matches!(self.phase, Phase::Ready) {
-            self.set_phase(Phase::Ready);
-            self.set_status("All posters processed.");
-        }
-    }
-
-    // Soft heartbeat ticker (safe, non-blocking)
-    if (self.rows.is_empty() || (self.prefetch_started && self.loading_progress < 1.0))
-        && self.heartbeat_last.elapsed() >= Duration::from_millis(250)
-    {
-        self.heartbeat_last = Instant::now();
-        self.heartbeat_dots = (self.heartbeat_dots + 1) % 4;
-    }
-
-    // ---- Main UI ----
-    eg::CentralPanel::default().show(ctx, |ui| {
-        // Top bar: Day window selector (view-only)
-        ui.horizontal(|ui| {
-            // Day range dropdown
-            let mut changed_day = false;
-            eg::ComboBox::from_id_source("day_window_combo")
-                .selected_text(match self.current_range {
-                    DayRange::Two => "2 days",
-                    DayRange::Four => "4 days",
-                    DayRange::Five => "5 days",
-                    DayRange::Seven => "7 days",
-                    DayRange::Fourteen => "14 days",
-                })
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.current_range, DayRange::Two, "2 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Four, "4 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Five, "5 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Seven, "7 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Fourteen, "14 days").clicked() { changed_day = true; }
-                });
-            if changed_day { self.mark_dirty(); }
-
-            ui.separator();
-
-            // Search field (UI only)
-            let resp = ui.add(
-                eg::TextEdit::singleline(&mut self.search_query)
-                    .hint_text("Title…")
-                    .desired_width(160.0),
-            );
-            if resp.changed() { self.mark_dirty(); }
-            // (no filtering yet; this just captures text)
-
-            ui.separator();
-
-            // Channel filter popup trigger (UI only)
-            if ui.button("Channel filter…").clicked() {
-                self.show_channel_filter_popup = true;
-            }
-
-            ui.separator();
-
-            // Sort by (UI only)
-            let mut changed_sort = false;
-            eg::ComboBox::from_id_source("sort_by_combo")
-                .selected_text(match self.sort_key {
-                    SortKey::Time => "Sort: Time",
-                    SortKey::Title => "Sort: Title",
-                    SortKey::Channel => "Sort: Channel",
-                    SortKey::Genre => "Sort: Genre",
-                })
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Time, "Time").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Title, "Title").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Channel, "Channel").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Genre, "Genre").clicked() { changed_sort = true; }
-                });
-            if changed_sort { self.mark_dirty(); }
-
-            if ui.checkbox(&mut self.sort_desc, "Desc").changed() { self.mark_dirty(); }
-
-            ui.separator();
-
-            // Poster size (UI only)
-            ui.label("Poster:");
-            let w_resp = ui.add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px"));
-            if w_resp.changed() {
-                self.mark_dirty();
-            }
-            ui.separator();
-
-            // Workers (concurrency) — UI only; applies to next prefetch
-            ui.label("Workers:");
-            let workers_resp = ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32));
-            if workers_resp.changed() {
-                self.mark_dirty();
-            }
-            workers_resp.on_hover_text(
-                "How many posters download in parallel.\n\
-                Higher = faster on fast networks, but may cause server throttling \
-                or CPU/disk contention.\n\
-                Typical: 8–16.\n\
-                • Slow/remote server: 4–8\n\
-                • Fast LAN/NAS: 12–24\n\
-                Note: new value applies to the next prefetch session.",
-            );
-
-                if self.prefetch_started && self.loading_progress < 1.0 {
-                    ui.add_space(6.0);
-                    ui.label(
-                        eg::RichText::new("(new value applies to next prefetch)")
-                            .italics()
-                            .weak(),
-                    );
-                }
-
-                ui.separator();
-            }); // ← close ui.horizontal here ✅
-
-            if self.show_channel_filter_popup {
-            // collect unique channels
-            let mut channels: Vec<String> = self.rows
-                .iter()
-                .filter_map(|r| r.channel.clone())
-                .collect();
-            channels.sort();
-            channels.dedup();
-
-            // use a local open flag, not the field
-            let mut popup_open = self.show_channel_filter_popup;
-            let mut request_close = false;
-
-            eg::Window::new("Channel filter")
-                .collapsible(false)
-                .resizable(true)
-                .default_width(260.0)
-                .open(&mut popup_open)
-                .show(ctx, |ui| {
-                    ui.label("Select channels to include (UI only; not filtering yet):");
-                    ui.separator();
-                    eg::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                    for ch in channels.iter() {
-                        let mut checked = self.selected_channels.contains(ch);
-                        if ui.checkbox(&mut checked, ch).clicked() {
-                            if checked {
-                                self.selected_channels.insert(ch.clone());
-                            } else {
-                                self.selected_channels.remove(ch);
-                            }
-                            self.mark_dirty();
-                        }
-                    }
-                    });
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        request_close = true; // don't touch popup_open in the closure
-                    }
-                });
-
-            if request_close {
-                popup_open = false;
-            }
-            self.show_channel_filter_popup = popup_open;
+            // Kick off owned scan (non-blocking) + DB warm-up
+            self.start_owned_scan();
+            self.start_poster_prep();
         }
 
-        // Decide whether to show early splash
-        let show_splash = !self.should_show_grid();
-        if show_splash {
-            let done = self.completed + self.failed;
-            let inflight = self.in_flight();
+        // Drive warm-up progress
+        self.poll_prep(ctx);
+        self.poll_owned_scan(ctx);
 
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.heading("Preparing posters…");
-
-                if !self.loading_message.is_empty() { ui.label(&self.loading_message); }
-                if !self.last_item_msg.is_empty() { ui.monospace(&self.last_item_msg); }
-
-                let db_phase = if self.prefetch_started {
-                    self.loading_progress.max(0.02)
-                } else {
-                    let t = ctx.input(|i| i.time) as f32;
-                    0.02 + 0.18 * (t * 0.8 % 1.0)
-                };
-                ui.add(eg::ProgressBar::new(db_phase).show_percentage());
-                ui.separator();
-                ui.add(eg::Spinner::new().size(14.0));
-                ui.separator();
-
-                ui.monospace(format!(
-                    "Posters: {done}/{total}  (OK {ok}, Fail {fail}, In-flight {inflight})",
-                    total = self.total_targets, ok = self.completed, fail = self.failed, inflight = inflight
-                ));
-                ui.monospace(format!("Cache: {}", cache_dir().display()));
+        // If warm-up not finished, show calm splash and return
+        if self.boot_phase != BootPhase::Ready {
+            eg::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.heading("Poster preparation…");
+                    ui.add(eg::Spinner::new().size(16.0));
+                    ui.separator();
+                    ui.label(&self.loading_message);
+                    ui.monospace(format!("Cache: {}", cache_dir().display()));
+                });
             });
             return;
         }
 
-        // ---- Grouped grid by day-of-week ----
-        // Build filtered/sorted list of indices with airing within selected window
-        let now_bucket = Self::day_bucket(SystemTime::now());
-        let max_bucket_opt: Option<i64> = match self.current_range {
-            DayRange::Two => Some(now_bucket + 2),
-            DayRange::Four => Some(now_bucket + 4),
-            DayRange::Five => Some(now_bucket + 5),
-            DayRange::Seven => Some(now_bucket + 7),
-            DayRange::Fourteen => Some(now_bucket + 14),
-        };
+        // If prefetch still running, keep polling completions
+        if self.prefetch_started && self.loading_progress < 1.0 {
+            self.poll_prefetch_done(ctx);
+        }
+        if self.prefetch_started && self.loading_progress >= 1.0 && !self.rows.is_empty() {
+            if !matches!(self.phase, Phase::Ready) {
+                self.set_phase(Phase::Ready);
+                self.set_status("All posters processed.");
+            }
+        }
 
-// Precompute filter flags
-let query = self.search_query.to_lowercase();
-let use_query = !query.is_empty();
-let have_channel_filter = !self.selected_channels.is_empty();
+        // Soft heartbeat ticker
+        if (self.rows.is_empty() || (self.prefetch_started && self.loading_progress < 1.0))
+            && self.heartbeat_last.elapsed() >= Duration::from_millis(250)
+        {
+            self.heartbeat_last = Instant::now();
+            self.heartbeat_dots = (self.heartbeat_dots + 1) % 4;
+        }
 
-        let mut filtered: Vec<(usize, i64)> = self.rows.iter().enumerate()
-            .filter_map(|(idx, row)| {
-                // time window
-                let ts = row.airing?;
-                let b = Self::day_bucket(ts);
-                if b < now_bucket { return None; }
-                if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
+        // ---- Main UI ----
+        eg::CentralPanel::default().show(ctx, |ui| {
+            // Top bar: day range, search, sort, workers + owned controls
+            ui.horizontal(|ui| {
+                // Day range dropdown
+                let mut changed_day = false;
+                eg::ComboBox::from_id_source("day_window_combo")
+                    .selected_text(match self.current_range {
+                        DayRange::Two => "2 days",
+                        DayRange::Four => "4 days",
+                        DayRange::Five => "5 days",
+                        DayRange::Seven => "7 days",
+                        DayRange::Fourteen => "14 days",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut self.current_range, DayRange::Two, "2 days").clicked() { changed_day = true; }
+                        if ui.selectable_value(&mut self.current_range, DayRange::Four, "4 days").clicked() { changed_day = true; }
+                        if ui.selectable_value(&mut self.current_range, DayRange::Five, "5 days").clicked() { changed_day = true; }
+                        if ui.selectable_value(&mut self.current_range, DayRange::Seven, "7 days").clicked() { changed_day = true; }
+                        if ui.selectable_value(&mut self.current_range, DayRange::Fourteen, "14 days").clicked() { changed_day = true; }
+                    });
+                if changed_day { self.mark_dirty(); }
 
-                // search by title (case-insensitive substring)
-                if use_query && !row.title.to_lowercase().contains(&query) {
-                    return None;
+                ui.separator();
+
+                // Search field
+                let resp = ui.add(
+                    eg::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Title…")
+                        .desired_width(160.0),
+                );
+                if resp.changed() { self.mark_dirty(); }
+
+                ui.separator();
+
+                // Channel filter popup trigger
+                if ui.button("Channel filter…").clicked() {
+                    self.show_channel_filter_popup = true;
                 }
 
-                // include-only channel filter (if any are selected)
-                if have_channel_filter {
-                    if let Some(ch) = &row.channel {
-                        if !self.selected_channels.contains(ch) {
+                ui.separator();
+
+                // Sort by
+                let mut changed_sort = false;
+                eg::ComboBox::from_id_source("sort_by_combo")
+                    .selected_text(match self.sort_key {
+                        SortKey::Time => "Sort: Time",
+                        SortKey::Title => "Sort: Title",
+                        SortKey::Channel => "Sort: Channel",
+                        SortKey::Genre => "Sort: Genre",
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_value(&mut self.sort_key, SortKey::Time, "Time").clicked() { changed_sort = true; }
+                        if ui.selectable_value(&mut self.sort_key, SortKey::Title, "Title").clicked() { changed_sort = true; }
+                        if ui.selectable_value(&mut self.sort_key, SortKey::Channel, "Channel").clicked() { changed_sort = true; }
+                        if ui.selectable_value(&mut self.sort_key, SortKey::Genre, "Genre").clicked() { changed_sort = true; }
+                    });
+                if changed_sort { self.mark_dirty(); }
+
+                if ui.checkbox(&mut self.sort_desc, "Desc").changed() { self.mark_dirty(); }
+
+                ui.separator();
+
+                // Poster size
+                ui.label("Poster:");
+                let w_resp = ui.add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px"));
+                if w_resp.changed() { self.mark_dirty(); }
+
+                ui.separator();
+
+                // Workers
+                ui.label("Workers:");
+                let workers_resp = ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32));
+                if workers_resp.changed() { self.mark_dirty(); }
+                workers_resp.on_hover_text(
+                    "Parallel downloads. Typical 8–16. New value applies to next prefetch."
+                );
+                if self.prefetch_started && self.loading_progress < 1.0 {
+                    ui.add_space(6.0);
+                    ui.label(eg::RichText::new("(new value applies to next prefetch)").italics().weak());
+                }
+
+                ui.separator();
+
+                // Owned controls
+                if ui.checkbox(&mut self.hide_owned, "Hide owned").changed() {
+                    self.mark_dirty();
+                }
+                let mut dim_changed = ui.checkbox(&mut self.dim_owned, "Dim owned").changed();
+                if self.dim_owned {
+                    // Darken, not lighten (0.10–0.90)
+                    let s = ui.add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %"));
+                    if s.changed() { dim_changed = true; }
+                }
+                if dim_changed { self.mark_dirty(); }
+            });
+
+            // Channel filter popup
+            if self.show_channel_filter_popup {
+                let mut channels: Vec<String> = self.rows
+                    .iter()
+                    .filter_map(|r| r.channel.clone())
+                    .collect();
+                channels.sort();
+                channels.dedup();
+
+                let mut popup_open = self.show_channel_filter_popup;
+                let mut request_close = false;
+
+                eg::Window::new("Channel filter")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(260.0)
+                    .open(&mut popup_open)
+                    .show(ctx, |ui| {
+                        ui.label("Select channels to include:");
+                        ui.separator();
+                        eg::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                            for ch in channels.iter() {
+                                let mut checked = self.selected_channels.contains(ch);
+                                if ui.checkbox(&mut checked, ch).clicked() {
+                                    if checked {
+                                        self.selected_channels.insert(ch.clone());
+                                    } else {
+                                        self.selected_channels.remove(ch);
+                                    }
+                                    self.mark_dirty();
+                                }
+                            }
+                        });
+                        ui.separator();
+                        if ui.button("Close").clicked() { request_close = true; }
+                    });
+
+                if request_close { popup_open = false; }
+                self.show_channel_filter_popup = popup_open;
+            }
+
+            // Decide whether to show the early splash
+            let show_splash = !self.should_show_grid();
+            if show_splash {
+                let done = self.completed + self.failed;
+                let inflight = self.in_flight();
+
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.heading("Preparing posters…");
+
+                    if !self.loading_message.is_empty() { ui.label(&self.loading_message); }
+                    if !self.last_item_msg.is_empty() { ui.monospace(&self.last_item_msg); }
+
+                    let db_phase = if self.prefetch_started {
+                        self.loading_progress.max(0.02)
+                    } else {
+                        let t = ctx.input(|i| i.time) as f32;
+                        0.02 + 0.18 * (t * 0.8 % 1.0)
+                    };
+                    ui.add(eg::ProgressBar::new(db_phase).show_percentage());
+                    ui.separator();
+                    ui.add(eg::Spinner::new().size(14.0));
+                    ui.separator();
+
+                    ui.monospace(format!(
+                        "Posters: {done}/{total}  (OK {ok}, Fail {fail}, In-flight {inflight})",
+                        total = self.total_targets, ok = self.completed, fail = self.failed, inflight = inflight
+                    ));
+                    ui.monospace(format!("Cache: {}", cache_dir().display()));
+                });
+                return;
+            }
+
+            // ---- Grouped grid by day-of-week ----
+            let now_bucket = Self::day_bucket(SystemTime::now());
+            let max_bucket_opt: Option<i64> = match self.current_range {
+                DayRange::Two => Some(now_bucket + 2),
+                DayRange::Four => Some(now_bucket + 4),
+                DayRange::Five => Some(now_bucket + 5),
+                DayRange::Seven => Some(now_bucket + 7),
+                DayRange::Fourteen => Some(now_bucket + 14),
+            };
+
+            // Precompute filter flags
+            let query = self.search_query.to_lowercase();
+            let use_query = !query.is_empty();
+            let have_channel_filter = !self.selected_channels.is_empty();
+
+            let mut filtered: Vec<(usize, i64)> = self.rows.iter().enumerate()
+                .filter_map(|(idx, row)| {
+                    // time window
+                    let ts = row.airing?;
+                    let b = Self::day_bucket(ts);
+                    if b < now_bucket { return None; }
+                    if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
+
+                    // title search
+                    if use_query && !row.title.to_lowercase().contains(&query) { return None; }
+
+                    // include-only channel filter
+                    if have_channel_filter {
+                        if let Some(ch) = &row.channel {
+                            if !self.selected_channels.contains(ch) { return None; }
+                        } else {
                             return None;
                         }
-                    } else {
-                        // row has no channel → exclude when filter active
-                        return None;
+                    }
+
+                    // hide owned
+                    if self.hide_owned && row.owned { return None; }
+
+                    Some((idx, b))
+                })
+                .collect();
+
+            // Sort by (day bucket, title) for stable visual layout
+            filtered.sort_by(|a, b| {
+                let (ai, ab) = a;
+                let (bi, bb) = b;
+                ab.cmp(bb).then_with(|| self.rows[*ai].title.cmp(&self.rows[*bi].title))
+            });
+
+            // Group by bucket
+            let groups = {
+                let mut out: Vec<(i64, Vec<usize>)> = Vec::new();
+                let mut cur_key: Option<i64> = None;
+                for (idx, bucket) in filtered {
+                    if cur_key != Some(bucket) {
+                        out.push((bucket, Vec::new()));
+                        cur_key = Some(bucket);
+                    }
+                    if let Some((_, v)) = out.last_mut() {
+                        v.push(idx);
                     }
                 }
+                out
+            };
 
-                Some((idx, b))
-            })
-            .collect();
+            // Layout
+            let available = ui.available_width() - 8.0;
+            let card_w: f32 = self.poster_width_ui;
+            let card_h: f32 = card_w * 1.5 + 36.0;
+            let cols = (available / card_w.max(1.0)).floor().max(1.0) as usize;
 
-        // Sort by (day bucket, title) for stable visual layout
-        filtered.sort_by(|a, b| {
-            let (ai, ab) = a;
-            let (bi, bb) = b;
-            ab.cmp(bb).then_with(|| self.rows[*ai].title.cmp(&self.rows[*bi].title))
-        });
+            // Bounded texture uploads per frame
+            let mut uploads_left = MAX_UPLOADS_PER_FRAME;
 
-        // Group by bucket
-        let groups = {
-            let mut out: Vec<(i64, Vec<usize>)> = Vec::new();
-            let mut cur_key: Option<i64> = None;
-            for (idx, bucket) in filtered {
-                if cur_key != Some(bucket) {
-                    out.push((bucket, Vec::new()));
-                    cur_key = Some(bucket);
-                }
-                if let Some((_, v)) = out.last_mut() {
-                    v.push(idx);
-                }
-            }
-            out
-        };
+            eg::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                for (bucket, mut idxs) in groups {
+                    // Intra-day sort
+                    match self.sort_key {
+                        SortKey::Time => {
+                            idxs.sort_by_key(|&i| {
+                                self.rows[i].airing
+                                    .map(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs())
+                                    .unwrap_or(u64::MAX)
+                            });
+                        }
+                        SortKey::Title => idxs.sort_by(|&a, &b| self.rows[a].title.cmp(&self.rows[b].title)),
+                        SortKey::Channel => {
+                            idxs.sort_by(|&a, &b| {
+                                let ca = self.rows[a].channel.as_deref().unwrap_or("");
+                                let cb = self.rows[b].channel.as_deref().unwrap_or("");
+                                ca.cmp(cb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                            });
+                        }
+                        SortKey::Genre => {
+                            idxs.sort_by(|&a, &b| {
+                                let ga = self.rows[a].genres.first().map(|s| s.as_str()).unwrap_or("");
+                                let gb = self.rows[b].genres.first().map(|s| s.as_str()).unwrap_or("");
+                                ga.cmp(gb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
+                            });
+                        }
+                    }
+                    if self.sort_desc { idxs.reverse(); }
 
-        // Layout parameters (once)
-        let available = ui.available_width() - 8.0;
-        let card_w: f32 = self.poster_width_ui;        // ← from the slider
-        let card_h: f32 = card_w * 1.5 + 36.0;         // keep ratio + text space
-        let cols = (available / card_w.max(1.0)).floor().max(1.0) as usize;
+                    ui.add_space(8.0);
+                    ui.separator();
+                    let label = Self::format_day_label(bucket);
+                    ui.heading(label);
+                    ui.add_space(4.0);
 
-        // Bounded texture uploads per frame
-        let mut uploads_left = MAX_UPLOADS_PER_FRAME;
+                    eg::Grid::new(format!("grid_day_{bucket}"))
+                        .num_columns(cols)
+                        .spacing([8.0, 8.0])
+                        .show(ui, |ui| {
+                            for (i, idx) in idxs.into_iter().enumerate() {
+                                let (rect, _resp) = ui.allocate_exact_size(
+                                    eg::vec2(card_w, card_h),
+                                    eg::Sense::click(),
+                                );
 
-        eg::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-        for (bucket, mut idxs) in groups {
-            // ---- Intra-day sort according to control panel ----
-            match self.sort_key {
-                SortKey::Time => {
-                    idxs.sort_by_key(|&i| {
-                        self.rows[i].airing
-                            .map(|ts| ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs())
-                            .unwrap_or(u64::MAX)
-                    });
-                }
-                SortKey::Title => {
-                    idxs.sort_by(|&a, &b| self.rows[a].title.cmp(&self.rows[b].title));
-                }
-                SortKey::Channel => {
-                    idxs.sort_by(|&a, &b| {
-                        let ca = self.rows[a].channel.as_deref().unwrap_or("");
-                        let cb = self.rows[b].channel.as_deref().unwrap_or("");
-                        ca.cmp(cb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
-                    });
-                }
-                SortKey::Genre => {
-                    idxs.sort_by(|&a, &b| {
-                        let ga = self.rows[a].genres.first().map(|s| s.as_str()).unwrap_or("");
-                        let gb = self.rows[b].genres.first().map(|s| s.as_str()).unwrap_or("");
-                        ga.cmp(gb).then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
-                    });
-                }
-            } // ← add this brace to close the match ✅
-
-            if self.sort_desc {
-                idxs.reverse();
-            }
-
-            // Divider with day label
-            ui.add_space(8.0);
-            ui.separator();
-            let label = Self::format_day_label(bucket);
-            ui.heading(label);
-            ui.add_space(4.0);
-
-            eg::Grid::new(format!("grid_day_{bucket}"))
-                .num_columns(cols)
-                .spacing([8.0, 8.0])
-                .show(ui, |ui| {
-                    for (i, idx) in idxs.into_iter().enumerate() {
-                            let (rect, _resp) = ui.allocate_exact_size(
-                                eg::vec2(card_w, card_h),
-                                eg::Sense::click(),
-                            );
-
-                            // Lazy texture upload for visible cards (cache hits don't wait for workers)
-                            if uploads_left > 0 {
-                                if self.try_lazy_upload_row(ctx, idx) {
-                                    uploads_left -= 1;
+                                if uploads_left > 0 {
+                                    if self.try_lazy_upload_row(ctx, idx) {
+                                        uploads_left -= 1;
+                                    }
                                 }
-                            }
 
-                            // Now paint card
-                            let poster_rect = eg::Rect::from_min_max(
-                                rect.min,
-                                eg::pos2(rect.min.x + card_w, rect.min.y + card_w * 1.5),
-                            );
-                            let text_rect = eg::Rect::from_min_max(
-                                eg::pos2(rect.min.x, poster_rect.max.y),
-                                rect.max,
-                            );
+                                let poster_rect = eg::Rect::from_min_max(
+                                    rect.min,
+                                    eg::pos2(rect.min.x + card_w, rect.min.y + card_w * 1.5),
+                                );
+                                let text_rect = eg::Rect::from_min_max(
+                                    eg::pos2(rect.min.x, poster_rect.max.y),
+                                    rect.max,
+                                );
 
-                            if let Some(row) = self.rows.get(idx) {
-                                if let Some(tex) = &row.tex {
-                                    ui.painter().image(
-                                        tex.id(),
-                                        poster_rect,
-                                        eg::Rect::from_min_max(eg::pos2(0.0, 0.0), eg::pos2(1.0, 1.0)),
+                                if let Some(row) = self.rows.get(idx) {
+                                    if let Some(tex) = &row.tex {
+                                        ui.painter().image(
+                                            tex.id(),
+                                            poster_rect,
+                                            eg::Rect::from_min_max(eg::pos2(0.0, 0.0), eg::pos2(1.0, 1.0)),
+                                            eg::Color32::WHITE,
+                                        );
+                                    } else {
+                                        ui.painter().rect_filled(
+                                            poster_rect,
+                                            6.0,
+                                            eg::Color32::from_gray(40),
+                                        );
+                                    }
+
+                                    // Darken overlay for owned when dimming is enabled (darker, not lighter)
+                                    if row.owned && self.dim_owned {
+                                        let a = (self.dim_strength_ui.clamp(0.10, 0.90) * 255.0) as u8;
+                                        ui.painter().rect_filled(poster_rect, 6.0, eg::Color32::from_black_alpha(a));
+                                    }
+
+                                    // 3-line label
+                                    let mut lines = String::new();
+                                    match row.year {
+                                        Some(y) => lines.push_str(&format!("{} ({})", row.title, y)),
+                                        None => lines.push_str(&row.title),
+                                    }
+                                    if let Some(ch) = &row.channel {
+                                        lines.push_str(&format!("\n{}", ch));
+                                    }
+                                    if let Some(ts) = row.airing {
+                                        lines.push_str(&format!("\n{}", Self::hhmm_utc(ts)));
+                                    }
+
+                                    ui.painter().text(
+                                        text_rect.left_top(),
+                                        eg::Align2::LEFT_TOP,
+                                        lines,
+                                        eg::FontId::proportional(14.0),
                                         eg::Color32::WHITE,
                                     );
-                                } else {
-                                    ui.painter().rect_filled(
-                                        poster_rect,
-                                        6.0,
-                                        eg::Color32::from_gray(40),
-                                    );
                                 }
 
-                                // Build 3-line label:
-                                // Line 1: Title (YYYY)
-                                // Line 2: <CH>
-                                // Line 3: <HH:MM>
-                                let mut lines = String::new();
-                                match row.year {
-                                    Some(y) => lines.push_str(&format!("{} ({})", row.title, y)),
-                                    None => lines.push_str(&row.title),
-                                }
-                                if let Some(ch) = &row.channel {
-                                    lines.push_str(&format!("\n{}", ch));
-                                }
-                                if let Some(ts) = row.airing {
-                                    lines.push_str(&format!("\n{}", Self::hhmm_utc(ts)));
-                                }
-
-                                ui.painter().text(
-                                    text_rect.left_top(),
-                                    eg::Align2::LEFT_TOP,
-                                    lines,
-                                    eg::FontId::proportional(14.0),
-                                    eg::Color32::WHITE,
-                                );
+                                if (i + 1) % cols == 0 { ui.end_row(); }
                             }
-
-                            if (i + 1) % cols == 0 { ui.end_row(); }
-                        }
-                        ui.end_row();
-                    });
-            }
+                            ui.end_row();
+                        });
+                }
+            });
         });
-    });
-    self.maybe_save_prefs();
-}
+
+        self.maybe_save_prefs();
+    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = self.save_hotset_manifest(180); // remember ~a couple of screens
+        self.save_prefs();
+    }
 
 }
