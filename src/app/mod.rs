@@ -41,6 +41,7 @@ const STATUS_EMIT_EVERY_MS: u64 = 120;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
+pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str = "Owned scan complete.";
 
 pub struct PexApp {
     // data
@@ -192,7 +193,7 @@ impl PexApp {
         format!("{base}__s")
     }
 
-    fn make_owned_key(title: &str, year: Option<i32>) -> String {
+    pub(crate) fn make_owned_key(title: &str, year: Option<i32>) -> String {
         format!(
             "{}:{}",
             utils::normalize_title(title),
