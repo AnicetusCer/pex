@@ -122,7 +122,7 @@ pub fn humanize_channel(raw: &str) -> String {
     }
     s = s.trim().to_string();
 
-    // If it looks like a hostname, pick a friendly label
+    // If it looks like a hostname, pick a friendly label (e.g., "itv.com" -> "ITV")
     if s.contains('.') && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
         let mut parts: Vec<&str> = s.split('.').collect();
         parts.retain(|p| !p.is_empty() && *p != "www");
@@ -134,11 +134,21 @@ pub fn humanize_channel(raw: &str) -> String {
         }
     }
 
-    // Uppercase basic lowercase labels
+    // Uppercase simple lowercase labels
     if s.chars().any(|c| c.is_ascii_lowercase())
         && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c.is_whitespace())
     {
         s = s.to_ascii_uppercase();
+    }
+
+    // Ensure a space before trailing HD/UHD if missing: "ITVHD" -> "ITV HD", "SKYSPORTSUHD" -> "SKYSPORTS UHD"
+    let upper = s.to_ascii_uppercase();
+    if upper.ends_with("UHD") && !upper.ends_with(" UHD") && s.len() >= 3 {
+        let base = &s[..s.len().saturating_sub(3)];
+        s = format!("{} UHD", base.trim_end());
+    } else if upper.ends_with("HD") && !upper.ends_with(" HD") && s.len() >= 2 {
+        let base = &s[..s.len().saturating_sub(2)];
+        s = format!("{} HD", base.trim_end());
     }
 
     if s.is_empty() { "—".into() } else { s }
@@ -147,42 +157,59 @@ pub fn humanize_channel(raw: &str) -> String {
 /// Very cheap HD inference from tags/channel.
 /// We treat >=720p or “HD/UHD/4K/HDR” as HD. No serde; all substring checks.
 pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool {
-    let mut hd = false;
-
+    // Tags are strongest: UHD/4K/HDR/1080/720 -> HD
     if let Some(tags) = tags_genre {
         let t = tags.to_ascii_lowercase();
-        // order from strongest to loosest signals
-        for needle in ["2160", "uhd", "4k", "1080", "hdr", "720", " hd ", "(hd)", "[hd]"] {
+        for needle in ["2160", "uhd", "4k", "hdr", "1080", "720", " hd ", "(hd)", "[hd]"] {
             if t.contains(needle) {
-                hd = true;
-                break;
+                return true;
             }
         }
     }
-    if !hd {
-        if let Some(ch) = channel {
-            let c = ch.trim().to_ascii_lowercase();
-            // Common channel naming: "BBC One HD", "ITV2 HD"
-            if c.ends_with(" hd") || c.contains(" hd ") {
-                hd = true;
+
+    // Channel-name checks (support "ITV HD", "ITVHD", "ITVHDG", "BBCONEHD", etc.)
+    if let Some(ch) = channel {
+        let spaced = ch.trim().to_ascii_lowercase();
+        if spaced.ends_with(" hd") || spaced.contains(" hd ") {
+            return true;
+        }
+        let compact: String = spaced.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let cc = compact.to_ascii_uppercase();
+
+        // UHD/4K anywhere → HD
+        if cc.contains("UHD") || cc.contains("4K") {
+            return true;
+        }
+        // "HD" token near the end (optionally followed by up to 3 region letters: HD, HDA, HDG, HDUK, etc.)
+        if let Some(pos) = cc.rfind("HD") {
+            if cc.len().saturating_sub(pos + 2) <= 3 {
+                return true;
             }
         }
     }
-    hd
+
+    false
 }
 
 /// Heuristic for “is this file HD?” based on filename/path only (>=720p).
 /// Returns Some(true/false) if we can tell, or None if unknown.
 pub fn is_path_hd(p: &Path) -> Option<bool> {
-    let name = p.file_name()?.to_string_lossy().to_ascii_lowercase();
-    // Prefer positive checks first.
-    if name.contains("2160p") || name.contains("uhd") || name.contains("4k")
-        || name.contains("1080p") || name.contains("720p") || name.contains("hdr")
-    {
-        return Some(true);
+    // Look at filename *and* parent dir for quality hints.
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let parent = p.parent()
+        .and_then(|pp| pp.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let hay = format!("{stem} {parent}");
+
+    // Positive HD/UHD signals
+    for n in ["2160p","uhd","4k","hdr","dolby vision","dv","1080p","720p","blu-ray","bluray","bdrip","hdtv","web-dl","webrip"] {
+        if hay.contains(n) { return Some(true); }
     }
-    if name.contains("480p") || name.contains("sd ") || name.ends_with(".avi") {
-        return Some(false);
+    // Strong SD indicators
+    for n in ["480p","576p","sd " ,"vhs","svcd","xvid","divx","dvdrip"] {
+        if hay.contains(n) { return Some(false); }
     }
     None
 }

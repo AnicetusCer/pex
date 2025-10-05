@@ -1,7 +1,5 @@
 // src/app/ui/topbar.rs
 use eframe::egui as eg;
-
-// Pull parent-private items via ancestor path (app → ui → topbar)
 use super::super::{DayRange, SortKey};
 
 impl crate::app::PexApp {
@@ -44,6 +42,14 @@ impl crate::app::PexApp {
                 self.show_channel_filter_popup = true;
             }
 
+            // Clear active channel filter (only when something is selected)
+            if !self.selected_channels.is_empty() {
+                if ui.small_button("Clear channels").on_hover_text("Clear the channel include-only filter").clicked() {
+                    self.selected_channels.clear();
+                    self.mark_dirty();
+                }
+            }
+
             ui.separator();
 
             // Sort
@@ -62,7 +68,6 @@ impl crate::app::PexApp {
                     if ui.selectable_value(&mut self.sort_key, SortKey::Genre, "Genre").clicked() { changed_sort = true; }
                 });
             if changed_sort { self.mark_dirty(); }
-
             if ui.checkbox(&mut self.sort_desc, "Desc").changed() { self.mark_dirty(); }
 
             ui.separator();
@@ -105,39 +110,57 @@ impl crate::app::PexApp {
     pub(crate) fn ui_render_channel_filter_popup(&mut self, ctx: &eg::Context) {
         if !self.show_channel_filter_popup { return; }
 
-        let mut channels: Vec<String> = self.rows
-            .iter()
-            .filter_map(|r| r.channel.clone())
-            .collect();
+        // Build channel list from current rows (raw values; UI presents humanized label)
+        let mut channels: Vec<String> = self.rows.iter().filter_map(|r| r.channel.clone()).collect();
         channels.sort();
         channels.dedup();
 
-        let mut popup_open = self.show_channel_filter_popup;
-        let mut request_close = false;
-
+        let mut open = self.show_channel_filter_popup;
         eg::Window::new("Channel filter")
             .collapsible(false)
             .resizable(true)
-            .default_width(260.0)
-            .open(&mut popup_open)
+            .default_width(320.0)
+            .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Select channels to include:");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(eg::RichText::new("Include only these channels:").strong());
+                    if ui.small_button("Select all").clicked() {
+                        self.selected_channels = channels.iter().cloned().collect();
+                        self.mark_dirty();
+                    }
+                    if ui.small_button("Select none").clicked() {
+                        self.selected_channels.clear();
+                        self.mark_dirty();
+                    }
+                    if !self.selected_channels.is_empty() && ui.small_button("Clear").clicked() {
+                        self.selected_channels.clear();
+                        self.mark_dirty();
+                    }
+                });
+
                 ui.separator();
-                eg::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                eg::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for ch in channels.iter() {
                         let mut checked = self.selected_channels.contains(ch);
-                        if ui.checkbox(&mut checked, ch).clicked() {
-                            if checked { self.selected_channels.insert(ch.clone()); }
-                            else { self.selected_channels.remove(ch); }
+                        let label = crate::app::utils::humanize_channel(ch);
+                        if ui.checkbox(&mut checked, label).clicked() {
+                            if checked {
+                                self.selected_channels.insert(ch.clone());
+                            } else {
+                                self.selected_channels.remove(ch);
+                            }
                             self.mark_dirty();
                         }
                     }
                 });
+
                 ui.separator();
-                if ui.button("Close").clicked() { request_close = true; }
+                if ui.button("Close").clicked() {
+                    // Window will close when `open` is set to false afterward
+                }
             });
 
-        if request_close { popup_open = false; }
-        self.show_channel_filter_popup = popup_open;
+        // Apply result (avoid E0499 by setting after .show)
+        self.show_channel_filter_popup = open;
     }
 }

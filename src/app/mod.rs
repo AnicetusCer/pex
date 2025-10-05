@@ -24,6 +24,7 @@ pub use types::{
 };
 pub mod prefetch;
 pub mod owned;
+#[path = "ui/uimod.rs"]  // this is we don't have duplicate file names in within the workspace.
 pub mod ui;
 pub mod prefs;
 pub mod gfx;

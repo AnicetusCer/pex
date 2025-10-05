@@ -1,24 +1,21 @@
-version: 1
+version: 2
 updated: 2025-10-04
 
 human:
   goals:
     - Keep the app snappy: fast first paint, smooth scrolling, minimal blocking on the UI thread.
     - Make pragmatic, incremental improvements without breaking working flows.
-    - Favor small patches that compile and pass clippy over big refactors.
-    - Keep Windows users happy (paths, perf, default config).
   ways_of_working:
-    - Provide the human with full function replaces if the function is resonably small (< 50 lines).
-    - When providing targeted code chanegs give the human the context of where to put the code.  
+    - Provide the human with full function replacements, the human will search by function name.
+    - When providing targeted code changes give the human the context of where to put the code, ie above line x.
     - Run: "cargo run" often; keep it compiling between changes.
     - Lint: "cargo clippy --all-targets --all-features -- -W clippy::all -W clippy::nursery".
-    - Prefer focused diffs; avoid churn and needless renames.
-    - Keep existing behavior unless there’s a clear UX win.
-    - If you must add types, prefer local type aliases (e.g., "type WorkItem = ...") over new modules.
+    - cleanup: when making changes, don't forget to cleanup old references.
+    - Advice: Suggest the best method to use to the human.
 
 project:
   purpose: >
-    EGUI app that scans a Plex EPG DB, builds a poster list, ensures cached “small” posters exist,
+    EGUI app that scans a Plex EPG DB, builds a movie poster list, ensures cached “small” posters exist,
     and lazily uploads textures to render a grouped grid (fast perceived startup).
   binaries:
     - pex (GUI)
@@ -30,17 +27,17 @@ project:
         cache.rs       # cache dir, url_to_cache_key, download & resized-store, raw RGBA loader
         prep.rs        # read-only DB scan -> Vec<PrepItem>, optional daily copy
         prefs.rs       # load/save UI prefs & hotset manifest
-        utils.rs       # day buckets, time formatting, title normalization, genre parsing, channel humanizer
+        utils.rs       # day buckets, time formatting, title normalization, genre parsing, channel humanizer, HD inference
         gfx.rs         # texture upload helpers
-        filters.rs     # (legacy) genre helpers; keep minimal
+        filters.rs     # day-window filtering, search, channel include-only filter, sorting & grouping
         types.rs       # enums & re-exported message/type aliases for app
-        owned.rs       # background "owned" scan and application of flags
+        owned.rs       # background "owned" scan, Owned vs Owned HD sidecar
         prefetch.rs    # worker pool to fetch/resize posters
-        detail.rs      # right-side details panel (snapped width)
+        detail.rs      # right-side details panel (snapped width; Owned/Airing HD/SD chips)
         ui/
           mod.rs       # splash + UI composition
-          topbar.rs    # range/search/sort/owned controls & channel filter popup
-          grid.rs      # grouped poster grid (fixed rows; centered; clipped labels)
+          topbar.rs    # range/search/sort/owned controls & channel filter popup (Select all/none/Clear)
+          grid.rs      # grouped poster grid (centered; badges: "HD" / "HD ↑"; conditional dim)
       config.rs        # AppConfig + load_config()
     epg_explorer_tool/
       db_explorer.rs   # CLI to inspect DB tables
@@ -48,9 +45,9 @@ project:
 
 runtime_model:
   threads_channels:
-    - UI thread: egui paint/input, status updates; lazy texture uploads.
+    - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation only on UI).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: DFS over library_roots → normalized "title:year" keys.
+    - Owned-scan thread: DFS over library_roots → normalized "title:year" keys; writes Owned HD sidecar.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive/HTTP2).
   messages:
     - PrepMsg:
@@ -59,7 +56,7 @@ runtime_model:
         - Error(String)
     - OwnedMsg:
         - Info(String)
-        - Done(HashSet<String>)   # normalized "title:year"
+        - Done(HashSet<String>)   # normalized "normalize_title(title):year"
         - Error(String)
     - WorkItem: "(row_idx, key, url, cached_path_opt)"
     - PrefetchDone: "{ row_idx, result: Result<PathBuf, String> }"
@@ -70,12 +67,12 @@ runtime_model:
     - begins_at_unix: Option<i64>
     - year: Option<i32>
     - tags_genre: Option<String>
-    - channel: Option<String>  # from media_items.extra_data (call sign/title)
+    - channel: Option<String>  # from media_items.extra_data (call sign/title; humanized in UI)
 
 flow:
   first_frame:
     - load_prefs() from "<cache_dir>/ui_prefs.txt"
-    - start_owned_scan()
+    - start_owned_scan()           # also produces owned_hd.txt sidecar
     - start_poster_prep()
     - show splash with status heartbeat
   prep_done_in_ui:
@@ -91,7 +88,7 @@ flow:
     - Workers:
         - download_and_store_resized_with_client(width=320, quality=75) → "<key>.jpg"
         - Fallback to download_and_store (original size)
-    - UI lazily uploads textures (throttled by MAX_UPLOADS_PER_FRAME)
+    - UI lazily uploads textures (bounded per-frame by MAX_UPLOADS_PER_FRAME)
 
 config:
   file: config.json
@@ -112,35 +109,56 @@ config:
       - hide_owned: "0|1"
       - dim_owned: "0|1"
       - dim_strength: "<0.10..0.90>"
-      - channels: "CSV of included channels"
+      - channels: "CSV of included channels (raw keys). Empty = no filter."
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-  cache_keys:
-    - base_key: "derived from URL (e.g., md5)"
-    - small_key: "base_key + '__s'"
-    - files:
-        - "<key>.jpg"  # resized small
-        - "<key>.rgba" # raw RGBA (loader supports)
+    owned_hd_sidecar: "<cache_dir>/owned_hd.txt"  # one key per line: "normalize_title(title):year"
+
+cache_keys:
+  - base_key: "derived from URL (e.g., md5)"
+  - small_key: "base_key + '__s'"
+  - files:
+      - "<key>.jpg"  # resized small
+      - "<key>.rgba" # raw RGBA (loader supports)
 
 ui:
   filters:
     - day_range: [2, 4, 5, 7, 14] relative to now (day buckets)
     - search: "substring on title (lowercased)"
-    - channel_filter: "include-only; configured via popup; saved as CSV in prefs"
-    - owned: { hide_owned: bool, dim_owned: bool, dim_strength: 0.10..0.90 }
+    - channel_filter:
+        type: "include-only"
+        state: "self.selected_channels: BTreeSet<String> (stores raw channel keys)"
+        behavior:
+          - "Empty set = filter OFF (show all)."
+          - "Non-empty = include only rows whose raw row.channel is in the set."
+        ui:
+          - "Top bar: 'Channel filter…' opens popup; 'Clear channels' button appears when active."
+          - "Popup: Select all / Select none / Clear; displays humanized labels but stores raw keys."
+    - owned:
+        hide_owned: bool
+        dim_owned: bool
+        dim_strength: 0.10..0.90
+        rules:
+          - "Do NOT dim when a better HD is available (airing HD AND owned is SD)."
   sort:
-    - key: [time, title, channel, genre]
-    - desc: togglable
+    key: [time, title, channel, genre]
+    desc: togglable
   layout:
     grid:
       card:
-        width: "poster_width_ui (120..220; default 140)"
+        width: "poster_width_ui (120..220; default ~140)"
         height: "card_w * 1.5 + 56 (poster + 3-line label)"
         selection: "yellow stroke on selected"
-        label: "clipped to text rect; never bleeds into neighbors; title(year) / humanized channel / HH:MM UTC"
+        label:
+          - "title(year)"
+          - "humanized channel; appends '• HD' if broadcast HD"
+          - "HH:MM UTC"
+        badges:
+          - "HD      (airing is HD)"
+          - "HD ↑    (airing is HD AND owned is SD → 'better HD available')"
+          - "badges drawn via draw_corner_badge in grid.rs"
       spacing:
-        # Horizontal spacing used for column math & panel snapping; keep single source of truth.
-        H_SPACING: 2.0
+        H_SPACING: 4.0
         V_SPACING: 10.0
       behavior:
         - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
@@ -150,13 +168,36 @@ ui:
     details_panel:
       side: "right"
       width: "resizable; snapped to multiples of (poster_width_ui + H_SPACING)"
-      min_max: "min 260; max clamp to ~45% of screen and snap; prevents covering grid"
-      content: "poster preview, title(year), channel+time line, owned flag, genres"
-      note: "current width stored in-memory (field: detail_panel_width); snapping keeps grid aligned"
+      min_max: "min 260; max clamp to ~45% of screen, snapped"
+      content:
+        - "poster preview (uses small texture when available)"
+        - "title(year)"
+        - "channel + time line"
+        - "chips: 'Airing HD/SD', and if owned: 'Owned HD' or 'Owned SD'"
+        - "genres"
+      state: "detail_panel_width (in-memory; planned prefs persistence)"
+
+hd_logic:
+  broadcast_hd_inference:
+    fn: "utils::infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool"
+    notes:
+      - "Looks for '2160', 'uhd', '4k', '1080', 'hdr', '720', ' hd ' in tags_genre (case-insensitive)."
+      - "Also flags channels with names ending in ' HD' or containing ' hd '."
+  owned_hd_inference:
+    sidecar: "<cache_dir>/owned_hd.txt"
+    produced_by: "owned.rs scan"
+    method:
+      - "Filename heuristic via utils::is_path_hd(&Path) → Some(true/false) or None."
+      - "Only positive HD detections are recorded; absence ≠ SD."
+  better_hd_available_rule:
+    definition: "row.owned && !owned_is_hd && broadcast_hd"
+    effects:
+      - "Grid shows 'HD ↑' badge."
+      - "Dim overlay suppressed even if 'Dim owned' is enabled."
 
 perf:
   constants:
-    - WORKER_COUNT = 16 (default into UI)
+    - WORKER_COUNT = 16
     - RESIZE_MAX_W = 320
     - RESIZE_QUALITY = 75
     - SHOW_GRID_EARLY = true
@@ -169,30 +210,31 @@ perf:
     - One shared blocking HTTP client (keep-alive + HTTP/2).
     - Prioritize near-term airings when queuing.
     - Throttle GPU uploads per frame.
+    - Keep UI thread responsive (ctx.request_repaint; small drains per frame).
 
 style_and_clippy:
   enforce:
     - Prefer "Self::" inside impls.
-    - Take "&Path" (not "&PathBuf") in helpers.
-    - Use ".is_some_and", "map_or_else" where it improves clarity.
+    - Take "&Path" (not "&PathBuf") in helpers where possible.
+    - Use ".is_some_and" / ".map_or" where it clarifies intent.
   allowed:
     - "clippy::missing_const_for_fn" for tiny mutators (e.g., mark_dirty()).
-    - "clippy::too_long_first_doc_paragraph" in legacy docs (or split with a blank line).
+    - "clippy::too_long_first_doc_paragraph" in legacy docs.
   gotchas:
-    - Do not reintroduce removed fields (e.g., first_ready_at).
     - Keep: "type WorkItem = (usize, String, String, Option<PathBuf>);".
+    - When reading popup state: set `self.show_channel_filter_popup = open` **after** `Window::show(...)` to avoid borrow conflicts.
 
 troubleshooting:
-  - duplicate [[bin]] name/path: "One block per bin in Cargo.toml."
-  - unresolved pex_new: "Use pex::app::PexApp or import PexApp."
-  - missing Path: "add use std::path::Path."
-  - function defined multiple times: "deduplicate helpers (e.g., civil_from_days)."
-  - splash never ends:
-      - ensure plex_db_local exists and is valid sqlite
-      - if using plex_db_source, verify path and last-sync marker behavior
-      - watch PrepMsg::Info / OwnedMsg::Info logs for progress
+  - Duplicate helper definitions:
+      - Keep draw_corner_badge only in grid.rs; reuse via module path or in-file.
+  - Splash never ends:
+      - Ensure plex_db_local is a valid sqlite; if using plex_db_source, verify last-sync behavior.
+      - Watch PrepMsg::Info / OwnedMsg::Info logs for progress.
+  - Badges not showing:
+      - Check infer_broadcast_hd() inputs (tags_genre, channel). Channel label is humanized for display only; raw key is used for filtering.
 
 open_todos:
   - Persist detail_panel_width in prefs (read/write key e.g., "detail_w") so the snap width survives restarts.
-  - Use a single spacing constant across grid & detail snap (prefer ui/grid.rs::H_SPACING; remove duplicate GUTTER_X).
-  - Consider optional per-row time labels (local timezone toggle) once config is ready.
+  - Single source of truth for spacing across grid & detail snap (grid::H_SPACING already used for both).
+  - Optional timezone toggle (UTC/local) for time labels.
+  - Investigate using DB channel flags (if present) to strengthen broadcast HD inference.
