@@ -7,13 +7,16 @@ impl crate::app::PexApp {
     /// Build grouped indices for the grid: per-day buckets with intra-day sorting applied.
     /// Returns Vec of (day_bucket, indices_for_that_day)
     pub(crate) fn build_grouped_indices(&self) -> Vec<(i64, Vec<usize>)> {
+        use std::time::SystemTime;
+
         let now_bucket = crate::app::utils::day_bucket(SystemTime::now());
+        // The helper is in this module — call it directly.
         let max_bucket_opt = max_bucket_for_range(self.current_range, now_bucket);
 
         // Precompute filters
-        let query = self.search_query.to_lowercase();
+        let query = self.search_query.to_ascii_lowercase();
         let use_query = !query.is_empty();
-        let have_channel_filter = !self.selected_channels.is_empty();
+        let have_channel_filter = !self.selected_channels.is_empty(); // EMPTY = no filter (show all)
 
         // 1) Filter + attach day bucket
         let mut filtered: Vec<(usize, i64)> = self
@@ -34,24 +37,48 @@ impl crate::app::PexApp {
                 }
 
                 // title search
-                if use_query && !row.title.to_lowercase().contains(&query) {
+                if use_query && !row.title.to_ascii_lowercase().contains(&query) {
                     return None;
                 }
 
                 // include-only channel filter
                 if have_channel_filter {
-                    if let Some(ch) = &row.channel {
-                        if !self.selected_channels.contains(ch) {
-                            return None;
-                        }
-                    } else {
+                    // Compare against BOTH the raw channel string and the humanized label
+                    let raw = row.channel.as_deref().unwrap_or("");
+                    let human = row
+                        .channel
+                        .as_deref()
+                        .map(crate::app::utils::humanize_channel);
+
+                    let selected_match =
+                        self.selected_channels.contains(raw)
+                        || human
+                            .as_ref()
+                            .is_some_and(|h| self.selected_channels.contains(h));
+
+                    if !selected_match {
                         return None;
                     }
                 }
 
-                // hide owned
+                // hide-owned, but KEEP rows that are HD upgrades (airing HD while owned is SD)
                 if self.hide_owned && row.owned {
-                    return None;
+                    let tags_joined = (!row.genres.is_empty()).then(|| row.genres.join("|"));
+                    let broadcast_hd = crate::app::utils::infer_broadcast_hd(
+                        tags_joined.as_deref(),
+                        row.channel.as_deref(),
+                    );
+
+                    let owned_key = Self::make_owned_key(&row.title, row.year);
+                    let owned_is_hd = self
+                        .owned_hd_keys
+                        .as_ref()
+                        .map_or(false, |set| set.contains(&owned_key));
+
+                    let is_upgrade = broadcast_hd && !owned_is_hd;
+                    if !is_upgrade {
+                        return None;
+                    }
                 }
 
                 Some((idx, b))
