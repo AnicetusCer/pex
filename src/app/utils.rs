@@ -1,7 +1,13 @@
 // src/app/util.rs
-use std::time::SystemTime;
+use once_cell::sync::{Lazy, OnceCell};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::Path;
-
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{debug, warn};
 pub(crate) fn normalize_title(s: &str) -> String {
     let s = s.to_lowercase();
     let s = s.replace(['.', '_', '-', ':', '–', '—', '(', ')', '[', ']'], " ");
@@ -11,10 +17,15 @@ pub(crate) fn normalize_title(s: &str) -> String {
 pub(crate) fn find_year_in_str(s: &str) -> Option<i32> {
     let bytes = s.as_bytes();
     for i in 0..bytes.len().saturating_sub(3) {
-        if bytes[i].is_ascii_digit() && bytes[i+1].is_ascii_digit()
-            && bytes[i+2].is_ascii_digit() && bytes[i+3].is_ascii_digit() {
-            if let Ok(val) = s[i..i+4].parse::<i32>() {
-                if (1900..=2099).contains(&val) { return Some(val); }
+        if bytes[i].is_ascii_digit()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && bytes[i + 3].is_ascii_digit()
+        {
+            if let Ok(val) = s[i..i + 4].parse::<i32>() {
+                if (1900..=2099).contains(&val) {
+                    return Some(val);
+                }
             }
         }
     }
@@ -22,13 +33,24 @@ pub(crate) fn find_year_in_str(s: &str) -> Option<i32> {
 }
 
 pub(crate) fn day_bucket(ts: SystemTime) -> i64 {
-    let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let secs = ts
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     secs / 86_400
 }
 
 pub(crate) const fn weekday_full_from_bucket(bucket: i64) -> &'static str {
     let idx = ((bucket + 4).rem_euclid(7)) as usize; // 1970-01-01 was Thursday
-    const NAMES: [&str; 7] = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const NAMES: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
     NAMES[idx]
 }
 
@@ -46,15 +68,23 @@ pub(crate) const fn civil_from_days(z0: i64) -> (i32, u32, u32) {
     (y as i32, m as u32, d as u32)
 }
 
-
 pub(crate) fn month_short_name(m: u32) -> &'static str {
-    const M: [&str; 12] = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const M: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     M[(m.saturating_sub(1)).min(11) as usize]
 }
 
 pub(crate) fn ordinal_suffix(d: u32) -> &'static str {
-    if (11..=13).contains(&(d % 100)) { return "th"; }
-    match d % 10 { 1 => "st", 2 => "nd", 3 => "rd", _ => "th" }
+    if (11..=13).contains(&(d % 100)) {
+        return "th";
+    }
+    match d % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
+    }
 }
 
 pub(crate) fn format_day_label(bucket: i64) -> String {
@@ -64,7 +94,10 @@ pub(crate) fn format_day_label(bucket: i64) -> String {
 }
 
 pub(crate) fn hhmm_utc(ts: SystemTime) -> String {
-    let secs = ts.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let secs = ts
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let hm = (secs % 86_400 + 86_400) % 86_400;
     let h = hm / 3600;
     let m = (hm % 3600) / 60;
@@ -76,9 +109,13 @@ pub(crate) fn host_from_url(u: &str) -> Option<String> {
     let start = u.find("://").map(|i| i + 3).unwrap_or(0);
     let rest = &u[start..];
     let end = rest.find('/').unwrap_or(rest.len());
-    if end == 0 { return None; }
+    if end == 0 {
+        return None;
+    }
     let host = &rest[..end];
-    if host.is_empty() { return None; }
+    if host.is_empty() {
+        return None;
+    }
     Some(host.split('.').next().unwrap_or(host).to_uppercase())
 }
 
@@ -136,7 +173,8 @@ pub fn humanize_channel(raw: &str) -> String {
 
     // Uppercase simple lowercase labels
     if s.chars().any(|c| c.is_ascii_lowercase())
-        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c.is_whitespace())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c.is_whitespace())
     {
         s = s.to_ascii_uppercase();
     }
@@ -151,7 +189,11 @@ pub fn humanize_channel(raw: &str) -> String {
         s = format!("{} HD", base.trim_end());
     }
 
-    if s.is_empty() { "—".into() } else { s }
+    if s.is_empty() {
+        "—".into()
+    } else {
+        s
+    }
 }
 
 /// Very cheap HD inference from tags/channel.
@@ -160,7 +202,9 @@ pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bo
     // Tags are strongest: UHD/4K/HDR/1080/720 -> HD
     if let Some(tags) = tags_genre {
         let t = tags.to_ascii_lowercase();
-        for needle in ["2160", "uhd", "4k", "hdr", "1080", "720", " hd ", "(hd)", "[hd]"] {
+        for needle in [
+            "2160", "uhd", "4k", "hdr", "1080", "720", " hd ", "(hd)", "[hd]",
+        ] {
             if t.contains(needle) {
                 return true;
             }
@@ -173,7 +217,10 @@ pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bo
         if spaced.ends_with(" hd") || spaced.contains(" hd ") {
             return true;
         }
-        let compact: String = spaced.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let compact: String = spaced
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
         let cc = compact.to_ascii_uppercase();
 
         // UHD/4K anywhere → HD
@@ -190,13 +237,166 @@ pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bo
 
     false
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct ProbeEntry {
+    mtime: Option<u64>,
+    width: u32,
+    height: u32,
+}
 
-/// Heuristic for “is this file HD?” based on filename/path only (>=720p).
+#[derive(Default, Serialize, Deserialize)]
+struct ProbeCache {
+    entries: HashMap<String, ProbeEntry>,
+}
+
+static FFPROBE_CACHE: Lazy<Mutex<ProbeCache>> = Lazy::new(|| Mutex::new(ProbeCache::load()));
+
+impl ProbeCache {
+    fn cache_path() -> std::path::PathBuf {
+        crate::app::cache::cache_dir().join("ffprobe_cache.json")
+    }
+
+    fn load() -> Self {
+        let path = Self::cache_path();
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    warn!("Failed to read ffprobe cache {}: {err}", path.display());
+                }
+                Self::default()
+            }
+        }
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let path = Self::cache_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("tmp");
+        let data = serde_json::to_vec(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        fs::write(&tmp, data)?;
+        fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    fn key_for(path: &Path) -> Option<String> {
+        Some(path.to_str()?.to_owned())
+    }
+
+    fn lookup(&self, key: &str, mtime: Option<u64>) -> Option<ProbeEntry> {
+        self.entries.get(key).and_then(|entry| {
+            if entry.mtime == mtime {
+                Some(*entry)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn update(&mut self, key: String, entry: ProbeEntry) {
+        self.entries.insert(key, entry);
+    }
+}
+
+fn file_modified_seconds(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_secs())
+}
+
+pub(crate) fn ffprobe_available() -> bool {
+    static FFPROBE_AVAILABLE: OnceCell<bool> = OnceCell::new();
+    *FFPROBE_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("ffprobe")
+            .arg("-version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    })
+}
+
+fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
+    let cache_key = ProbeCache::key_for(path);
+    let mtime = file_modified_seconds(path);
+
+    if let Some(ref key) = cache_key {
+        if let Some(hit) = FFPROBE_CACHE
+            .lock()
+            .expect("ffprobe cache mutex poisoned")
+            .lookup(key, mtime)
+        {
+            debug!("ffprobe cache hit for {key}");
+            return Some((hit.width, hit.height));
+        }
+    }
+
+    if !ffprobe_available() {
+        return None;
+    }
+
+    let output = std::process::Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=width,height")
+        .arg("-of")
+        .arg("csv=p=0:s=x")
+        .arg(path.as_os_str())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    let dims = stdout.lines().find(|line| !line.trim().is_empty())?.trim();
+    let (w, h) = dims.split_once('x')?;
+    let width: u32 = w.trim().parse().ok()?;
+    let height: u32 = h.trim().parse().ok()?;
+    let entry = ProbeEntry {
+        mtime,
+        width,
+        height,
+    };
+
+    if let Some(key) = cache_key {
+        let mut cache = FFPROBE_CACHE.lock().expect("ffprobe cache mutex poisoned");
+        cache.update(key.clone(), entry);
+        if let Err(err) = cache.save() {
+            warn!(
+                "Failed to persist ffprobe cache {}: {err}",
+                ProbeCache::cache_path().display()
+            );
+        } else {
+            debug!("Cached ffprobe result for {key}");
+        }
+    }
+
+    Some((width, height))
+}
+
+/// Heuristic for "is this file HD?" based on filename/path only (>=720p).
 /// Returns Some(true/false) if we can tell, or None if unknown.
 pub fn is_path_hd(p: &Path) -> Option<bool> {
+    if let Some((width, height)) = ffprobe_resolution(p) {
+        if width > 0 && height > 0 {
+            return Some(width >= 1_280 || height >= 720);
+        }
+    }
+
     // Look at filename *and* parent dir for quality hints.
-    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let parent = p.parent()
+    let stem = p
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let parent = p
+        .parent()
         .and_then(|pp| pp.file_name())
         .and_then(|s| s.to_str())
         .unwrap_or_default()
@@ -204,12 +404,33 @@ pub fn is_path_hd(p: &Path) -> Option<bool> {
     let hay = format!("{stem} {parent}");
 
     // Positive HD/UHD signals
-    for n in ["2160p","uhd","4k","hdr","dolby vision","dv","1080p","720p","blu-ray","bluray","bdrip","hdtv","web-dl","webrip"] {
-        if hay.contains(n) { return Some(true); }
+    for n in [
+        "2160p",
+        "uhd",
+        "4k",
+        "hdr",
+        "dolby vision",
+        "dv",
+        "1080p",
+        "720p",
+        "blu-ray",
+        "bluray",
+        "bdrip",
+        "hdtv",
+        "web-dl",
+        "webrip",
+    ] {
+        if hay.contains(n) {
+            return Some(true);
+        }
     }
     // Strong SD indicators
-    for n in ["480p","576p","sd " ,"vhs","svcd","xvid","divx","dvdrip"] {
-        if hay.contains(n) { return Some(false); }
+    for n in [
+        "480p", "576p", "sd ", "vhs", "svcd", "xvid", "divx", "dvdrip",
+    ] {
+        if hay.contains(n) {
+            return Some(false);
+        }
     }
     None
 }

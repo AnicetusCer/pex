@@ -2,13 +2,7 @@
 use eframe::egui::{self as eg, ColorImage, TextureHandle};
 
 /// Upload an RGBA image to a GPU texture. (UI thread only)
-pub fn upload_rgba(
-    ctx: &eg::Context,
-    w: u32,
-    h: u32,
-    bytes: &[u8],
-    name: &str,
-) -> TextureHandle {
+pub fn upload_rgba(ctx: &eg::Context, w: u32, h: u32, bytes: &[u8], name: &str) -> TextureHandle {
     let img = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], bytes);
     ctx.load_texture(name.to_string(), img, eg::TextureOptions::LINEAR)
 }

@@ -1,8 +1,8 @@
 // src/app/types.rs
+use eframe::egui::TextureHandle;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::SystemTime;
-use eframe::egui::TextureHandle;
 
 // ---- cross-thread messages / data ----
 pub enum OwnedMsg {
@@ -11,8 +11,15 @@ pub enum OwnedMsg {
     Error(String),
 }
 
-pub type PrepItem =
-    (String, String, String, Option<i64>, Option<i32>, Option<String>, Option<String>);
+pub type PrepItem = (
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<i32>,
+    Option<String>,
+    Option<String>,
+);
 
 pub enum PrepMsg {
     Info(String),
@@ -35,9 +42,9 @@ pub enum Phase {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BootPhase {
     Starting,
-    CheckingNew,  // phase 2
-    Caching,      // phase 3
-    Ready,        // phase 4
+    CheckingNew, // phase 2
+    Caching,     // phase 3
+    Ready,       // phase 4
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

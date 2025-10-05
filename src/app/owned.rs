@@ -1,17 +1,221 @@
 // src/app/owned.rs
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use eframe::egui as eg;
+use tracing::warn;
 
 use crate::app::types::OwnedMsg;
 use crate::config::load_config;
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct OwnedManifest {
+    dirs: HashMap<String, DirSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DirSnapshot {
+    mtime: Option<u64>,
+    files: Vec<FileSnapshot>,
+    subdirs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileSnapshot {
+    key: String,
+    hd: bool,
+}
+
+impl OwnedManifest {
+    fn load() -> Self {
+        let path = Self::path();
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(err) if err.kind() == ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                warn!("Failed to read owned manifest {}: {err}", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let data =
+            serde_json::to_vec_pretty(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        fs::write(&tmp, data)?;
+        fs::rename(tmp, path)
+    }
+
+    fn path() -> PathBuf {
+        crate::app::cache::cache_dir().join("owned_manifest.json")
+    }
+
+    fn insert_snapshot(&mut self, dir: String, snapshot: DirSnapshot) {
+        self.dirs.insert(dir, snapshot);
+    }
+
+    fn get(&self, dir: &str) -> Option<&DirSnapshot> {
+        self.dirs.get(dir)
+    }
+}
+
+fn dir_modified_seconds(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs())
+}
+
+fn reuse_directory(
+    dir: &str,
+    manifest: &OwnedManifest,
+    new_manifest: &mut OwnedManifest,
+    owned: &mut HashSet<String>,
+    hd_keys: &mut HashSet<String>,
+) {
+    if let Some(snapshot) = manifest.get(dir) {
+        for file in &snapshot.files {
+            owned.insert(file.key.clone());
+            if file.hd {
+                hd_keys.insert(file.key.clone());
+            }
+        }
+        new_manifest.insert_snapshot(dir.to_owned(), snapshot.clone());
+        for sub in &snapshot.subdirs {
+            reuse_directory(sub, manifest, new_manifest, owned, hd_keys);
+        }
+    }
+}
+
+fn scan_directory(
+    dir: &Path,
+    manifest: &OwnedManifest,
+    new_manifest: &mut OwnedManifest,
+    owned: &mut HashSet<String>,
+    hd_keys: &mut HashSet<String>,
+    tx: &Sender<OwnedMsg>,
+) {
+    let dir_str = dir.to_string_lossy().to_string();
+    let mtime = dir_modified_seconds(dir);
+
+    if let Some(snapshot) = manifest.get(&dir_str) {
+        if snapshot.mtime == mtime {
+            let _ = tx.send(OwnedMsg::Info(format!(
+                "Owned scan: using cache for {}",
+                dir.display()
+            )));
+            reuse_directory(&dir_str, manifest, new_manifest, owned, hd_keys);
+            return;
+        }
+    }
+
+    let _ = tx.send(OwnedMsg::Info(format!(
+        "Owned scan: scanning {}",
+        dir.display()
+    )));
+
+    let mut snapshot = DirSnapshot {
+        mtime,
+        files: Vec::new(),
+        subdirs: Vec::new(),
+    };
+
+    let read_dir = match fs::read_dir(dir) {
+        Ok(iter) => iter,
+        Err(err) => {
+            warn!("Owned scan: unable to read {}: {err}", dir.display());
+            return;
+        }
+    };
+
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                warn!("Owned scan: failed entry in {}: {err}", dir.display());
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(err) => {
+                warn!(
+                    "Owned scan: failed to get type for {}: {err}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+
+        if file_type.is_dir() {
+            let subdir_str = path.to_string_lossy().to_string();
+            snapshot.subdirs.push(subdir_str.clone());
+            scan_directory(&path, manifest, new_manifest, owned, hd_keys, tx);
+            continue;
+        }
+
+        if !file_type.is_file() || !is_video_ext(&path) {
+            continue;
+        }
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let year = crate::app::utils::find_year_in_str(stem);
+        let title = year
+            .map(|y| stem.replace(&y.to_string(), " "))
+            .unwrap_or_else(|| stem.to_string());
+        let normalized = crate::app::utils::normalize_title(&title);
+        let key = format!("{}:{}", normalized, year.unwrap_or_default());
+
+        owned.insert(key.clone());
+        let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
+        if hd {
+            hd_keys.insert(key.clone());
+        }
+        snapshot.files.push(FileSnapshot { key, hd });
+    }
+
+    new_manifest.insert_snapshot(dir_str, snapshot);
+}
+
 // --------- small helpers (private to this module) ---------
 fn is_video_ext(p: &Path) -> bool {
-    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-    matches!(ext.as_str(), "mkv" | "mp4" | "avi" | "mov" | "mpg" | "mpeg" | "m4v" | "wmv")
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "mkv" | "mp4" | "avi" | "mov" | "mpg" | "mpeg" | "m4v" | "wmv"
+    )
+}
+
+fn persist_owned_keys_sidecar(
+    cache_dir: &Path,
+    owned_keys: &HashSet<String>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = cache_dir.join("owned_all.txt");
+    let mut f = std::fs::File::create(&path)?;
+    for k in owned_keys {
+        writeln!(f, "{k}")?;
+    }
+    Ok(())
 }
 
 fn persist_owned_hd_sidecar(cache_dir: &Path, hd_keys: &HashSet<String>) -> std::io::Result<()> {
@@ -25,7 +229,7 @@ fn persist_owned_hd_sidecar(cache_dir: &Path, hd_keys: &HashSet<String>) -> std:
 }
 
 impl crate::app::PexApp {
-    /// Kick off a non-blocking owned-file scan across `library_roots`.
+    /// Kick off a non-blocking owned-file scan across library_roots.
     pub(crate) fn start_owned_scan(&mut self) {
         if self.owned_rx.is_some() {
             return;
@@ -41,7 +245,9 @@ impl crate::app::PexApp {
 
     /// Apply the owned flags using the computed key set (no-ops if not ready).
     pub(crate) fn apply_owned_flags(&mut self) {
-        let Some(keys) = &self.owned_keys else { return; };
+        let Some(keys) = &self.owned_keys else {
+            return;
+        };
         for row in &mut self.rows {
             let key = Self::make_owned_key(&row.title, row.year);
             row.owned = keys.contains(&key);
@@ -53,46 +259,45 @@ impl crate::app::PexApp {
 
         std::thread::spawn(move || {
             if library_roots.is_empty() {
-                let _ = tx.send(Info("No library_roots in config.json; owned scan skipped.".into()));
+                let _ = tx.send(Info(
+                    "No library_roots in config.json; owned scan skipped.".into(),
+                ));
                 let _ = tx.send(Done(HashSet::new()));
                 return;
             }
 
+            let manifest = OwnedManifest::load();
+            let mut new_manifest = OwnedManifest::default();
             let mut owned: HashSet<String> = HashSet::new();
-            let mut hd_keys: HashSet<String> = HashSet::new(); // positive HD detections
+            let mut hd_keys: HashSet<String> = HashSet::new();
 
             for root in &library_roots {
-                let _ = tx.send(Info(format!("Scanning {}", root.display())));
                 if !root.exists() {
                     let _ = tx.send(Info(format!("Owned scan: missing root {}", root.display())));
                     continue;
                 }
 
-                for e in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
-                    if !e.file_type().is_file() { continue; }
-                    let p = e.path();
-                    if !is_video_ext(p) { continue; }
-
-                    // Build canonical owned key
-                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-                    let year = crate::app::utils::find_year_in_str(stem);
-                    let title = year.map(|y| stem.replace(&y.to_string(), " ")).unwrap_or_else(|| stem.to_string());
-                    let key = Self::make_owned_key(&title, year);
-
-                    owned.insert(key.clone());
-
-                    // filename heuristic; if it says "HD", mark positive
-                    if let Some(hd) = crate::app::utils::is_path_hd(p) {
-                        if hd { hd_keys.insert(key); }
-                    }
-                }
-
-                // Be gentle on massive trees
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                scan_directory(
+                    root,
+                    &manifest,
+                    &mut new_manifest,
+                    &mut owned,
+                    &mut hd_keys,
+                    &tx,
+                );
             }
 
-            // Persist HD subset (one-per-line) for the UI to load
-            let _ = persist_owned_hd_sidecar(&crate::app::cache::cache_dir(), &hd_keys);
+            if let Err(err) = new_manifest.save() {
+                warn!("Failed to persist owned manifest: {err}");
+            }
+
+            let cache_dir = crate::app::cache::cache_dir();
+            if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
+                warn!("Failed to persist owned sidecar: {err}");
+            }
+            if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
+                warn!("Failed to persist owned HD sidecar: {err}");
+            }
 
             let _ = tx.send(Done(owned));
         });
@@ -103,7 +308,6 @@ impl crate::app::PexApp {
         use crate::app::types::OwnedMsg::{Done, Error, Info};
 
         loop {
-            // Limit the immutable borrow of rx to just this call.
             let msg = {
                 let rx = match self.owned_rx.as_ref() {
                     Some(r) => r,
@@ -117,14 +321,17 @@ impl crate::app::PexApp {
             };
 
             match msg {
-                Info(s) => self.set_status(format!("Owned scan: {s}")),
+                Info(s) => self.set_status(s),
                 Error(e) => self.set_status(format!("Owned scan error: {e}")),
                 Done(keys) => {
                     self.owned_keys = Some(keys);
-                    self.apply_owned_flags();
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
+                    self.apply_owned_flags();
                     self.mark_dirty();
                     self.set_status("Owned scan complete.");
+                    if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
+                        self.boot_phase = crate::app::BootPhase::Ready;
+                    }
                 }
             }
         }

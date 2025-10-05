@@ -1,6 +1,6 @@
 // src/app/ui/topbar.rs
-use eframe::egui as eg;
 use super::super::{DayRange, SortKey};
+use eframe::egui as eg;
 
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
@@ -17,13 +17,40 @@ impl crate::app::PexApp {
                     DayRange::Fourteen => "14 days",
                 })
                 .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.current_range, DayRange::Two, "2 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Four, "4 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Five, "5 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Seven, "7 days").clicked() { changed_day = true; }
-                    if ui.selectable_value(&mut self.current_range, DayRange::Fourteen, "14 days").clicked() { changed_day = true; }
+                    if ui
+                        .selectable_value(&mut self.current_range, DayRange::Two, "2 days")
+                        .clicked()
+                    {
+                        changed_day = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.current_range, DayRange::Four, "4 days")
+                        .clicked()
+                    {
+                        changed_day = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.current_range, DayRange::Five, "5 days")
+                        .clicked()
+                    {
+                        changed_day = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.current_range, DayRange::Seven, "7 days")
+                        .clicked()
+                    {
+                        changed_day = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.current_range, DayRange::Fourteen, "14 days")
+                        .clicked()
+                    {
+                        changed_day = true;
+                    }
                 });
-            if changed_day { self.mark_dirty(); }
+            if changed_day {
+                self.mark_dirty();
+            }
 
             ui.separator();
 
@@ -33,7 +60,9 @@ impl crate::app::PexApp {
                     .hint_text("Title…")
                     .desired_width(160.0),
             );
-            if resp.changed() { self.mark_dirty(); }
+            if resp.changed() {
+                self.mark_dirty();
+            }
 
             ui.separator();
 
@@ -44,7 +73,11 @@ impl crate::app::PexApp {
 
             // Clear active channel filter (only when something is selected)
             if !self.selected_channels.is_empty() {
-                if ui.small_button("Clear channels").on_hover_text("Clear the channel include-only filter").clicked() {
+                if ui
+                    .small_button("Clear channels")
+                    .on_hover_text("Clear the channel include-only filter")
+                    .clicked()
+                {
                     self.selected_channels.clear();
                     self.mark_dirty();
                 }
@@ -62,19 +95,46 @@ impl crate::app::PexApp {
                     SortKey::Genre => "Sort: Genre",
                 })
                 .show_ui(ui, |ui| {
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Time, "Time").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Title, "Title").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Channel, "Channel").clicked() { changed_sort = true; }
-                    if ui.selectable_value(&mut self.sort_key, SortKey::Genre, "Genre").clicked() { changed_sort = true; }
+                    if ui
+                        .selectable_value(&mut self.sort_key, SortKey::Time, "Time")
+                        .clicked()
+                    {
+                        changed_sort = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.sort_key, SortKey::Title, "Title")
+                        .clicked()
+                    {
+                        changed_sort = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.sort_key, SortKey::Channel, "Channel")
+                        .clicked()
+                    {
+                        changed_sort = true;
+                    }
+                    if ui
+                        .selectable_value(&mut self.sort_key, SortKey::Genre, "Genre")
+                        .clicked()
+                    {
+                        changed_sort = true;
+                    }
                 });
-            if changed_sort { self.mark_dirty(); }
-            if ui.checkbox(&mut self.sort_desc, "Desc").changed() { self.mark_dirty(); }
+            if changed_sort {
+                self.mark_dirty();
+            }
+            if ui.checkbox(&mut self.sort_desc, "Desc").changed() {
+                self.mark_dirty();
+            }
 
             ui.separator();
 
             // Poster size
             ui.label("Poster:");
-            if ui.add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px")).changed() {
+            if ui
+                .add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px"))
+                .changed()
+            {
                 self.mark_dirty();
             }
 
@@ -83,11 +143,19 @@ impl crate::app::PexApp {
             // Workers
             ui.label("Workers:");
             let workers_resp = ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32));
-            if workers_resp.changed() { self.mark_dirty(); }
-            workers_resp.on_hover_text("Parallel downloads. Typical 8–16. New value applies to next prefetch.");
+            if workers_resp.changed() {
+                self.mark_dirty();
+            }
+            workers_resp.on_hover_text(
+                "Parallel downloads. Typical 8–16. New value applies to next prefetch.",
+            );
             if self.prefetch_started && self.loading_progress < 1.0 {
                 ui.add_space(6.0);
-                ui.label(eg::RichText::new("(new value applies to next prefetch)").italics().weak());
+                ui.label(
+                    eg::RichText::new("(new value applies to next prefetch)")
+                        .italics()
+                        .weak(),
+                );
             }
 
             ui.separator();
@@ -98,20 +166,28 @@ impl crate::app::PexApp {
             }
             let mut dim_changed = ui.checkbox(&mut self.dim_owned, "Dim owned").changed();
             if self.dim_owned {
-                if ui.add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %")).changed() {
+                if ui
+                    .add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %"))
+                    .changed()
+                {
                     dim_changed = true;
                 }
             }
-            if dim_changed { self.mark_dirty(); }
+            if dim_changed {
+                self.mark_dirty();
+            }
         });
     }
 
     // ---------- CHANNEL FILTER POPUP ----------
     pub(crate) fn ui_render_channel_filter_popup(&mut self, ctx: &eg::Context) {
-        if !self.show_channel_filter_popup { return; }
+        if !self.show_channel_filter_popup {
+            return;
+        }
 
         // Build channel list from current rows (raw values; UI presents humanized label)
-        let mut channels: Vec<String> = self.rows.iter().filter_map(|r| r.channel.clone()).collect();
+        let mut channels: Vec<String> =
+            self.rows.iter().filter_map(|r| r.channel.clone()).collect();
         channels.sort();
         channels.dedup();
 

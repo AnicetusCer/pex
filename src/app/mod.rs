@@ -1,10 +1,10 @@
 // src/app/mod.rs — async DB scan + upfront poster prefetch + resized cache + single splash
 
 // ---- Standard lib imports ----
-use std::path::{PathBuf};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
-use std::collections::HashSet;
 
 // ---- Crates ----
 use eframe::egui as eg;
@@ -15,24 +15,24 @@ use crate::app::cache::find_any_by_key;
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
-pub mod utils;
 pub mod prep;
 pub mod types;
+pub mod utils;
 pub use types::{
-    OwnedMsg, PrepItem, PrepMsg, PrefetchDone,
-    Phase, BootPhase, PosterState, DayRange, SortKey, PosterRow
+    BootPhase, DayRange, OwnedMsg, Phase, PosterRow, PosterState, PrefetchDone, PrepItem, PrepMsg,
+    SortKey,
 };
-pub mod prefetch;
-pub mod owned;
-#[path = "ui/uimod.rs"]  // this is we don't have duplicate file names in within the workspace.
-pub mod ui;
-pub mod prefs;
-pub mod gfx;
-pub mod filters;
 pub mod detail;
+pub mod filters;
+pub mod gfx;
+pub mod owned;
+pub mod prefetch;
+pub mod prefs;
+#[path = "ui/uimod.rs"] // this is we don't have duplicate file names in within the workspace.
+pub mod ui;
 
 // ---- Tunables ----
-const WORKER_COUNT: usize = 16;        // up from 8 — tune freely (8–32 typical)
+const WORKER_COUNT: usize = 16; // up from 8 — tune freely (8–32 typical)
 const RESIZE_MAX_W: u32 = 320;
 const RESIZE_QUALITY: u8 = 75;
 const SHOW_GRID_EARLY: bool = true;
@@ -116,7 +116,7 @@ pub struct PexApp {
     last_hotset: Option<std::collections::HashMap<String, PathBuf>>,
 
     selected_idx: Option<usize>,
-        // UI state
+    // UI state
     detail_panel_width: f32,
 }
 
@@ -157,8 +157,8 @@ impl Default for PexApp {
             dim_strength_ui: 0.6, // sensible default, darker not lighter
 
             owned_rx: None,
-            owned_keys: None,
-            owned_hd_keys: None,
+            owned_keys: Self::load_owned_keys_sidecar(),
+            owned_hd_keys: Self::load_owned_hd_sidecar(),
 
             search_query: String::new(),
 
@@ -168,7 +168,7 @@ impl Default for PexApp {
             sort_key: SortKey::Time,
             sort_desc: false,
 
-            poster_width_ui: 140.0, // matches current card_w
+            poster_width_ui: 140.0,        // matches current card_w
             worker_count_ui: WORKER_COUNT, // show the current worker count
 
             prefs_dirty: false,
@@ -192,82 +192,110 @@ impl PexApp {
         format!("{base}__s")
     }
 
-fn make_owned_key(title: &str, year: Option<i32>) -> String {
-    format!("{}:{}", utils::normalize_title(title), year.unwrap_or_default())
-}
-
-fn load_owned_hd_sidecar() -> Option<HashSet<String>> {
-    use std::{collections::HashSet, fs};
-    let path = crate::app::cache::cache_dir().join("owned_hd.txt");
-    let text = fs::read_to_string(path).ok()?;
-    let mut set = HashSet::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        set.insert(line.to_owned());
+    fn make_owned_key(title: &str, year: Option<i32>) -> String {
+        format!(
+            "{}:{}",
+            utils::normalize_title(title),
+            year.unwrap_or_default()
+        )
     }
-    Some(set)
-}
 
+    fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
+        Self::load_sidecar_file("owned_all.txt")
+    }
+
+    fn load_owned_hd_sidecar() -> Option<HashSet<String>> {
+        Self::load_sidecar_file("owned_hd.txt")
+    }
+
+    fn load_sidecar_file(file_name: &str) -> Option<HashSet<String>> {
+        use std::{collections::HashSet, fs};
+        let path = crate::app::cache::cache_dir().join(file_name);
+        let text = fs::read_to_string(path).ok()?;
+        let mut set = HashSet::new();
+        for line in text.lines().map(str::trim) {
+            if !line.is_empty() {
+                set.insert(line.to_owned());
+            }
+        }
+        Some(set)
+    }
 }
 
 impl PexApp {
-/// Try to upload texture for a single row if a cached file exists (small variant).
-/// Returns true if a texture was uploaded this call.
-fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
-    if let Some(row) = self.rows.get_mut(idx) {
-        if row.tex.is_some() || matches!(row.state, PosterState::Failed) {
-            return false;
-        }
-        if row.path.is_none() {
-            row.path = find_any_by_key(&row.key); // fallback single lookup only once
-        }
-        if let Some(path) = row.path.as_ref() {
-            match crate::app::gfx::load_texture_from_path(ctx, &path.to_string_lossy(), &row.key) {
-                Ok(tex) => {
-                    row.tex = Some(tex);
-                    row.state = PosterState::Ready;
-                    return true;
-                }
-                Err(_) => {
-                    row.state = PosterState::Failed;
+    /// Try to upload texture for a single row if a cached file exists (small variant).
+    /// Returns true if a texture was uploaded this call.
+    fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
+        if let Some(row) = self.rows.get_mut(idx) {
+            if row.tex.is_some() || matches!(row.state, PosterState::Failed) {
+                return false;
+            }
+            if row.path.is_none() {
+                row.path = find_any_by_key(&row.key); // fallback single lookup only once
+            }
+            if let Some(path) = row.path.as_ref() {
+                match crate::app::gfx::load_texture_from_path(
+                    ctx,
+                    &path.to_string_lossy(),
+                    &row.key,
+                ) {
+                    Ok(tex) => {
+                        row.tex = Some(tex);
+                        row.state = PosterState::Ready;
+                        return true;
+                    }
+                    Err(_) => {
+                        row.state = PosterState::Failed;
+                    }
                 }
             }
         }
+        false
     }
-    false
-}
 
-/// Upload a handful of textures immediately for the first visible window (fast perception).
-fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
-    // Only target near-future rows (for 2d/7d/etc.) and take the first PREWARM_UPLOADS
-    let now_bucket = utils::day_bucket(SystemTime::now());
-    let max_bucket_opt: Option<i64> = match self.current_range {
-        DayRange::Two => Some(now_bucket + 2),
-        DayRange::Four => Some(now_bucket + 4),
-        DayRange::Five => Some(now_bucket + 5),
-        DayRange::Seven => Some(now_bucket + 7),
-        DayRange::Fourteen => Some(now_bucket + 14),
-    };
+    /// Upload a handful of textures immediately for the first visible window (fast perception).
+    fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
+        // Only target near-future rows (for 2d/7d/etc.) and take the first PREWARM_UPLOADS
+        let now_bucket = utils::day_bucket(SystemTime::now());
+        let max_bucket_opt: Option<i64> = match self.current_range {
+            DayRange::Two => Some(now_bucket + 2),
+            DayRange::Four => Some(now_bucket + 4),
+            DayRange::Five => Some(now_bucket + 5),
+            DayRange::Seven => Some(now_bucket + 7),
+            DayRange::Fourteen => Some(now_bucket + 14),
+        };
 
-    let targets: Vec<usize> = self.rows.iter().enumerate()
-        .filter_map(|(idx, row)| {
-            let b = row.airing.map(utils::day_bucket)?;
-            if b < now_bucket { return None; }
-            if let Some(max_b) = max_bucket_opt { if b >= max_b { return None; } }
-            Some(idx)
-        })
-        .take(PREWARM_UPLOADS * 2) // grab a few extra so we have buffers
-        .collect();
+        let targets: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let b = row.airing.map(utils::day_bucket)?;
+                if b < now_bucket {
+                    return None;
+                }
+                if let Some(max_b) = max_bucket_opt {
+                    if b >= max_b {
+                        return None;
+                    }
+                }
+                Some(idx)
+            })
+            .take(PREWARM_UPLOADS * 2) // grab a few extra so we have buffers
+            .collect();
 
-    // Keep ordering stable (rows are already time-ordered; this is a no-op in most cases)
-    // Attempt uploads up to PREWARM_UPLOADS
-    let mut uploaded = 0usize;
-    for idx in targets {
-        if uploaded >= PREWARM_UPLOADS { break; }
-        if self.try_lazy_upload_row(ctx, idx) {
-            uploaded += 1;
+        // Keep ordering stable (rows are already time-ordered; this is a no-op in most cases)
+        // Attempt uploads up to PREWARM_UPLOADS
+        let mut uploaded = 0usize;
+        for idx in targets {
+            if uploaded >= PREWARM_UPLOADS {
+                break;
+            }
+            if self.try_lazy_upload_row(ctx, idx) {
+                uploaded += 1;
+            }
         }
     }
-}
 
     fn set_status<S: Into<String>>(&mut self, s: S) {
         let s = s.into();
@@ -279,31 +307,31 @@ fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
         }
     }
 
-// ---- status/phase helpers ----
-fn set_phase(&mut self, phase: Phase) {
-    self.phase = phase;
-    self.phase_started = Instant::now();
-}
-
-fn ready_count(&self) -> usize {
-    self.rows.iter().filter(|r| r.tex.is_some()).count()
-}
-
-const fn in_flight(&self) -> usize {
-    self.total_targets.saturating_sub(self.completed + self.failed)
-}
-
-fn should_show_grid(&self) -> bool {
-    if self.rows.is_empty() {
-        return false;
+    // ---- status/phase helpers ----
+    fn set_phase(&mut self, phase: Phase) {
+        self.phase = phase;
+        self.phase_started = Instant::now();
     }
-    if !SHOW_GRID_EARLY {
-        return self.prefetch_started && self.loading_progress >= 1.0;
-    }
-    self.ready_count() >= MIN_READY_BEFORE_GRID
-        || (self.prefetch_started && self.loading_progress >= 1.0)
-}
 
+    fn ready_count(&self) -> usize {
+        self.rows.iter().filter(|r| r.tex.is_some()).count()
+    }
+
+    const fn in_flight(&self) -> usize {
+        self.total_targets
+            .saturating_sub(self.completed + self.failed)
+    }
+
+    fn should_show_grid(&self) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        if !SHOW_GRID_EARLY {
+            return self.prefetch_started && self.loading_progress >= 1.0;
+        }
+        self.ready_count() >= MIN_READY_BEFORE_GRID
+            || (self.prefetch_started && self.loading_progress >= 1.0)
+    }
 }
 
 impl eframe::App for PexApp {
@@ -339,13 +367,15 @@ impl eframe::App for PexApp {
             eg::CentralPanel::default()
                 .frame(eg::Frame::default().inner_margin(eg::Margin::symmetric(4.0, 6.0)))
                 .show(ctx, |ui| {
-                self.ui_render_splash(ui);
-            });
+                    self.ui_render_splash(ui);
+                });
             return;
         }
 
         // If prefetch finished, swap phase
-        if self.prefetch_started && self.loading_progress >= 1.0 && !self.rows.is_empty()
+        if self.prefetch_started
+            && self.loading_progress >= 1.0
+            && !self.rows.is_empty()
             && !matches!(self.phase, types::Phase::Ready)
         {
             self.set_phase(types::Phase::Ready);
@@ -382,8 +412,12 @@ impl eframe::App for PexApp {
                     ui.add_space(40.0);
                     ui.heading("Preparing posters…");
 
-                    if !self.loading_message.is_empty() { ui.label(&self.loading_message); }
-                    if !self.last_item_msg.is_empty() { ui.monospace(&self.last_item_msg); }
+                    if !self.loading_message.is_empty() {
+                        ui.label(&self.loading_message);
+                    }
+                    if !self.last_item_msg.is_empty() {
+                        ui.monospace(&self.last_item_msg);
+                    }
 
                     let db_phase = if self.prefetch_started {
                         self.loading_progress.max(0.02)
@@ -399,9 +433,15 @@ impl eframe::App for PexApp {
 
                     ui.monospace(format!(
                         "Posters: {done}/{total}  (OK {ok}, Fail {fail}, In-flight {inflight})",
-                        total = self.total_targets, ok = self.completed, fail = self.failed, inflight = inflight
+                        total = self.total_targets,
+                        ok = self.completed,
+                        fail = self.failed,
+                        inflight = inflight
                     ));
-                    ui.monospace(format!("Cache: {}", crate::app::cache::cache_dir().display()));
+                    ui.monospace(format!(
+                        "Cache: {}",
+                        crate::app::cache::cache_dir().display()
+                    ));
                 });
                 return;
             }
