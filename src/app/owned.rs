@@ -12,19 +12,19 @@ use tracing::warn;
 use crate::app::types::OwnedMsg;
 use crate::config::load_config;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 struct OwnedManifest {
     dirs: HashMap<String, DirSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DirSnapshot {
     mtime: Option<u64>,
     files: Vec<FileSnapshot>,
     subdirs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct FileSnapshot {
     key: String,
     hd: bool,
@@ -55,6 +55,13 @@ impl OwnedManifest {
         fs::rename(tmp, path)
     }
 
+    fn save_if_changed(&self, previous: &Self) -> io::Result<bool> {
+        if self == previous {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
+    }
     fn path() -> PathBuf {
         crate::app::cache::cache_dir().join("owned_manifest.json")
     }
@@ -178,8 +185,7 @@ fn scan_directory(
         let title = year
             .map(|y| stem.replace(&y.to_string(), " "))
             .unwrap_or_else(|| stem.to_string());
-        let normalized = crate::app::utils::normalize_title(&title);
-        let key = format!("{}:{}", normalized, year.unwrap_or_default());
+        let key = crate::app::PexApp::make_owned_key(&title, year);
 
         owned.insert(key.clone());
         let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
@@ -287,16 +293,22 @@ impl crate::app::PexApp {
                 );
             }
 
-            if let Err(err) = new_manifest.save() {
-                warn!("Failed to persist owned manifest: {err}");
-            }
+            let manifest_changed = match new_manifest.save_if_changed(&manifest) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    warn!("Failed to persist owned manifest: {err}");
+                    false
+                }
+            };
 
-            let cache_dir = crate::app::cache::cache_dir();
-            if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
-                warn!("Failed to persist owned sidecar: {err}");
-            }
-            if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
-                warn!("Failed to persist owned HD sidecar: {err}");
+            if manifest_changed {
+                let cache_dir = crate::app::cache::cache_dir();
+                if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
+                    warn!("Failed to persist owned sidecar: {err}");
+                }
+                if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
+                    warn!("Failed to persist owned HD sidecar: {err}");
+                }
             }
 
             let _ = tx.send(Done(owned));
@@ -328,7 +340,7 @@ impl crate::app::PexApp {
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
                     self.apply_owned_flags();
                     self.mark_dirty();
-                    self.set_status("Owned scan complete.");
+                    self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }
