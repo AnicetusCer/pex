@@ -50,8 +50,7 @@ impl crate::app::PexApp {
                         .as_deref()
                         .map(crate::app::utils::humanize_channel);
 
-                    let selected_match =
-                        self.selected_channels.contains(raw)
+                    let selected_match = self.selected_channels.contains(raw)
                         || human
                             .as_ref()
                             .is_some_and(|h| self.selected_channels.contains(h));
@@ -143,8 +142,16 @@ impl crate::app::PexApp {
             }
             SortKey::Genre => {
                 idxs.sort_by(|&a, &b| {
-                    let ga = self.rows[a].genres.first().map(|s| s.as_str()).unwrap_or("");
-                    let gb = self.rows[b].genres.first().map(|s| s.as_str()).unwrap_or("");
+                    let ga = self.rows[a]
+                        .genres
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let gb = self.rows[b]
+                        .genres
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
                     ga.cmp(gb)
                         .then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
                 });

@@ -1,7 +1,7 @@
 // src/app/prefs.rs
-use std::{fs, io};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{fs, io};
 
 impl crate::app::PexApp {
     // ---- tiny flags ----
@@ -22,28 +22,56 @@ impl crate::app::PexApp {
     // ---- load/save prefs ----
     pub(crate) fn load_prefs(&mut self) {
         let path = prefs_path();
-        let Ok(txt) = fs::read_to_string(&path) else { return; };
+        let Ok(txt) = fs::read_to_string(&path) else {
+            return;
+        };
 
         for line in txt.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
-            let Some((k, v)) = line.split_once('=') else { continue; };
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let k = k.trim();
             let v = v.trim();
 
             match k {
-                "day_range" => if let Some(dr) = super::DayRange::from_str(v) { self.current_range = dr; },
+                "day_range" => {
+                    if let Some(dr) = super::DayRange::from_str(v) {
+                        self.current_range = dr;
+                    }
+                }
                 "search" => self.search_query = v.to_string(),
-                "sort_key" => if let Some(sk) = super::SortKey::from_str(v) { self.sort_key = sk; },
+                "sort_key" => {
+                    if let Some(sk) = super::SortKey::from_str(v) {
+                        self.sort_key = sk;
+                    }
+                }
                 "sort_desc" => self.sort_desc = matches!(v, "1" | "true" | "yes"),
-                "poster_w" => if let Ok(n) = v.parse::<f32>() { self.poster_width_ui = n.clamp(120.0, 220.0); },
-                "detail_w" => if let Ok(n) = v.parse::<f32>() {
-                    self.detail_panel_width = n.clamp(260.0, 600.0);
-                },
-                "workers" => if let Ok(n) = v.parse::<usize>() { self.worker_count_ui = n.clamp(1, 32); },
+                "poster_w" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        self.poster_width_ui = n.clamp(120.0, 220.0);
+                    }
+                }
+                "detail_w" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        self.detail_panel_width = n.clamp(260.0, 600.0);
+                    }
+                }
+                "workers" => {
+                    if let Ok(n) = v.parse::<usize>() {
+                        self.worker_count_ui = n.clamp(1, 32);
+                    }
+                }
                 "hide_owned" => self.hide_owned = matches!(v, "1" | "true" | "yes"),
                 "dim_owned" => self.dim_owned = matches!(v, "1" | "true" | "yes"),
-                "dim_strength" => if let Ok(n) = v.parse::<f32>() { self.dim_strength_ui = n.clamp(0.10, 0.90); },
+                "dim_strength" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        self.dim_strength_ui = n.clamp(0.10, 0.90);
+                    }
+                }
                 "channels" => {
                     self.selected_channels.clear();
                     for ch in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -132,5 +160,3 @@ pub fn load_hotset_manifest() -> io::Result<std::collections::HashMap<String, Pa
     }
     Ok(out)
 }
-
-

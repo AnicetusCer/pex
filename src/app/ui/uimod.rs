@@ -1,6 +1,6 @@
 // src/app/ui/mod.rs
-pub mod topbar;
 pub mod grid;
+pub mod topbar;
 
 use eframe::egui as eg;
 

@@ -11,7 +11,9 @@ impl crate::app::PexApp {
     /// Start prefetch: queue all rows, but avoid repeated disk lookups by reusing row.path.
     /// Workers will download the SMALL variant (key `__s`) if missing.
     pub(crate) fn start_prefetch(&mut self, ctx: &eg::Context) {
-        if self.prefetch_started { return; }
+        if self.prefetch_started {
+            return;
+        }
         self.prefetch_started = true;
 
         self.completed = 0;
@@ -38,7 +40,10 @@ impl crate::app::PexApp {
             .default_headers({
                 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
                 let mut h = HeaderMap::new();
-                h.insert(ACCEPT, HeaderValue::from_static("image/avif,image/webp,image/*;q=0.8,*/*;q=0.5"));
+                h.insert(
+                    ACCEPT,
+                    HeaderValue::from_static("image/avif,image/webp,image/*;q=0.8,*/*;q=0.5"),
+                );
                 h
             })
             .build()
@@ -58,30 +63,31 @@ impl crate::app::PexApp {
             let done_tx = done_tx.clone();
             let client = std::sync::Arc::clone(&client);
 
-            std::thread::spawn(move || {
-                loop {
-                    let job = { let rx = work_rx.lock().unwrap(); rx.recv() };
-                    let (row_idx, key, url, cached_path) = match job {
-                        Ok(t) => t,
-                        Err(_) => break,
-                    };
+            std::thread::spawn(move || loop {
+                let job = {
+                    let rx = work_rx.lock().unwrap();
+                    rx.recv()
+                };
+                let (row_idx, key, url, cached_path) = match job {
+                    Ok(t) => t,
+                    Err(_) => break,
+                };
 
-                    let result: Result<PathBuf, String> = cached_path.map_or_else(
-                        || {
-                            crate::app::cache::download_and_store_resized_with_client(
-                                &client,
-                                &url,
-                                &key,
-                                super::RESIZE_MAX_W,
-                                super::RESIZE_QUALITY,
-                            )
-                            .or_else(|_e| crate::app::cache::download_and_store(&url, &key))
-                        },
-                        Ok,
-                    );
+                let result: Result<PathBuf, String> = cached_path.map_or_else(
+                    || {
+                        crate::app::cache::download_and_store_resized_with_client(
+                            &client,
+                            &url,
+                            &key,
+                            super::RESIZE_MAX_W,
+                            super::RESIZE_QUALITY,
+                        )
+                        .or_else(|_e| crate::app::cache::download_and_store(&url, &key))
+                    },
+                    Ok,
+                );
 
-                    let _ = done_tx.send(PrefetchDone { row_idx, result });
-                }
+                let _ = done_tx.send(PrefetchDone { row_idx, result });
             });
         }
 
@@ -90,9 +96,15 @@ impl crate::app::PexApp {
         let soon_cutoff = now_bucket + 2; // prioritize next 2 days
 
         // collect indices with a priority flag
-        let mut indices: Vec<(bool, usize)> = self.rows.iter().enumerate()
+        let mut indices: Vec<(bool, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
             .map(|(i, r)| {
-                let prio = r.airing.map(|ts| crate::app::utils::day_bucket(ts) < soon_cutoff).unwrap_or(false);
+                let prio = r
+                    .airing
+                    .map(|ts| crate::app::utils::day_bucket(ts) < soon_cutoff)
+                    .unwrap_or(false);
                 (prio, i)
             })
             .collect();
@@ -102,7 +114,11 @@ impl crate::app::PexApp {
 
         for (_, idx) in indices {
             let row = &mut self.rows[idx];
-            row.state = if row.path.is_some() { super::PosterState::Cached } else { super::PosterState::Pending };
+            row.state = if row.path.is_some() {
+                super::PosterState::Cached
+            } else {
+                super::PosterState::Pending
+            };
             let _ = work_tx.send((idx, row.key.clone(), row.url.clone(), row.path.clone()));
         }
 
@@ -116,7 +132,9 @@ impl crate::app::PexApp {
         let mut drained = 0usize;
 
         while drained < super::MAX_DONE_PER_FRAME {
-            let Some(rx) = &self.done_rx else { break; };
+            let Some(rx) = &self.done_rx else {
+                break;
+            };
 
             match rx.try_recv() {
                 Ok(msg) => {
@@ -136,7 +154,8 @@ impl crate::app::PexApp {
                             if let Some(row) = self.rows.get_mut(msg.row_idx) {
                                 row.state = super::PosterState::Failed;
                                 self.failed += 1;
-                                self.last_item_msg = format!("Download failed: {} — {}", row.title, e);
+                                self.last_item_msg =
+                                    format!("Download failed: {} — {}", row.title, e);
                             } else {
                                 self.failed += 1;
                             }
@@ -150,8 +169,7 @@ impl crate::app::PexApp {
 
         if self.total_targets > 0 {
             self.loading_progress =
-                ((self.completed + self.failed) as f32 / self.total_targets as f32)
-                    .clamp(0.0, 1.0);
+                ((self.completed + self.failed) as f32 / self.total_targets as f32).clamp(0.0, 1.0);
         } else {
             self.loading_progress = 1.0;
         }

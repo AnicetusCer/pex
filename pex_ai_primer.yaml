@@ -1,5 +1,5 @@
 version: 2
-updated: 2025-10-04
+updated: 2025-10-05
 
 human:
   goals:
@@ -31,7 +31,7 @@ project:
         gfx.rs         # texture upload helpers
         filters.rs     # day-window filtering, search, channel include-only filter, sorting & grouping
         types.rs       # enums & re-exported message/type aliases for app
-        owned.rs       # background "owned" scan, Owned vs Owned HD sidecar
+        owned.rs       # background owned scan + manifest/sidecars (owned_all/owned_hd)
         prefetch.rs    # worker pool to fetch/resize posters
         detail.rs      # right-side details panel (snapped width; Owned/Airing HD/SD chips)
         ui/
@@ -47,7 +47,7 @@ runtime_model:
   threads_channels:
     - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation only on UI).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: DFS over library_roots → normalized "title:year" keys; writes Owned HD sidecar.
+    - Owned-scan thread: DFS over library_roots; skips unchanged dirs via owned_manifest.json; writes owned_all / owned_hd sidecars.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive/HTTP2).
   messages:
     - PrepMsg:
@@ -71,8 +71,7 @@ runtime_model:
 
 flow:
   first_frame:
-    - load_prefs() from "<cache_dir>/ui_prefs.txt"
-    - start_owned_scan()           # also produces owned_hd.txt sidecar
+    - load_prefs() from "<cache_dir>/ui_prefs.txt"\r\n    - load owned_all/owned_hd sidecars if present (rows marked before scan finishes)\r\n    - start_owned_scan() (updates manifest + sidecars when roots change)
     - start_poster_prep()
     - show splash with status heartbeat
   prep_done_in_ui:
@@ -206,11 +205,7 @@ perf:
     - MAX_DONE_PER_FRAME = 12
     - MAX_UPLOADS_PER_FRAME = 4
     - PREWARM_UPLOADS = 24
-  notes:
-    - One shared blocking HTTP client (keep-alive + HTTP/2).
-    - Prioritize near-term airings when queuing.
-    - Throttle GPU uploads per frame.
-    - Keep UI thread responsive (ctx.request_repaint; small drains per frame).
+  notes:\r\n    - One shared blocking HTTP client (keep-alive + HTTP/2).\r\n    - Owned scan reuses manifest to avoid full DFS when nothing changed (fast weekly runs).\r\n    - Prioritize near-term airings when queuing.\r\n    - Throttle GPU uploads per frame.\r\n    - Keep UI thread responsive (ctx.request_repaint; small drains per frame).
 
 style_and_clippy:
   enforce:
@@ -238,3 +233,4 @@ open_todos:
   - Single source of truth for spacing across grid & detail snap (grid::H_SPACING already used for both).
   - Optional timezone toggle (UTC/local) for time labels.
   - Investigate using DB channel flags (if present) to strengthen broadcast HD inference.
+
