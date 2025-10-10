@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use eframe::egui as eg;
 
-use crate::app::PrefetchDone; // re-exported from app::types
-
 impl crate::app::PexApp {
     /// Start prefetch: queue all rows, but avoid repeated disk lookups by reusing row.path.
     /// Workers will download the SMALL variant (key `__s`) if missing.
@@ -14,6 +12,26 @@ impl crate::app::PexApp {
         if self.prefetch_started {
             return;
         }
+
+        // Allow opting out instead of opting in.
+        let prefetch_disabled = std::env::var_os("PEX_DISABLE_PREFETCH").is_some();
+
+        if prefetch_disabled || self.rows.is_empty() {
+            self.set_status(if prefetch_disabled {
+                format!("Prefetch disabled (PEX_DISABLE_PREFETCH set). Showing {} items.", self.rows.len())
+            } else {
+                "No posters to prefetch.".into()
+            });
+            self.total_targets = 0;
+            self.completed = 0;
+            self.failed = 0;
+            self.loading_progress = 1.0;
+            self.boot_phase = super::BootPhase::Ready;
+            self.prewarm_first_screen(ctx);
+            ctx.request_repaint();
+            return;
+        }
+
         self.prefetch_started = true;
 
         self.completed = 0;
@@ -25,17 +43,16 @@ impl crate::app::PexApp {
         self.set_status(format!("Prefetching {} posters…", self.total_targets));
 
         let (work_tx, work_rx) = mpsc::channel::<super::WorkItem>();
-        let (done_tx, done_rx) = mpsc::channel::<PrefetchDone>();
+        let (done_tx, done_rx) = mpsc::channel::<crate::app::PrefetchDone>();
         self.work_tx = Some(work_tx.clone());
         self.done_rx = Some(done_rx);
 
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
 
-        // Build ONE shared client (connection pooling + keep-alive + HTTP/2 multiplexing)
+        // One shared HTTP client.
         let client = match reqwest::blocking::Client::builder()
             .user_agent("pex/prefetch")
             .timeout(Duration::from_secs(20))
-            .http2_adaptive_window(true)
             .pool_max_idle_per_host(16)
             .default_headers({
                 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT};
@@ -50,10 +67,10 @@ impl crate::app::PexApp {
         {
             Ok(c) => std::sync::Arc::new(c),
             Err(e) => {
-                // If we can't even create a client, mark all as failed to keep UI consistent
                 self.set_status(format!("http client build failed: {e}"));
                 self.failed = self.total_targets;
                 self.loading_progress = 1.0;
+                self.boot_phase = super::BootPhase::Ready;
                 return;
             }
         };
@@ -87,15 +104,14 @@ impl crate::app::PexApp {
                     Ok,
                 );
 
-                let _ = done_tx.send(PrefetchDone { row_idx, result });
+                let _ = done_tx.send(crate::app::PrefetchDone { row_idx, result });
             });
         }
 
-        // Queue strategy: near-term airings FIRST (2d window), then the rest (stable order).
+        // Prioritize “soon” items (next 2 days), then the rest.
         let now_bucket = crate::app::utils::day_bucket(std::time::SystemTime::now());
-        let soon_cutoff = now_bucket + 2; // prioritize next 2 days
+        let soon_cutoff = now_bucket + 2;
 
-        // collect indices with a priority flag
         let mut indices: Vec<(bool, usize)> = self
             .rows
             .iter()
@@ -109,7 +125,6 @@ impl crate::app::PexApp {
             })
             .collect();
 
-        // stable-partition: prio=true first, then false, without expensive sorting
         indices.sort_by_key(|(prio, i)| (std::cmp::Reverse(*prio), *i));
 
         for (_, idx) in indices {

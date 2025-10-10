@@ -2,4 +2,4 @@
 .pex_cache
 config.json
 plex_epg.db
-
+Cargo.lock
