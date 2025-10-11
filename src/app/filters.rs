@@ -17,6 +17,7 @@ impl crate::app::PexApp {
         let query = self.search_query.to_ascii_lowercase();
         let use_query = !query.is_empty();
         let have_channel_filter = !self.selected_channels.is_empty(); // EMPTY = no filter (show all)
+        let have_genre_filter = !self.selected_genres.is_empty();
 
         // 1) Filter + attach day bucket
         let mut filtered: Vec<(usize, i64)> = self
@@ -43,31 +44,36 @@ impl crate::app::PexApp {
 
                 // include-only channel filter
                 if have_channel_filter {
-                    // Compare against BOTH the raw channel string and the humanized label
-                    let raw = row.channel.as_deref().unwrap_or("");
-                    let human = row
-                        .channel
-                        .as_deref()
-                        .map(crate::app::utils::humanize_channel);
-
-                    let selected_match = self.selected_channels.contains(raw)
-                        || human
-                            .as_ref()
-                            .is_some_and(|h| self.selected_channels.contains(h));
-
-                    if !selected_match {
+                    let raw = row.channel_raw.as_deref().unwrap_or("");
+                    if !self.selected_channels.contains(raw) {
                         return None;
                     }
                 }
 
+                let tags_joined = (!row.genres.is_empty()).then(|| row.genres.join("|"));
+                if have_genre_filter {
+                    let mut match_genre = false;
+                    for g in &row.genres {
+                        if self.selected_genres.contains(g) {
+                            match_genre = true;
+                            break;
+                        }
+                    }
+                    if !match_genre {
+                        return None;
+                    }
+                }
+                let broadcast_hd = crate::app::utils::infer_broadcast_hd(
+                    tags_joined.as_deref(),
+                    row.channel.as_deref(),
+                );
+
+                if self.filter_hd_only && !broadcast_hd {
+                    return None;
+                }
+
                 // hide-owned, but KEEP rows that are HD upgrades (airing HD while owned is SD)
                 if self.hide_owned && row.owned {
-                    let tags_joined = (!row.genres.is_empty()).then(|| row.genres.join("|"));
-                    let broadcast_hd = crate::app::utils::infer_broadcast_hd(
-                        tags_joined.as_deref(),
-                        row.channel.as_deref(),
-                    );
-
                     let owned_key = Self::make_owned_key(&row.title, row.year);
                     let owned_is_hd = self
                         .owned_hd_keys

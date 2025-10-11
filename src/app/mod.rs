@@ -1,17 +1,22 @@
 // src/app/mod.rs — async DB scan + upfront poster prefetch + resized cache + single splash
 
 // ---- Standard lib imports ----
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 // ---- Crates ----
 use eframe::egui as eg;
+use serde::Deserialize;
+use urlencoding::encode;
 
 // ---- Local modules ----
 pub mod cache;
 use crate::app::cache::find_any_by_key;
+use crate::config::load_config;
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -20,7 +25,7 @@ pub mod types;
 pub mod utils;
 pub use types::{
     BootPhase, DayRange, OwnedMsg, Phase, PosterRow, PosterState, PrefetchDone, PrepItem, PrepMsg,
-    SortKey,
+    RatingMsg, RatingState, SortKey,
 };
 pub mod detail;
 pub mod filters;
@@ -92,13 +97,26 @@ pub struct PexApp {
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
+    owned_modified: Option<HashMap<String, Option<u64>>>,
+    owned_scan_in_progress: bool,
+    owned_scan_messages: VecDeque<String>,
+    rating_tx: Option<Sender<RatingMsg>>,
+    rating_rx: Option<Receiver<RatingMsg>>,
+    rating_states: HashMap<String, RatingState>,
 
     // search/filter/sort controls
     search_query: String,
+    filter_hd_only: bool,
 
     // channel filter
     show_channel_filter_popup: bool,
     selected_channels: std::collections::BTreeSet<String>,
+    selected_genres: std::collections::BTreeSet<String>,
+    show_genre_filter_popup: bool,
+    show_advanced_popup: bool,
+    advanced_feedback: Option<String>,
+    channel_icon_textures: HashMap<String, eg::TextureHandle>,
+    channel_icon_pending: HashSet<String>,
 
     // sorting
     sort_key: SortKey,
@@ -160,11 +178,24 @@ impl Default for PexApp {
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
             owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_modified: None,
+            owned_scan_in_progress: false,
+            owned_scan_messages: VecDeque::new(),
+            rating_tx: None,
+            rating_rx: None,
+            rating_states: HashMap::new(),
 
             search_query: String::new(),
+            filter_hd_only: false,
 
             show_channel_filter_popup: false,
             selected_channels: std::collections::BTreeSet::new(),
+            selected_genres: std::collections::BTreeSet::new(),
+            show_genre_filter_popup: false,
+            show_advanced_popup: false,
+            advanced_feedback: None,
+            channel_icon_textures: HashMap::new(),
+            channel_icon_pending: HashSet::new(),
 
             sort_key: SortKey::Time,
             sort_desc: false,
@@ -333,6 +364,357 @@ impl PexApp {
         self.ready_count() >= MIN_READY_BEFORE_GRID
             || (self.prefetch_started && self.loading_progress >= 1.0)
     }
+
+    fn record_owned_message<S: Into<String>>(&mut self, msg: S) {
+        const MAX_MESSAGES: usize = 8;
+        self.owned_scan_messages.push_front(msg.into());
+        while self.owned_scan_messages.len() > MAX_MESSAGES {
+            self.owned_scan_messages.pop_back();
+        }
+    }
+
+    fn rating_state_for_key(&self, key: &str) -> RatingState {
+        self.rating_states
+            .get(key)
+            .cloned()
+            .unwrap_or(RatingState::Idle)
+    }
+
+    fn ensure_rating_channel(&mut self) -> Sender<RatingMsg> {
+        if self.rating_tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<RatingMsg>();
+            self.rating_tx = Some(tx.clone());
+            self.rating_rx = Some(rx);
+        }
+        self.rating_tx.as_ref().unwrap().clone()
+    }
+
+    fn request_rating_for(&mut self, idx: usize) {
+        let Some(row) = self.rows.get(idx) else {
+            return;
+        };
+        let key = row.key.clone();
+        if matches!(
+            self.rating_states.get(&key),
+            Some(RatingState::Pending)
+        ) {
+            return;
+        }
+
+        let cfg = load_config();
+        let api_key = cfg
+            .omdb_api_key
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| "4a3b711b".to_string());
+        if api_key.trim().is_empty() {
+            self.rating_states
+                .insert(key, RatingState::MissingApiKey);
+            return;
+        }
+
+        let imdb_id = row.guid.as_deref().and_then(|g| imdb_id_from_guid(g));
+        let title = row.title.clone();
+        let year = row.year;
+        let sender = self.ensure_rating_channel();
+
+        self.rating_states
+            .insert(key.clone(), RatingState::Pending);
+
+        std::thread::spawn(move || {
+            let state = fetch_rating_from_omdb(api_key, imdb_id, title, year);
+            let _ = sender.send(RatingMsg { key, state });
+        });
+    }
+
+    fn poll_rating_updates(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        loop {
+            let Some(rx) = self.rating_rx.as_ref() else {
+                break;
+            };
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.rating_states.insert(msg.key, msg.state);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.rating_rx = None;
+                    self.rating_tx = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn restart_poster_pipeline(&mut self, ctx: &eg::Context) {
+        self.prep_started = false;
+        self.prep_rx = None;
+        self.prefetch_started = false;
+        self.work_tx = None;
+        self.done_rx = None;
+        self.rows.clear();
+        self.total_targets = 0;
+        self.completed = 0;
+        self.failed = 0;
+        self.loading_progress = 0.0;
+        self.last_item_msg.clear();
+        self.phase = Phase::Prefetching;
+        self.phase_started = Instant::now();
+        self.boot_phase = BootPhase::Starting;
+        self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
+        self.selected_idx = None;
+        self.rating_states.clear();
+        self.channel_icon_textures.clear();
+        self.channel_icon_pending.clear();
+        self.owned_modified = None;
+        self.set_status("Restarting poster prep…");
+        self.start_poster_prep();
+        ctx.request_repaint();
+    }
+
+    fn channel_icon_texture(&mut self, ctx: &eg::Context, url: &str) -> Option<eg::TextureHandle> {
+        if url.trim().is_empty() {
+            return None;
+        }
+        if let Some(tex) = self.channel_icon_textures.get(url) {
+            return Some(tex.clone());
+        }
+
+        let path = crate::app::cache::channel_icon_path(url);
+        if !path.exists() {
+            if self.channel_icon_pending.insert(url.to_string()) {
+                Self::spawn_channel_icon_prefetch(vec![url.to_string()]);
+            }
+            return None;
+        }
+
+        let path_str = path.to_string_lossy();
+        let (w, h, rgba) = crate::app::cache::load_rgba_raw_or_image(&path_str).ok()?;
+        if w == 0 || h == 0 || rgba.is_empty() {
+            return None;
+        }
+
+        let size = [w as usize, h as usize];
+        let image = eg::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let key = format!(
+            "channel_icon_{}",
+            crate::app::cache::url_to_cache_key(url)
+        );
+        let tex = ctx.load_texture(key, image, eg::TextureOptions::LINEAR);
+        let handle = tex.clone();
+        self.channel_icon_textures.insert(url.to_string(), tex);
+        self.channel_icon_pending.remove(url);
+        Some(handle)
+    }
+
+    fn spawn_channel_icon_prefetch(urls: Vec<String>) {
+        std::thread::spawn(move || {
+            for url in urls {
+                let _ = crate::app::cache::ensure_channel_icon(&url);
+            }
+        });
+    }
+
+    fn clear_poster_cache_files(&self) -> Result<usize, String> {
+        let dir = crate::app::cache::cache_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        let entries =
+            fs::read_dir(&dir).map_err(|err| format!("Failed to read {}: {err}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("Failed to read entry in {}: {err}", dir.display()))?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|err| format!("Failed to stat {}: {err}", path.display()))?
+                .is_file()
+            {
+                continue;
+            }
+            let remove = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    let ext = ext.to_ascii_lowercase();
+                    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba")
+                })
+                .unwrap_or(false);
+            if !remove {
+                continue;
+            }
+            fs::remove_file(&path)
+                .map_err(|err| format!("Failed to remove {}: {err}", path.display()))?;
+            removed += 1;
+        }
+        let _ = fs::remove_file(dir.join("hotset.txt"));
+        Ok(removed)
+    }
+
+    fn clear_owned_cache_files(&self) -> Result<usize, String> {
+        let dir = crate::app::cache::cache_dir();
+        let mut removed = 0usize;
+        for name in ["owned_all.txt", "owned_hd.txt", "owned_manifest.json"] {
+            let path = dir.join(name);
+            match fs::remove_file(&path) {
+                Ok(_) => removed += 1,
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(format!("Failed to remove {}: {err}", path.display()));
+                }
+            }
+        }
+        let _ = fs::remove_file(dir.join("owned_manifest.json.tmp"));
+        Ok(removed)
+    }
+
+    fn clear_ffprobe_cache_file(&self) -> Result<bool, String> {
+        let path = crate::app::cache::cache_dir().join("ffprobe_cache.json");
+        match fs::remove_file(&path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(format!("Failed to remove {}: {err}", path.display())),
+        }
+    }
+
+    fn clear_owned_cache(&mut self) -> Result<usize, String> {
+        let removed = self.clear_owned_cache_files()?;
+        self.refresh_owned_scan();
+        Ok(removed)
+    }
+
+    fn clear_ffprobe_cache(&mut self) -> Result<bool, String> {
+        let removed = self.clear_ffprobe_cache_file()?;
+        crate::app::utils::reset_ffprobe_runtime_state();
+        Ok(removed)
+    }
+
+    fn refresh_ffprobe_cache(&mut self) -> Result<usize, String> {
+        crate::app::utils::refresh_ffprobe_cache().map_err(|e| e.to_string())
+    }
+
+    fn refresh_poster_cache_light(&mut self) -> Result<usize, String> {
+        crate::app::cache::refresh_poster_cache_light().map_err(|e| e.to_string())
+    }
+
+    fn refresh_owned_scan(&mut self) {
+        self.owned_rx = None;
+        self.owned_keys = None;
+        self.owned_hd_keys = None;
+        self.owned_modified = None;
+        for row in &mut self.rows {
+            row.owned = false;
+            row.owned_modified = None;
+        }
+        self.mark_dirty();
+        self.owned_scan_in_progress = false;
+        self.record_owned_message("Refreshing owned scan…");
+        self.start_owned_scan();
+    }
+}
+
+fn imdb_id_from_guid(guid: &str) -> Option<String> {
+    let lower = guid.to_ascii_lowercase();
+    let pos = lower.find("tt")?;
+    let mut id = String::from("tt");
+    for ch in guid[pos + 2..].chars() {
+        if ch.is_ascii_digit() {
+            id.push(ch);
+        } else {
+            break;
+        }
+    }
+    if id.len() > 2 {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+#[derive(Deserialize)]
+struct OmdbResponse {
+    #[serde(rename = "Response")]
+    response: String,
+    #[serde(rename = "imdbRating")]
+    imdb_rating: Option<String>,
+    #[serde(rename = "Error")]
+    error: Option<String>,
+}
+
+fn fetch_rating_from_omdb(
+    api_key: String,
+    imdb_id: Option<String>,
+    title: String,
+    year: Option<i32>,
+) -> RatingState {
+    if imdb_id.is_none() && title.trim().is_empty() {
+        return RatingState::NotFound;
+    }
+
+    let client = match reqwest::blocking::Client::builder()
+        .user_agent("pex/rating-fetch")
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => return RatingState::Error(format!("client: {err}")),
+    };
+
+    let url = if let Some(id) = imdb_id {
+        format!("https://www.omdbapi.com/?i={}&apikey={}", id, api_key)
+    } else {
+        let mut url = format!(
+            "https://www.omdbapi.com/?t={}&apikey={}",
+            encode(title.trim()),
+            api_key
+        );
+        if let Some(y) = year {
+            url.push_str(&format!("&y={}", y));
+        }
+        url
+    };
+
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(err) => return RatingState::Error(format!("network: {err}")),
+    };
+    if !resp.status().is_success() {
+        return RatingState::Error(format!("HTTP {}", resp.status()));
+    }
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(err) => return RatingState::Error(format!("read: {err}")),
+    };
+
+    let parsed: OmdbResponse = match serde_json::from_str(&text) {
+        Ok(p) => p,
+        Err(err) => return RatingState::Error(format!("parse: {err}")),
+    };
+
+    if parsed.response.eq_ignore_ascii_case("true") {
+        if let Some(r) = parsed.imdb_rating {
+            if r.trim().is_empty() || r.trim().eq_ignore_ascii_case("N/A") {
+                RatingState::NotFound
+            } else if let Ok(val) = r.trim().parse::<f32>() {
+                RatingState::Success(format!("IMDb {:.1}/10", val))
+            } else {
+                RatingState::Success(format!("IMDb {}", r.trim()))
+            }
+        } else {
+            RatingState::NotFound
+        }
+    } else if let Some(err) = parsed.error {
+        if err.to_ascii_lowercase().contains("not found") {
+            RatingState::NotFound
+        } else {
+            RatingState::Error(err)
+        }
+    } else {
+        RatingState::NotFound
+    }
 }
 
 impl eframe::App for PexApp {
@@ -362,6 +744,8 @@ impl eframe::App for PexApp {
         if self.prefetch_started && self.loading_progress < 1.0 {
             self.poll_prefetch_done(ctx);
         }
+
+        self.poll_rating_updates();
 
         // If warm-up not finished, show calm splash and return
         if self.boot_phase != types::BootPhase::Ready {
@@ -399,8 +783,10 @@ impl eframe::App for PexApp {
             // Top bar (range/search/sort/workers/owned)
             self.ui_render_topbar(ui);
 
-            // Channel filter popup (separate window)
+            // Channel & genre filter popups (separate windows)
             self.ui_render_channel_filter_popup(ctx);
+            self.ui_render_genre_filter_popup(ctx);
+            self.ui_render_advanced_popup(ctx);
 
             // Decide whether to show the early splash (before enough textures ready)
             let show_splash = !self.should_show_grid();

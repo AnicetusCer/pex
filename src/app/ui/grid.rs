@@ -149,9 +149,10 @@ impl crate::app::PexApp {
                                         if should_dim {
                                             let a = (self.dim_strength_ui.clamp(0.10, 0.90) * 255.0)
                                                 as u8;
+                                            let overlay_rect = poster_rect.expand(0.5);
                                             ui.painter().rect_filled(
-                                                poster_rect,
-                                                6.0,
+                                                overlay_rect,
+                                                eg::Rounding::ZERO,
                                                 eg::Color32::from_black_alpha(a),
                                             );
                                         }

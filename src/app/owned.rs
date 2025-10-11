@@ -28,6 +28,7 @@ struct DirSnapshot {
 struct FileSnapshot {
     key: String,
     hd: bool,
+    modified: Option<u64>,
 }
 
 impl OwnedManifest {
@@ -75,7 +76,7 @@ impl OwnedManifest {
     }
 }
 
-fn dir_modified_seconds(path: &Path) -> Option<u64> {
+fn path_modified_seconds(path: &Path) -> Option<u64> {
     fs::metadata(path)
         .ok()
         .and_then(|meta| meta.modified().ok())
@@ -89,6 +90,7 @@ fn reuse_directory(
     new_manifest: &mut OwnedManifest,
     owned: &mut HashSet<String>,
     hd_keys: &mut HashSet<String>,
+    owned_dates: &mut HashMap<String, Option<u64>>,
 ) {
     if let Some(snapshot) = manifest.get(dir) {
         for file in &snapshot.files {
@@ -96,10 +98,11 @@ fn reuse_directory(
             if file.hd {
                 hd_keys.insert(file.key.clone());
             }
+            owned_dates.insert(file.key.clone(), file.modified);
         }
         new_manifest.insert_snapshot(dir.to_owned(), snapshot.clone());
         for sub in &snapshot.subdirs {
-            reuse_directory(sub, manifest, new_manifest, owned, hd_keys);
+            reuse_directory(sub, manifest, new_manifest, owned, hd_keys, owned_dates);
         }
     }
 }
@@ -110,10 +113,11 @@ fn scan_directory(
     new_manifest: &mut OwnedManifest,
     owned: &mut HashSet<String>,
     hd_keys: &mut HashSet<String>,
+    owned_dates: &mut HashMap<String, Option<u64>>,
     tx: &Sender<OwnedMsg>,
 ) {
     let dir_str = dir.to_string_lossy().to_string();
-    let mtime = dir_modified_seconds(dir);
+    let mtime = path_modified_seconds(dir);
 
     if let Some(snapshot) = manifest.get(&dir_str) {
         if snapshot.mtime == mtime {
@@ -121,7 +125,7 @@ fn scan_directory(
                 "Owned scan: using cache for {}",
                 dir.display()
             )));
-            reuse_directory(&dir_str, manifest, new_manifest, owned, hd_keys);
+            reuse_directory(&dir_str, manifest, new_manifest, owned, hd_keys, owned_dates);
             return;
         }
     }
@@ -169,7 +173,7 @@ fn scan_directory(
         if file_type.is_dir() {
             let subdir_str = path.to_string_lossy().to_string();
             snapshot.subdirs.push(subdir_str.clone());
-            scan_directory(&path, manifest, new_manifest, owned, hd_keys, tx);
+            scan_directory(&path, manifest, new_manifest, owned, hd_keys, owned_dates, tx);
             continue;
         }
 
@@ -177,6 +181,7 @@ fn scan_directory(
             continue;
         }
 
+        let file_mtime = path_modified_seconds(&path);
         let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -192,7 +197,12 @@ fn scan_directory(
         if hd {
             hd_keys.insert(key.clone());
         }
-        snapshot.files.push(FileSnapshot { key, hd });
+        owned_dates.insert(key.clone(), file_mtime);
+        snapshot.files.push(FileSnapshot {
+            key,
+            hd,
+            modified: file_mtime,
+        });
     }
 
     new_manifest.insert_snapshot(dir_str, snapshot);
@@ -246,6 +256,12 @@ impl crate::app::PexApp {
         // Resolve roots from config and launch the scanner thread.
         let cfg = load_config();
         let roots: Vec<PathBuf> = cfg.library_roots.into_iter().map(PathBuf::from).collect();
+        self.owned_scan_in_progress = true;
+        self.record_owned_message(format!(
+            "Owned scan started ({} root{}).",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ));
         Self::spawn_owned_scan(tx, roots);
     }
 
@@ -254,9 +270,13 @@ impl crate::app::PexApp {
         let Some(keys) = &self.owned_keys else {
             return;
         };
+        let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
             let key = Self::make_owned_key(&row.title, row.year);
             row.owned = keys.contains(&key);
+            row.owned_modified = modified
+                .and_then(|m| m.get(&key))
+                .and_then(|v| *v);
         }
     }
 
@@ -268,14 +288,18 @@ impl crate::app::PexApp {
                 let _ = tx.send(Info(
                     "No library_roots in config.json; owned scan skipped.".into(),
                 ));
-                let _ = tx.send(Done(HashSet::new()));
+                let _ = tx.send(Done {
+                    keys: HashSet::new(),
+                    modified: HashMap::new(),
+                });
                 return;
             }
 
             let manifest = OwnedManifest::load();
             let mut new_manifest = OwnedManifest::default();
-            let mut owned: HashSet<String> = HashSet::new();
-            let mut hd_keys: HashSet<String> = HashSet::new();
+        let mut owned: HashSet<String> = HashSet::new();
+        let mut hd_keys: HashSet<String> = HashSet::new();
+        let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
 
             for root in &library_roots {
                 if !root.exists() {
@@ -289,6 +313,7 @@ impl crate::app::PexApp {
                     &mut new_manifest,
                     &mut owned,
                     &mut hd_keys,
+                    &mut owned_dates,
                     &tx,
                 );
             }
@@ -311,7 +336,10 @@ impl crate::app::PexApp {
                 }
             }
 
-            let _ = tx.send(Done(owned));
+            let _ = tx.send(Done {
+                keys: owned,
+                modified: owned_dates,
+            });
         });
     }
 
@@ -328,18 +356,36 @@ impl crate::app::PexApp {
                 match rx.try_recv() {
                     Ok(m) => m,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.owned_scan_in_progress = false;
+                        break;
+                    }
                 }
             };
 
             match msg {
-                Info(s) => self.set_status(s),
-                Error(e) => self.set_status(format!("Owned scan error: {e}")),
-                Done(keys) => {
+                Info(s) => {
+                    self.record_owned_message(s.clone());
+                    self.owned_scan_in_progress = true;
+                    self.set_status(s);
+                }
+                Error(e) => {
+                    let msg = format!("Owned scan error: {e}");
+                    self.record_owned_message(msg.clone());
+                    self.owned_scan_in_progress = false;
+                    self.set_status(msg);
+                }
+                Done { keys, modified } => {
+                    let count = keys.len();
                     self.owned_keys = Some(keys);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
+                    self.owned_modified = Some(modified);
                     self.apply_owned_flags();
                     self.mark_dirty();
+                    self.owned_scan_in_progress = false;
+                    self.record_owned_message(format!(
+                        "Owned scan complete ({count} titles)."
+                    ));
                     self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
