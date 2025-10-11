@@ -1,4 +1,5 @@
 // src/app/detail.rs
+use crate::app::types::RatingState;
 use eframe::egui as eg;
 
 impl crate::app::PexApp {
@@ -9,6 +10,8 @@ impl crate::app::PexApp {
         let max_w: f32 = (screen_w * 0.45).clamp(360.0, 520.0);
         let min_w: f32 = 260.0;
         let default_width = self.detail_panel_width.clamp(min_w, max_w);
+
+        let mut trigger_rating_request: Option<usize> = None;
 
         let panel = eg::SidePanel::right("detail_panel")
             .resizable(true)
@@ -64,7 +67,16 @@ impl crate::app::PexApp {
                     Some(y) => format!("{} ({})", row.title, y),
                     None => row.title.clone(),
                 };
-                ui.heading(title);
+                ui.horizontal(|ui| {
+                    ui.heading(&title);
+                    if ui
+                        .small_button("📋")
+                        .on_hover_text("Copy title to clipboard")
+                        .clicked()
+                    {
+                        ctx.output_mut(|o| o.copied_text = row.title.clone());
+                    }
+                });
 
                 // Channel + time line (humanized)
                 if row.channel.is_some() || row.airing.is_some() {
@@ -79,6 +91,65 @@ impl crate::app::PexApp {
                         .unwrap_or_else(|| "—".into());
                     ui.label(eg::RichText::new(format!("{ch}  •  {tm} UTC")).weak());
                 }
+
+                if row.critic_rating.is_some() || row.audience_rating.is_some() {
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(r) = row.critic_rating {
+                            ui.label(
+                                eg::RichText::new(format!("Critics: {r:.1}/10"))
+                                    .color(eg::Color32::from_rgb(255, 208, 121)),
+                            );
+                        }
+                        if let Some(r) = row.audience_rating {
+                            ui.label(
+                                eg::RichText::new(format!("Audience: {r:.1}/10"))
+                                    .color(eg::Color32::from_rgb(160, 220, 160)),
+                            );
+                        }
+                    });
+                }
+
+                ui.add_space(6.0);
+                let rating_state = self.rating_state_for_key(&row.key);
+                ui.horizontal(|ui| {
+                    let fetch_enabled = !matches!(rating_state, RatingState::Pending);
+                    if ui
+                        .add_enabled(fetch_enabled, eg::Button::new("⭐ Rating"))
+                        .on_hover_text("Fetch IMDb rating on demand")
+                        .clicked()
+                    {
+                        trigger_rating_request = Some(sel);
+                    }
+                    ui.add_space(6.0);
+                    match rating_state {
+                        RatingState::Pending => {
+                            ui.add(eg::Spinner::new().size(14.0));
+                            ui.label("Fetching IMDb rating…");
+                        }
+                        RatingState::Success(ref txt) => {
+                            ui.label(eg::RichText::new(txt).strong());
+                        }
+                        RatingState::NotFound => {
+                            ui.label(eg::RichText::new("IMDb rating not found.").weak());
+                        }
+                        RatingState::Error(ref err) => {
+                            ui.label(
+                                eg::RichText::new(format!("Rating error: {err}"))
+                                    .color(eg::Color32::LIGHT_RED),
+                            );
+                        }
+                        RatingState::MissingApiKey => {
+                            ui.label(
+                                eg::RichText::new("Set omdb_api_key in config.json to enable ratings.")
+                                    .weak(),
+                            );
+                        }
+                        RatingState::Idle => {
+                            ui.label(eg::RichText::new("No rating fetched yet.").weak());
+                        }
+                    }
+                });
 
                 // --- Owned tags (explicit SD/HD) + optional Airing status ---
                 {
@@ -133,21 +204,26 @@ impl crate::app::PexApp {
                 ui.separator();
                 ui.add_space(8.0);
 
+                // Description
+                ui.label(eg::RichText::new("Description").strong());
+                if let Some(summary) = row.summary.as_deref() {
+                    ui.add(eg::Label::new(eg::RichText::new(summary)).wrap());
+                } else {
+                    ui.label(eg::RichText::new("No description available.").italics().weak());
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
                 // Genres
                 if !row.genres.is_empty() {
                     ui.label(eg::RichText::new("Genres").strong());
-                    ui.label(row.genres.join(", "));
-                    ui.add_space(6.0);
+                    ui.add(eg::Label::new(row.genres.join(", ")).wrap());
                 } else {
                     ui.label(eg::RichText::new("Genres").weak());
                     ui.label("—");
-                    ui.add_space(6.0);
                 }
-
-                // Future: Description + IMDb review hook
-                ui.separator();
-                ui.label(eg::RichText::new("Review").strong().weak());
-                ui.label("IMDb review integration (planned).");
             });
 
         // Persist the width so it sticks between runs
@@ -155,6 +231,10 @@ impl crate::app::PexApp {
         if (actual_w - self.detail_panel_width).abs() > (step * 0.05).max(0.5) {
             self.detail_panel_width = actual_w;
             self.mark_dirty(); // let your prefs autosave pick this up
+        }
+
+        if let Some(idx) = trigger_rating_request {
+            self.request_rating_for(idx);
         }
     }
 }
