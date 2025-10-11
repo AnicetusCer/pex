@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use image::{GenericImageView, ImageFormat};
 use reqwest::blocking::Client;
@@ -12,6 +12,9 @@ use crate::config::load_config;
 // Chosen once on first call
 use std::sync::OnceLock;
 static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static CHANNEL_ICON_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static POSTER_LIMIT_ONCE: OnceLock<Option<usize>> = OnceLock::new();
 
 pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
@@ -31,6 +34,68 @@ pub fn cache_dir() -> PathBuf {
             path
         })
         .clone()
+}
+
+pub fn poster_cache_dir() -> PathBuf {
+    POSTER_DIR_ONCE
+        .get_or_init(|| {
+            let mut path = cache_dir().join("posters");
+            if let Err(e) = fs::create_dir_all(&path) {
+                warn!(
+                    "failed to create poster cache dir {}: {e}",
+                    path.display()
+                );
+                path = cache_dir();
+            }
+            path
+        })
+        .clone()
+}
+
+pub fn poster_cache_limit() -> Option<usize> {
+    POSTER_LIMIT_ONCE
+        .get_or_init(|| load_config().poster_cache_max_files.filter(|n| *n > 0))
+        .clone()
+}
+
+fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
+    let Some(limit) = poster_cache_limit() else {
+        return Ok(0);
+    };
+    let dir = poster_cache_dir();
+    let mut entries: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_ascii_lowercase();
+            if !matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "rgba"
+            ) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        entries.push((modified, path));
+    }
+
+    if entries.len() <= limit {
+        return Ok(0);
+    }
+
+    entries.sort_by_key(|(mtime, _)| *mtime);
+    let remove_count = entries.len() - limit;
+    for (_, path) in entries.into_iter().take(remove_count) {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(remove_count)
 }
 
 pub fn url_to_cache_key(url: &str) -> String {
@@ -84,7 +149,7 @@ pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String>
 }
 
 pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
-    let base = cache_dir();
+    let poster_dir = poster_cache_dir();
     let candidates = [
         format!("{}.png", key),
         format!("{}.jpg", key),
@@ -94,7 +159,7 @@ pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
         format!("rgba_{}.rgba", key),
     ];
     for c in candidates {
-        let p = base.join(c);
+        let p = poster_dir.join(c);
         if p.exists() {
             return Some(p);
         }
@@ -124,7 +189,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
     // Try decode with image crate
     match image::load_from_memory(&body) {
         Ok(img) => {
-            let out = cache_dir().join(format!("{key}.png"));
+            let out = poster_cache_dir().join(format!("{key}.png"));
             let mut f =
                 fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             let mut png_bytes: Vec<u8> = Vec::new();
@@ -132,12 +197,13 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("encode png: {e}"))?;
             f.write_all(&png_bytes)
                 .map_err(|e| format!("write {}: {e}", out.display()))?;
+            let _ = prune_poster_cache_if_needed();
             Ok(out)
         }
         Err(e) => {
             warn!("image decode failed for {url}: {e}; storing raw");
             // Store as rgba with w/h header if we really fail (rare)
-            let out = cache_dir().join(format!("{key}.rgba"));
+            let out = poster_cache_dir().join(format!("{key}.rgba"));
             let mut f =
                 fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             // We don't know w/h here; write zeros so loader will reject gracefully
@@ -147,13 +213,14 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("write hdr: {e}"))?;
             f.write_all(&body)
                 .map_err(|e| format!("write {}: {e}", out.display()))?;
+            let _ = prune_poster_cache_if_needed();
             Ok(out)
         }
     }
 }
 /// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
 /// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
-/// This writes `<cache_dir>/<key>.jpg`.
+/// This writes `<poster_cache_dir>/<key>.jpg`.
 pub fn download_and_store_resized(
     url: &str,
     key: &str,
@@ -164,7 +231,7 @@ pub fn download_and_store_resized(
     use reqwest::blocking::Client;
     use std::{fs, io::Write};
 
-    let dest = cache_dir().join(format!("{key}.jpg"));
+    let dest = poster_cache_dir().join(format!("{key}.jpg"));
 
     // If already present, return immediately.
     if dest.exists() {
@@ -226,6 +293,123 @@ pub fn download_and_store_resized(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
+    let _ = prune_poster_cache_if_needed();
+    Ok(dest)
+}
+
+pub fn prune_poster_cache_now() -> std::io::Result<usize> {
+    prune_poster_cache_if_needed()
+}
+
+pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
+    let dir = poster_cache_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let metadata = entry.metadata()?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+
+        let should_remove = if let Some(ext) = &ext {
+            if ext == "part" {
+                true
+            } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                metadata.len() == 0
+            } else if ext == "rgba" {
+                metadata.len() <= 8
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        if should_remove {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        let _ = prune_poster_cache_if_needed();
+    }
+
+    Ok(removed)
+}
+
+fn channel_icon_dir() -> PathBuf {
+    CHANNEL_ICON_DIR_ONCE
+        .get_or_init(|| {
+            let mut path = cache_dir().join("channel_icons");
+            if let Err(e) = fs::create_dir_all(&path) {
+                warn!(
+                    "failed to create channel icon dir {}: {e}",
+                    path.display()
+                );
+                path = cache_dir();
+            }
+            path
+        })
+        .clone()
+}
+
+pub fn channel_icon_path(url: &str) -> PathBuf {
+    channel_icon_dir().join(format!("{}.png", url_to_cache_key(url)))
+}
+
+pub fn ensure_channel_icon(url: &str) -> Result<PathBuf, String> {
+    if url.trim().is_empty() {
+        return Err("empty url".into());
+    }
+    let dest = channel_icon_path(url);
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("download icon: {e}"))?;
+
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("decode icon: {e}"))?;
+
+    let mut png_bytes: Vec<u8> = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        ImageFormat::Png,
+    )
+    .map_err(|e| format!("encode icon png: {e}"))?;
+
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = dest.with_extension("png.part");
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create icon tmp: {e}"))?;
+        f.write_all(&png_bytes)
+            .map_err(|e| format!("write icon: {e}"))?;
+    }
+    fs::rename(&tmp, &dest).map_err(|e| format!("finalize icon: {e}"))?;
+
     Ok(dest)
 }
 
@@ -241,7 +425,7 @@ pub fn download_and_store_resized_with_client(
     use image::{imageops::FilterType, DynamicImage};
     use std::{fs, io::Write};
 
-    let dest = cache_dir().join(format!("{key}.jpg"));
+    let dest = poster_cache_dir().join(format!("{key}.jpg"));
 
     // If already present, return immediately.
     if dest.exists() {
@@ -298,6 +482,7 @@ pub fn download_and_store_resized_with_client(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
+    let _ = prune_poster_cache_if_needed();
     Ok(dest)
 }
 

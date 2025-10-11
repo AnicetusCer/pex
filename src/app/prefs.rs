@@ -78,6 +78,15 @@ impl crate::app::PexApp {
                         self.selected_channels.insert(ch.to_string());
                     }
                 }
+                "genres" => {
+                    self.selected_genres.clear();
+                    for g in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        self.selected_genres.insert(g.to_string());
+                    }
+                }
+                "filter_hd_only" => {
+                    self.filter_hd_only = matches!(v, "1" | "true" | "yes");
+                }
                 _ => {}
             }
         }
@@ -109,7 +118,9 @@ impl crate::app::PexApp {
              hide_owned={}\n\
              dim_owned={}\n\
              dim_strength={:.2}\n\
-             channels={}\n",
+             channels={}\n\
+             genres={}\n\
+             filter_hd_only={}\n",
             self.current_range.as_str(),
             self.search_query,
             self.sort_key.as_str(),
@@ -121,6 +132,18 @@ impl crate::app::PexApp {
             if self.dim_owned { "1" } else { "0" },
             self.dim_strength_ui,
             channels_csv,
+            {
+                if self.selected_genres.is_empty() {
+                    String::new()
+                } else {
+                    self.selected_genres
+                        .iter()
+                        .map(|s| s.replace(',', " "))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            },
+            if self.filter_hd_only { "1" } else { "0" },
         );
 
         let _ = fs::write(path, txt);
@@ -159,4 +182,58 @@ pub fn load_hotset_manifest() -> io::Result<std::collections::HashMap<String, Pa
         }
     }
     Ok(out)
+}
+
+pub fn backup_ui_prefs() -> io::Result<PathBuf> {
+    use chrono::Local;
+    let src = prefs_path();
+    if !src.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "ui_prefs.txt not found",
+        ));
+    }
+    let stamp = Local::now().format("%Y%m%d_%H%M%S");
+    let dest = src
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!("ui_prefs_backup_{}.txt", stamp));
+    fs::copy(&src, &dest)?;
+    Ok(dest)
+}
+
+pub fn restore_latest_ui_prefs_backup() -> io::Result<Option<PathBuf>> {
+    let dir = prefs_path()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|name| name.starts_with("ui_prefs_backup_") && name.ends_with(".txt"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if entry.file_type()?.is_file() {
+            let modified = entry
+                .metadata()?
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            backups.push((modified, path));
+        }
+    }
+
+    if backups.is_empty() {
+        return Ok(None);
+    }
+
+    backups.sort_by_key(|(mtime, _)| *mtime);
+    let latest = backups.pop().unwrap().1;
+    fs::copy(&latest, prefs_path())?;
+    Ok(Some(latest))
 }

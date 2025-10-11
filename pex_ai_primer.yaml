@@ -1,22 +1,22 @@
-version: 2
-updated: 2025-10-05
+version: 3
+updated: 2025-10-11
 
 human:
   goals:
     - Keep the app snappy: fast first paint, smooth scrolling, minimal blocking on the UI thread.
     - Make pragmatic, incremental improvements without breaking working flows.
   ways_of_working:
-    - Provide the human with full function replacements, the human will search by function name.
-    - When providing targeted code changes give the human the context of where to put the code, ie above line x.
+    - Provide the human with full function replacements; the human will search by function name.
+    - When providing targeted code changes, give the context of where to put the code (file + approx line, e.g., “above line 120”).
     - Run: "cargo run" often; keep it compiling between changes.
     - Lint: "cargo clippy --all-targets --all-features -- -W clippy::all -W clippy::nursery".
-    - cleanup: when making changes, don't forget to cleanup old references.
-    - Advice: Suggest the best method to use to the human.
+    - Cleanup: when making changes, remove/inline any old references and dead helpers.
+    - Advice: suggest the *best* method or API to use (and call out removed/deprecated ones).
 
 project:
   purpose: >
-    EGUI app that scans a Plex EPG DB, builds a movie poster list, ensures cached “small” posters exist,
-    and lazily uploads textures to render a grouped grid (fast perceived startup).
+    Desktop viewer for the Plex EPG database. Pex renders a fast poster grid, highlights titles you already own,
+    shows channel badges/icons and detailed metadata, and supports on-demand rating lookups.
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)
@@ -24,31 +24,57 @@ project:
     src/
       app/
         mod.rs         # app state + orchestration + egui App impl
-        cache.rs       # cache dir, url_to_cache_key, download & resized-store, raw RGBA loader
+        cache.rs       # cache dir helpers, poster/icon download, ffprobe cache
         prep.rs        # read-only DB scan -> Vec<PrepItem>, optional daily copy
         prefs.rs       # load/save UI prefs & hotset manifest
-        utils.rs       # day buckets, time formatting, title normalization, genre parsing, channel humanizer, HD inference
+        utils.rs       # date/time formatting, normalization helpers, channel inference
         gfx.rs         # texture upload helpers
-        filters.rs     # day-window filtering, search, channel include-only filter, sorting & grouping
-        types.rs       # enums & re-exported message/type aliases for app
+        filters.rs     # day-window filtering, search, channel/genre include filters, sorting & grouping
+        types.rs       # shared structs/enums for app messages and rows
         owned.rs       # background owned scan + manifest/sidecars (owned_all/owned_hd)
         prefetch.rs    # worker pool to fetch/resize posters
-        detail.rs      # right-side details panel (snapped width; Owned/Airing HD/SD chips)
+        detail.rs      # right-side details panel (channel icon, ratings, owned metadata)
         ui/
-          mod.rs       # splash + UI composition
-          topbar.rs    # range/search/sort/owned controls & channel filter popup (Select all/none/Clear)
-          grid.rs      # grouped poster grid (centered; badges: "HD" / "HD ↑"; conditional dim)
+          mod.rs     # splash + UI composition
+          topbar.rs  # range/search/sort controls & advanced popup
+          grid.rs    # grouped poster grid (badges, lazy texture uploads)
+      assets/PEX.ico  # app icon embedded at compile time
       config.rs        # AppConfig + load_config()
     epg_explorer_tool/
       db_explorer.rs   # CLI to inspect DB tables
     Cargo.toml
+  platforms:
+    windows:
+      notes:
+        - Works out of the box (winit + wgpu).
+        - TLS via rustls; no OpenSSL/native-tls required.
+    wsl_linux:
+      notes:
+        - Requires an X/Wayland server on Windows host.
+        - Ensure DISPLAY/WAYLAND_DISPLAY exported by the compositor.
+    linux:
+      notes:
+        - Install SQLite dev headers (e.g., libsqlite3-dev/sqlite-devel).
+
+networking:
+  http_client: reqwest 0.12 (blocking) with rustls
+  builder_guidance:
+    do:
+      - ".user_agent(\"pex/prefetch\")"
+      - ".timeout(Duration::from_secs(20))"
+      - ".http2_keep_alive_while_idle(true)"
+      - ".pool_max_idle_per_host(16)"
+    avoid_removed_apis:
+      - ".http2_adaptive_window(...)"  # removed in reqwest 0.12
+  rationale: >
+    Uses a single shared blocking client for the prefetch pool to maximize socket reuse and minimize per-request setup.
 
 runtime_model:
   threads_channels:
-    - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation only on UI).
+    - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation on UI only).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: DFS over library_roots; skips unchanged dirs via owned_manifest.json; writes owned_all / owned_hd sidecars.
-    - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive/HTTP2).
+    - Owned-scan thread: DFS over library_roots; skips unchanged dirs via owned_manifest.json; writes owned_all / owned_hd sidecars and file modified timestamps.
+    - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
   messages:
     - PrepMsg:
         - Info(String)
@@ -56,30 +82,39 @@ runtime_model:
         - Error(String)
     - OwnedMsg:
         - Info(String)
-        - Done(HashSet<String>)   # normalized "normalize_title(title):year"
+        - Done { keys: HashSet<String>, modified: HashMap<String, Option<u64>> }
         - Error(String)
     - WorkItem: "(row_idx, key, url, cached_path_opt)"
     - PrefetchDone: "{ row_idx, result: Result<PathBuf, String> }"
   prep_item_schema:
     - title: String
-    - url: String
-    - base_cache_key: String
+    - thumb_url: String
+    - key: String (md5 of URL)
     - begins_at_unix: Option<i64>
     - year: Option<i32>
     - tags_genre: Option<String>
-    - channel: Option<String>  # from media_items.extra_data (call sign/title; humanized in UI)
+    - channel_call_sign: Option<String>
+    - channel_title: Option<String>  # e.g. "006 ITV2"
+    - channel_thumb: Option<String>  # badge URL
+    - guid: Option<String>
+    - summary: Option<String>
+    - audience_rating: Option<f32>
+    - critic_rating: Option<f32>
 
 flow:
   first_frame:
-    - load_prefs() from "<cache_dir>/ui_prefs.txt"\r\n    - load owned_all/owned_hd sidecars if present (rows marked before scan finishes)\r\n    - start_owned_scan() (updates manifest + sidecars when roots change)
+    - load_prefs() from "<cache_dir>/ui_prefs.txt"
+    - Load owned sidecars (owned_all/owned_hd) and modified timestamps if present
+    - start_owned_scan() (updates manifest + sidecars when roots change)
     - start_poster_prep()
-    - show splash with status heartbeat
+    - Show splash with status heartbeat
   prep_done_in_ui:
-    - Map PrepItem → PosterRow
+    - Map PrepItem → PosterRow (with channel badge metadata)
     - Derive small_key = base_key + "__s"
     - Try find_any_by_key(small_key) to attach cached path
     - Load "hotset.txt", attach known paths, prewarm textures
-    - apply_owned_flags() if owned keys ready
+    - Kick channel icon prefetch for unseen URLs
+    - apply_owned_flags() if owned keys ready (sets owned flags + recorded dates)
     - start_prefetch(ctx)
     - prewarm_first_screen(ctx)
   prefetch:
@@ -96,6 +131,9 @@ config:
     - plex_db_source: "Optional source DB to daily copy from"
     - cache_dir: "Poster/prefs cache root"
     - library_roots: "Dirs to scan for 'owned' titles"
+    - ffprobe_cmd: "Optional over-ride for ffprobe location"
+    - omdb_api_key: "Optional OMDb key for IMDb ratings"
+    - poster_cache_max_files: "Optional soft limit for poster cache"
   persistence:
     prefs_path: "<cache_dir>/ui_prefs.txt"
     prefs_fields:
@@ -108,37 +146,48 @@ config:
       - hide_owned: "0|1"
       - dim_owned: "0|1"
       - dim_strength: "<0.10..0.90>"
-      - channels: "CSV of included channels (raw keys). Empty = no filter."
+      - channels: "CSV of raw channel call signs"
+      - genres: "CSV of selected genres"
+      - filter_hd_only: "0|1"
+      - detail_w: "persisted detail panel width"
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-    owned_hd_sidecar: "<cache_dir>/owned_hd.txt"  # one key per line: "normalize_title(title):year"
+    owned_hd_sidecar: "<cache_dir>/owned_hd.txt"
+    owned_all_sidecar: "<cache_dir>/owned_all.txt"
+    owned_modified: "stored inside owned_manifest.json"
+  env_flags:
+    - PEX_DISABLE_PREFETCH=1
+    - RUST_LOG=info
 
 cache_keys:
-  - base_key: "derived from URL (e.g., md5)"
+  - base_key: "md5(url)"
   - small_key: "base_key + '__s'"
   - files:
-      - "<key>.jpg"  # resized small
-      - "<key>.rgba" # raw RGBA (loader supports)
+      - "posters/<key>.jpg"
+      - "posters/<key>.rgba"
+      - "channel_icons/<hash>.png"
 
 ui:
   filters:
-    - day_range: [2, 4, 5, 7, 14] relative to now (day buckets)
-    - search: "substring on title (lowercased)"
-    - channel_filter:
-        type: "include-only"
-        state: "self.selected_channels: BTreeSet<String> (stores raw channel keys)"
+    - day_range: [2, 4, 5, 7, 14]
+    - search: "substring on title"
+    - channel filter:
+        state: "selected_channels: BTreeSet<String> (raw call signs)"
         behavior:
-          - "Empty set = filter OFF (show all)."
-          - "Non-empty = include only rows whose raw row.channel is in the set."
-        ui:
-          - "Top bar: 'Channel filter…' opens popup; 'Clear channels' button appears when active."
-          - "Popup: Select all / Select none / Clear; displays humanized labels but stores raw keys."
-    - owned:
+          - "Empty set = show all"
+          - "Non-empty = include only rows whose row.channel_raw matches"
+        popup: "Select all/none, Clear"
+    - genre filter:
+        state: "selected_genres: BTreeSet<String>"
+        behavior: "Empty = show all; otherwise require a match"
+        popup: "Select all/none, Clear"
+    - owned toggles:
         hide_owned: bool
         dim_owned: bool
         dim_strength: 0.10..0.90
         rules:
-          - "Do NOT dim when a better HD is available (airing HD AND owned is SD)."
+          - "Do NOT dim when a better HD is airing"
+    - hd_only toggle: bool (row broadcast_hd must be true)
   sort:
     key: [time, title, channel, genre]
     desc: togglable
@@ -146,91 +195,57 @@ ui:
     grid:
       card:
         width: "poster_width_ui (120..220; default ~140)"
-        height: "card_w * 1.5 + 56 (poster + 3-line label)"
+        height: "card_w * 1.5 + 56"
         selection: "yellow stroke on selected"
-        label:
-          - "title(year)"
-          - "humanized channel; appends '• HD' if broadcast HD"
-          - "HH:MM UTC"
-        badges:
-          - "HD      (airing is HD)"
-          - "HD ↑    (airing is HD AND owned is SD → 'better HD available')"
-          - "badges drawn via draw_corner_badge in grid.rs"
-      spacing:
-        H_SPACING: 4.0
-        V_SPACING: 10.0
+        label lines:
+          - title(year)
+          - channel display label • HD
+          - HH:MM UTC
+        badges: "HD / HD ↑"
       behavior:
         - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
-        - "Center grid by adding left pad; gaps remain tight"
-        - "Fixed-size cards; force ui.end_row() at column boundary → no diagonal rows"
+        - "Center grid by adding left pad"
         - "Bounded lazy texture uploads per frame"
     details_panel:
       side: "right"
-      width: "resizable; snapped to multiples of (poster_width_ui + H_SPACING)"
-      min_max: "min 260; max clamp to ~45% of screen, snapped"
+      width: "snap to poster width + spacing"
       content:
-        - "poster preview (uses small texture when available)"
-        - "title(year)"
-        - "channel + time line"
-        - "chips: 'Airing HD/SD', and if owned: 'Owned HD' or 'Owned SD'"
-        - "genres"
-      state: "detail_panel_width (in-memory; planned prefs persistence)"
+        - poster preview (cached or placeholder)
+        - channel icon (64px), long-title scroller, copy button
+        - airing line and optional IMDb rating button
+        - owned chips with recorded date
+        - description and genres
 
 hd_logic:
   broadcast_hd_inference:
     fn: "utils::infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool"
-    notes:
-      - "Looks for '2160', 'uhd', '4k', '1080', 'hdr', '720', ' hd ' in tags_genre (case-insensitive)."
-      - "Also flags channels with names ending in ' HD' or containing ' hd '."
   owned_hd_inference:
-    sidecar: "<cache_dir>/owned_hd.txt"
-    produced_by: "owned.rs scan"
-    method:
-      - "Filename heuristic via utils::is_path_hd(&Path) → Some(true/false) or None."
-      - "Only positive HD detections are recorded; absence ≠ SD."
+    stored in owned_hd.txt, recorded during owned scan (positive HD detections)
   better_hd_available_rule:
     definition: "row.owned && !owned_is_hd && broadcast_hd"
     effects:
-      - "Grid shows 'HD ↑' badge."
-      - "Dim overlay suppressed even if 'Dim owned' is enabled."
+      - "Grid shows 'HD ↑' badge"
+      - "Detail panel suppresses dimming message"
 
-perf:
-  constants:
-    - WORKER_COUNT = 16
-    - RESIZE_MAX_W = 320
-    - RESIZE_QUALITY = 75
-    - SHOW_GRID_EARLY = true
-    - MIN_READY_BEFORE_GRID = 24
-    - STATUS_EMIT_EVERY_MS = 120
-    - MAX_DONE_PER_FRAME = 12
-    - MAX_UPLOADS_PER_FRAME = 4
-    - PREWARM_UPLOADS = 24
-  notes:\r\n    - One shared blocking HTTP client (keep-alive + HTTP/2).\r\n    - Owned scan reuses manifest to avoid full DFS when nothing changed (fast weekly runs).\r\n    - Prioritize near-term airings when queuing.\r\n    - Throttle GPU uploads per frame.\r\n    - Keep UI thread responsive (ctx.request_repaint; small drains per frame).
+icons:
+  - App icon embedded from `src/assets/PEX.ico`
+  - Channel icons cached under `<cache_dir>/channel_icons/<hash>.png`
+  - Prefetched in background after prep so first selection doesn't block UI
 
-style_and_clippy:
-  enforce:
-    - Prefer "Self::" inside impls.
-    - Take "&Path" (not "&PathBuf") in helpers where possible.
-    - Use ".is_some_and" / ".map_or" where it clarifies intent.
-  allowed:
-    - "clippy::missing_const_for_fn" for tiny mutators (e.g., mark_dirty()).
-    - "clippy::too_long_first_doc_paragraph" in legacy docs.
-  gotchas:
-    - Keep: "type WorkItem = (usize, String, String, Option<PathBuf>);".
-    - When reading popup state: set `self.show_channel_filter_popup = open` **after** `Window::show(...)` to avoid borrow conflicts.
+ratings:
+  - OMDb fetch triggered by detail panel button
+  - Uses demo key unless `omdb_api_key` set in config
+  - Results cached in-memory per poster key for the session
 
-troubleshooting:
-  - Duplicate helper definitions:
-      - Keep draw_corner_badge only in grid.rs; reuse via module path or in-file.
-  - Splash never ends:
-      - Ensure plex_db_local is a valid sqlite; if using plex_db_source, verify last-sync behavior.
-      - Watch PrepMsg::Info / OwnedMsg::Info logs for progress.
-  - Badges not showing:
-      - Check infer_broadcast_hd() inputs (tags_genre, channel). Channel label is humanized for display only; raw key is used for filtering.
+advanced_controls:
+  - Poster cache: clear, prune to limit, or light refresh for stale files
+  - Owned cache: refresh (incremental) or clear (full reset)
+  - ffprobe cache: refresh stale entries or clear entirely
+  - UI prefs: backup / restore latest snapshot
+  - Status readouts: Plex DB path existence, OMDb key state
 
 open_todos:
-  - Persist detail_panel_width in prefs (read/write key e.g., "detail_w") so the snap width survives restarts.
-  - Single source of truth for spacing across grid & detail snap (grid::H_SPACING already used for both).
-  - Optional timezone toggle (UTC/local) for time labels.
-  - Investigate using DB channel flags (if present) to strengthen broadcast HD inference.
-
+  - Consider surfacing channel badges in the grid and channel-filter popup
+  - Optional export of filtered lists (watchlist / CSV)
+  - Dark/light theme toggle
+  - Localization / time-zone conversions for airing times

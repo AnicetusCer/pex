@@ -1,9 +1,11 @@
 // src/main.rs
+use eframe::egui::{IconData, Vec2, ViewportBuilder};
 use std::env;
+use std::sync::Arc;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
-fn pick_renderer() -> eframe::Renderer {
+    fn pick_renderer() -> eframe::Renderer {
     match env::var("PEX_RENDERER").as_deref() {
         Ok("glow") => eframe::Renderer::Glow,
         Ok("wgpu") => eframe::Renderer::Wgpu,
@@ -31,9 +33,17 @@ fn main() -> eframe::Result<()> {
         info!("WINIT_UNIX_BACKEND={:?}", env::var_os("WINIT_UNIX_BACKEND"));
     }
 
+    let mut viewport = ViewportBuilder::default()
+        .with_inner_size(Vec2::new(1600.0, 900.0))
+        .with_maximized(true);
+    if let Some(icon) = load_app_icon() {
+        viewport = viewport.with_icon(Arc::new(icon));
+    }
+
     let options = eframe::NativeOptions {
         renderer: pick_renderer(),
         multisampling: 0,
+        viewport,
         ..Default::default()
     };
 
@@ -49,4 +59,17 @@ fn main() -> eframe::Result<()> {
             Err(e)
         }
     }
+}
+
+fn load_app_icon() -> Option<IconData> {
+    const ICON_BYTES: &[u8] = include_bytes!("assets/PEX.ico");
+    let dyn_image = image::load_from_memory(ICON_BYTES).ok()?;
+    let rgba = dyn_image.to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    Some(IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
 }
