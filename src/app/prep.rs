@@ -66,8 +66,15 @@ fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
     .is_ok()
 }
 
-/// Extract channel from `media_items.extra_data`
-fn parse_channel_from_extra(extra: &str) -> Option<String> {
+#[derive(Default, Clone, Debug)]
+struct ChannelMeta {
+    call_sign: Option<String>,
+    title: Option<String>,
+    thumb: Option<String>,
+}
+
+/// Extract channel metadata from `media_items.extra_data`
+fn parse_channel_meta(extra: &str) -> ChannelMeta {
     fn find_val(hay: &str, key: &str) -> Option<String> {
         let needle = format!("\"{}\":\"", key);
         let start = hay.find(&needle)? + needle.len();
@@ -80,15 +87,15 @@ fn parse_channel_from_extra(extra: &str) -> Option<String> {
             Some(val.to_string())
         }
     }
-    find_val(extra, "at:channelCallSign")
-        .or_else(|| find_val(extra, "at:channelTitle"))
-        .map(|s| {
-            if let Some((_, right)) = s.split_once(' ') {
-                right.to_string()
-            } else {
-                s
-            }
-        })
+    let call_sign = find_val(extra, "at:channelCallSign");
+    let title = find_val(extra, "at:channelTitle");
+    let thumb = find_val(extra, "at:channelThumb");
+
+    ChannelMeta {
+        call_sign: call_sign.clone(),
+        title,
+        thumb,
+    }
 }
 
 const MIN_COPY_INTERVAL_HOURS: u64 = 24;
@@ -193,45 +200,51 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         if DIAG_FAKE_STARTUP {
             send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
             let fake: Vec<PrepItem> = vec![
-                (
-                    "Blade Runner".into(),
-                    "https://example.com/a.jpg".into(),
-                    url_to_cache_key("https://example.com/a.jpg"),
-                    None,
-                    Some(1982),
-                    Some("Sci-Fi|Thriller".into()),
-                    Some("ITV2".into()),
-                    Some("com.plexapp.agents.imdb://tt0083658".into()),
-                    Some("In the future, blade runners hunt replicants.".into()),
-                    Some(8.5),
-                    Some(8.9),
-                ),
-                (
-                    "Alien".into(),
-                    "https://example.com/b.jpg".into(),
-                    url_to_cache_key("https://example.com/b.jpg"),
-                    None,
-                    Some(1979),
-                    Some("Sci-Fi|Horror".into()),
-                    Some("ITV2".into()),
-                    Some("com.plexapp.agents.imdb://tt0078748".into()),
-                    Some("The crew of the Nostromo encounters a deadly alien.".into()),
-                    Some(8.4),
-                    Some(9.0),
-                ),
-                (
-                    "Arrival".into(),
-                    "https://example.com/c.jpg".into(),
-                    url_to_cache_key("https://example.com/c.jpg"),
-                    None,
-                    Some(2016),
-                    Some("Sci-Fi|Drama".into()),
-                    Some("ITV2".into()),
-                    Some("com.plexapp.agents.imdb://tt2543164".into()),
-                    Some("A linguist communicates with extraterrestrial visitors.".into()),
-                    Some(8.0),
-                    Some(8.4),
-                ),
+                PrepItem {
+                    title: "Blade Runner".into(),
+                    thumb_url: "https://example.com/a.jpg".into(),
+                    key: url_to_cache_key("https://example.com/a.jpg"),
+                    begins_at: None,
+                    year: Some(1982),
+                    tags_genre: Some("Sci-Fi|Thriller".into()),
+                    channel_call_sign: Some("ITV2".into()),
+                    channel_title: Some("006 ITV2".into()),
+                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
+                    guid: Some("com.plexapp.agents.imdb://tt0083658".into()),
+                    summary: Some("In the future, blade runners hunt replicants.".into()),
+                    audience_rating: Some(8.5),
+                    critic_rating: Some(8.9),
+                },
+                PrepItem {
+                    title: "Alien".into(),
+                    thumb_url: "https://example.com/b.jpg".into(),
+                    key: url_to_cache_key("https://example.com/b.jpg"),
+                    begins_at: None,
+                    year: Some(1979),
+                    tags_genre: Some("Sci-Fi|Horror".into()),
+                    channel_call_sign: Some("ITV2".into()),
+                    channel_title: Some("006 ITV2".into()),
+                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
+                    guid: Some("com.plexapp.agents.imdb://tt0078748".into()),
+                    summary: Some("The crew of the Nostromo encounters a deadly alien.".into()),
+                    audience_rating: Some(8.4),
+                    critic_rating: Some(9.0),
+                },
+                PrepItem {
+                    title: "Arrival".into(),
+                    thumb_url: "https://example.com/c.jpg".into(),
+                    key: url_to_cache_key("https://example.com/c.jpg"),
+                    begins_at: None,
+                    year: Some(2016),
+                    tags_genre: Some("Sci-Fi|Drama".into()),
+                    channel_call_sign: Some("ITV2".into()),
+                    channel_title: Some("006 ITV2".into()),
+                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
+                    guid: Some("com.plexapp.agents.imdb://tt2543164".into()),
+                    summary: Some("A linguist communicates with extraterrestrial visitors.".into()),
+                    audience_rating: Some(8.0),
+                    critic_rating: Some(8.4),
+                },
             ];
             send(PrepMsg::Done(fake));
             return;
@@ -376,20 +389,26 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                 let tt = t.trim();
                 if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
                     let key = url_to_cache_key(&u);
-                    let ch = extra.as_deref().and_then(parse_channel_from_extra);
-                    list.push((
-                        tt.to_owned(),
-                        u,
+                    let channel_meta = extra
+                        .as_deref()
+                        .map(parse_channel_meta)
+                        .unwrap_or_default();
+
+                    list.push(crate::app::types::PrepItem {
+                        title: tt.to_owned(),
+                        thumb_url: u,
                         key,
-                        begins,
+                        begins_at: begins,
                         year,
-                        tags,
-                        ch,
+                        tags_genre: tags,
+                        channel_call_sign: channel_meta.call_sign,
+                        channel_title: channel_meta.title,
+                        channel_thumb: channel_meta.thumb,
                         guid,
                         summary,
                         audience_rating,
                         critic_rating,
-                    ));
+                    });
                     if last_emit.elapsed() >= Duration::from_millis(600) {
                         send(PrepMsg::Info(format!("Found {} posters…", list.len())));
                         last_emit = Instant::now();
@@ -400,7 +419,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         // Dedupe by title (stable)
         let mut seen = std::collections::HashSet::new();
-        list.retain(|(t, ..)| seen.insert(t.to_ascii_lowercase()));
+        list.retain(|item| seen.insert(item.title.to_ascii_lowercase()));
 
         info!("prep: final poster rows after dedupe = {}", list.len());
         if list.is_empty() {
@@ -459,43 +478,48 @@ impl crate::app::PexApp {
                     Ok(crate::app::PrepMsg::Done(list)) => {
                         // Convert manifest rows into UI rows
                         self.rating_states.clear();
+                        self.channel_icon_textures.clear();
                         self.rows = list
                             .into_iter()
-                            .map(
-                                |(
-                                    t,
-                                    u,
-                                    base_k,
-                                    ts_opt,
-                                    year_opt,
-                                    tags_opt,
-                                    ch_opt,
-                                    guid_opt,
-                                    summary_opt,
-                                    audience_rating,
-                                    critic_rating,
-                                )| {
-                                let airing = ts_opt.map(|ts| {
+                            .map(|item| {
+                                let airing = item.begins_at.map(|ts| {
                                     std::time::SystemTime::UNIX_EPOCH
                                         + std::time::Duration::from_secs(ts as u64)
                                 });
-                                let channel_raw =
-                                    ch_opt.or_else(|| crate::app::utils::host_from_url(&u));
-                                let channel =
-                                    channel_raw.map(|c| crate::app::utils::humanize_channel(&c));
 
-                                let small_k = Self::small_key(&base_k);
+                                let channel_raw = item
+                                    .channel_call_sign
+                                    .clone()
+                                    .or_else(|| crate::app::utils::host_from_url(&item.thumb_url));
+
+                                let channel_title_original = item
+                                    .channel_title
+                                    .clone()
+                                    .filter(|s| !s.trim().is_empty());
+
+                                let normalized_title = channel_title_original
+                                    .as_ref()
+                                    .map(|s| crate::app::utils::humanize_channel(s));
+
+                                let channel_display = normalized_title.clone().or_else(|| {
+                                    channel_raw
+                                        .as_ref()
+                                        .map(|c| crate::app::utils::humanize_channel(c))
+                                });
+
+                                let small_k = Self::small_key(&item.key);
                                 let path = crate::app::cache::find_any_by_key(&small_k);
                                 let state = if path.is_some() {
                                     crate::app::PosterState::Cached
                                 } else {
                                     crate::app::PosterState::Pending
                                 };
-                                let genres = tags_opt
+                                let genres = item
+                                    .tags_genre
                                     .as_deref()
                                     .map(crate::app::utils::parse_genres)
                                     .unwrap_or_default();
-                                let summary = summary_opt.and_then(|s| {
+                                let summary = item.summary.and_then(|s| {
                                     let trimmed = s.trim();
                                     if trimmed.is_empty() {
                                         None
@@ -504,26 +528,43 @@ impl crate::app::PexApp {
                                     }
                                 });
 
-                                crate::app::PosterRow {
-                                    title: t,
-                                    url: u,
-                                    key: small_k,
-                                    airing,
-                                    year: year_opt,
-                                    channel,
+                        crate::app::PosterRow {
+                            title: item.title,
+                            url: item.thumb_url,
+                            key: small_k,
+                            airing,
+                                    year: item.year,
+                                    channel: channel_display,
+                                    channel_raw,
+                                    channel_title: channel_title_original,
+                                    channel_thumb: item.channel_thumb,
                                     genres,
-                                    guid: guid_opt,
+                                    guid: item.guid,
                                     summary,
-                                    audience_rating,
-                                    critic_rating,
+                                    audience_rating: item.audience_rating,
+                                    critic_rating: item.critic_rating,
                                     path,
                                     tex: None,
                                     state,
-                                    owned: false, // filled in by apply_owned_flags()
-                                }
-                            },
-                            )
+                            owned: false, // filled in by apply_owned_flags()
+                            owned_modified: None,
+                        }
+                    })
+                    .collect();
+
+                        let mut seen_icons = std::collections::HashSet::new();
+                        let icon_urls: Vec<String> = self
+                            .rows
+                            .iter()
+                            .filter_map(|row| row.channel_thumb.clone())
+                            .filter(|url| !url.is_empty() && seen_icons.insert(url.clone()))
                             .collect();
+                        if !icon_urls.is_empty() {
+                            for url in &icon_urls {
+                                self.channel_icon_pending.insert(url.clone());
+                            }
+                            Self::spawn_channel_icon_prefetch(icon_urls);
+                        }
 
                         // Warm-start: upload last hotset first (bounded)
                         if let Some(hs) = self.last_hotset.take() {

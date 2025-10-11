@@ -270,9 +270,13 @@ impl crate::app::PexApp {
         let Some(keys) = &self.owned_keys else {
             return;
         };
+        let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
             let key = Self::make_owned_key(&row.title, row.year);
             row.owned = keys.contains(&key);
+            row.owned_modified = modified
+                .and_then(|m| m.get(&key))
+                .and_then(|v| *v);
         }
     }
 

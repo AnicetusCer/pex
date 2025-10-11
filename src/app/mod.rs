@@ -115,6 +115,8 @@ pub struct PexApp {
     show_genre_filter_popup: bool,
     show_advanced_popup: bool,
     advanced_feedback: Option<String>,
+    channel_icon_textures: HashMap<String, eg::TextureHandle>,
+    channel_icon_pending: HashSet<String>,
 
     // sorting
     sort_key: SortKey,
@@ -192,6 +194,8 @@ impl Default for PexApp {
             show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
+            channel_icon_textures: HashMap::new(),
+            channel_icon_pending: HashSet::new(),
 
             sort_key: SortKey::Time,
             sort_desc: false,
@@ -461,10 +465,55 @@ impl PexApp {
         self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
         self.selected_idx = None;
         self.rating_states.clear();
+        self.channel_icon_textures.clear();
+        self.channel_icon_pending.clear();
         self.owned_modified = None;
         self.set_status("Restarting poster prep…");
         self.start_poster_prep();
         ctx.request_repaint();
+    }
+
+    fn channel_icon_texture(&mut self, ctx: &eg::Context, url: &str) -> Option<eg::TextureHandle> {
+        if url.trim().is_empty() {
+            return None;
+        }
+        if let Some(tex) = self.channel_icon_textures.get(url) {
+            return Some(tex.clone());
+        }
+
+        let path = crate::app::cache::channel_icon_path(url);
+        if !path.exists() {
+            if self.channel_icon_pending.insert(url.to_string()) {
+                Self::spawn_channel_icon_prefetch(vec![url.to_string()]);
+            }
+            return None;
+        }
+
+        let path_str = path.to_string_lossy();
+        let (w, h, rgba) = crate::app::cache::load_rgba_raw_or_image(&path_str).ok()?;
+        if w == 0 || h == 0 || rgba.is_empty() {
+            return None;
+        }
+
+        let size = [w as usize, h as usize];
+        let image = eg::ColorImage::from_rgba_unmultiplied(size, &rgba);
+        let key = format!(
+            "channel_icon_{}",
+            crate::app::cache::url_to_cache_key(url)
+        );
+        let tex = ctx.load_texture(key, image, eg::TextureOptions::LINEAR);
+        let handle = tex.clone();
+        self.channel_icon_textures.insert(url.to_string(), tex);
+        self.channel_icon_pending.remove(url);
+        Some(handle)
+    }
+
+    fn spawn_channel_icon_prefetch(urls: Vec<String>) {
+        std::thread::spawn(move || {
+            for url in urls {
+                let _ = crate::app::cache::ensure_channel_icon(&url);
+            }
+        });
     }
 
     fn clear_poster_cache_files(&self) -> Result<usize, String> {
@@ -558,6 +607,7 @@ impl PexApp {
         self.owned_modified = None;
         for row in &mut self.rows {
             row.owned = false;
+            row.owned_modified = None;
         }
         self.mark_dirty();
         self.owned_scan_in_progress = false;
