@@ -3,3 +3,4 @@
 config.json
 plex_epg.db
 Cargo.lock
+*.Zone.Identifier
