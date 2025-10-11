@@ -26,6 +26,7 @@ serde_json = "1"
 itertools = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+urlencoding = "2.1"
 
 [[bin]]
 name = "db_explorer"

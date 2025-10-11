@@ -19,6 +19,10 @@ pub type PrepItem = (
     Option<i32>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f32>,
+    Option<f32>,
 );
 
 pub enum PrepMsg {
@@ -124,8 +128,28 @@ pub struct PosterRow {
     pub year: Option<i32>,
     pub channel: Option<String>,
     pub genres: Vec<String>,
+    pub guid: Option<String>,
+    pub summary: Option<String>,
+    pub audience_rating: Option<f32>,
+    pub critic_rating: Option<f32>,
     pub path: Option<PathBuf>,
     pub tex: Option<TextureHandle>, // UI thread only
     pub state: PosterState,
     pub owned: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum RatingState {
+    Idle,
+    Pending,
+    Success(String),
+    NotFound,
+    Error(String),
+    MissingApiKey,
+}
+
+#[derive(Clone, Debug)]
+pub struct RatingMsg {
+    pub key: String,
+    pub state: RatingState,
 }

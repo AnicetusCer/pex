@@ -1,7 +1,7 @@
 // src/app/mod.rs — async DB scan + upfront poster prefetch + resized cache + single splash
 
 // ---- Standard lib imports ----
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -10,10 +10,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 // ---- Crates ----
 use eframe::egui as eg;
+use serde::Deserialize;
+use urlencoding::encode;
 
 // ---- Local modules ----
 pub mod cache;
 use crate::app::cache::find_any_by_key;
+use crate::config::load_config;
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -22,7 +25,7 @@ pub mod types;
 pub mod utils;
 pub use types::{
     BootPhase, DayRange, OwnedMsg, Phase, PosterRow, PosterState, PrefetchDone, PrepItem, PrepMsg,
-    SortKey,
+    RatingMsg, RatingState, SortKey,
 };
 pub mod detail;
 pub mod filters;
@@ -96,6 +99,9 @@ pub struct PexApp {
     owned_hd_keys: Option<HashSet<String>>,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
+    rating_tx: Option<Sender<RatingMsg>>,
+    rating_rx: Option<Receiver<RatingMsg>>,
+    rating_states: HashMap<String, RatingState>,
 
     // search/filter/sort controls
     search_query: String,
@@ -168,6 +174,9 @@ impl Default for PexApp {
             owned_hd_keys: Self::load_owned_hd_sidecar(),
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
+            rating_tx: None,
+            rating_rx: None,
+            rating_states: HashMap::new(),
 
             search_query: String::new(),
 
@@ -352,6 +361,80 @@ impl PexApp {
         }
     }
 
+    fn rating_state_for_key(&self, key: &str) -> RatingState {
+        self.rating_states
+            .get(key)
+            .cloned()
+            .unwrap_or(RatingState::Idle)
+    }
+
+    fn ensure_rating_channel(&mut self) -> Sender<RatingMsg> {
+        if self.rating_tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<RatingMsg>();
+            self.rating_tx = Some(tx.clone());
+            self.rating_rx = Some(rx);
+        }
+        self.rating_tx.as_ref().unwrap().clone()
+    }
+
+    fn request_rating_for(&mut self, idx: usize) {
+        let Some(row) = self.rows.get(idx) else {
+            return;
+        };
+        let key = row.key.clone();
+        if matches!(
+            self.rating_states.get(&key),
+            Some(RatingState::Pending)
+        ) {
+            return;
+        }
+
+        let cfg = load_config();
+        let api_key = cfg
+            .omdb_api_key
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| "4a3b711b".to_string());
+        if api_key.trim().is_empty() {
+            self.rating_states
+                .insert(key, RatingState::MissingApiKey);
+            return;
+        }
+
+        let imdb_id = row.guid.as_deref().and_then(|g| imdb_id_from_guid(g));
+        let title = row.title.clone();
+        let year = row.year;
+        let sender = self.ensure_rating_channel();
+
+        self.rating_states
+            .insert(key.clone(), RatingState::Pending);
+
+        std::thread::spawn(move || {
+            let state = fetch_rating_from_omdb(api_key, imdb_id, title, year);
+            let _ = sender.send(RatingMsg { key, state });
+        });
+    }
+
+    fn poll_rating_updates(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+
+        loop {
+            let Some(rx) = self.rating_rx.as_ref() else {
+                break;
+            };
+            match rx.try_recv() {
+                Ok(msg) => {
+                    self.rating_states.insert(msg.key, msg.state);
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.rating_rx = None;
+                    self.rating_tx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     fn restart_poster_pipeline(&mut self, ctx: &eg::Context) {
         self.prep_started = false;
         self.prep_rx = None;
@@ -369,6 +452,7 @@ impl PexApp {
         self.boot_phase = BootPhase::Starting;
         self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
         self.selected_idx = None;
+        self.rating_states.clear();
         self.set_status("Restarting poster prep…");
         self.start_poster_prep();
         ctx.request_repaint();
@@ -464,6 +548,107 @@ impl PexApp {
     }
 }
 
+fn imdb_id_from_guid(guid: &str) -> Option<String> {
+    let lower = guid.to_ascii_lowercase();
+    let pos = lower.find("tt")?;
+    let mut id = String::from("tt");
+    for ch in guid[pos + 2..].chars() {
+        if ch.is_ascii_digit() {
+            id.push(ch);
+        } else {
+            break;
+        }
+    }
+    if id.len() > 2 {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+#[derive(Deserialize)]
+struct OmdbResponse {
+    #[serde(rename = "Response")]
+    response: String,
+    #[serde(rename = "imdbRating")]
+    imdb_rating: Option<String>,
+    #[serde(rename = "Error")]
+    error: Option<String>,
+}
+
+fn fetch_rating_from_omdb(
+    api_key: String,
+    imdb_id: Option<String>,
+    title: String,
+    year: Option<i32>,
+) -> RatingState {
+    if imdb_id.is_none() && title.trim().is_empty() {
+        return RatingState::NotFound;
+    }
+
+    let client = match reqwest::blocking::Client::builder()
+        .user_agent("pex/rating-fetch")
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => return RatingState::Error(format!("client: {err}")),
+    };
+
+    let url = if let Some(id) = imdb_id {
+        format!("https://www.omdbapi.com/?i={}&apikey={}", id, api_key)
+    } else {
+        let mut url = format!(
+            "https://www.omdbapi.com/?t={}&apikey={}",
+            encode(title.trim()),
+            api_key
+        );
+        if let Some(y) = year {
+            url.push_str(&format!("&y={}", y));
+        }
+        url
+    };
+
+    let resp = match client.get(&url).send() {
+        Ok(r) => r,
+        Err(err) => return RatingState::Error(format!("network: {err}")),
+    };
+    if !resp.status().is_success() {
+        return RatingState::Error(format!("HTTP {}", resp.status()));
+    }
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(err) => return RatingState::Error(format!("read: {err}")),
+    };
+
+    let parsed: OmdbResponse = match serde_json::from_str(&text) {
+        Ok(p) => p,
+        Err(err) => return RatingState::Error(format!("parse: {err}")),
+    };
+
+    if parsed.response.eq_ignore_ascii_case("true") {
+        if let Some(r) = parsed.imdb_rating {
+            if r.trim().is_empty() || r.trim().eq_ignore_ascii_case("N/A") {
+                RatingState::NotFound
+            } else if let Ok(val) = r.trim().parse::<f32>() {
+                RatingState::Success(format!("IMDb {:.1}/10", val))
+            } else {
+                RatingState::Success(format!("IMDb {}", r.trim()))
+            }
+        } else {
+            RatingState::NotFound
+        }
+    } else if let Some(err) = parsed.error {
+        if err.to_ascii_lowercase().contains("not found") {
+            RatingState::NotFound
+        } else {
+            RatingState::Error(err)
+        }
+    } else {
+        RatingState::NotFound
+    }
+}
+
 impl eframe::App for PexApp {
     fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
         // Keep frames moving so Windows never flags "Not Responding"
@@ -491,6 +676,8 @@ impl eframe::App for PexApp {
         if self.prefetch_started && self.loading_progress < 1.0 {
             self.poll_prefetch_done(ctx);
         }
+
+        self.poll_rating_updates();
 
         // If warm-up not finished, show calm splash and return
         if self.boot_phase != types::BootPhase::Ready {

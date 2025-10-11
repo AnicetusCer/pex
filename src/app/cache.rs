@@ -12,6 +12,7 @@ use crate::config::load_config;
 // Chosen once on first call
 use std::sync::OnceLock;
 static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
@@ -27,6 +28,22 @@ pub fn cache_dir() -> PathBuf {
                 // Fall back to local folder if creation failed
                 path = PathBuf::from(".pex_cache");
                 let _ = fs::create_dir_all(&path);
+            }
+            path
+        })
+        .clone()
+}
+
+pub fn poster_cache_dir() -> PathBuf {
+    POSTER_DIR_ONCE
+        .get_or_init(|| {
+            let mut path = cache_dir().join("posters");
+            if let Err(e) = fs::create_dir_all(&path) {
+                warn!(
+                    "failed to create poster cache dir {}: {e}",
+                    path.display()
+                );
+                path = cache_dir();
             }
             path
         })
@@ -84,7 +101,7 @@ pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String>
 }
 
 pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
-    let base = cache_dir();
+    let poster_dir = poster_cache_dir();
     let candidates = [
         format!("{}.png", key),
         format!("{}.jpg", key),
@@ -94,7 +111,7 @@ pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
         format!("rgba_{}.rgba", key),
     ];
     for c in candidates {
-        let p = base.join(c);
+        let p = poster_dir.join(c);
         if p.exists() {
             return Some(p);
         }
@@ -124,7 +141,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
     // Try decode with image crate
     match image::load_from_memory(&body) {
         Ok(img) => {
-            let out = cache_dir().join(format!("{key}.png"));
+            let out = poster_cache_dir().join(format!("{key}.png"));
             let mut f =
                 fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             let mut png_bytes: Vec<u8> = Vec::new();
@@ -137,7 +154,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
         Err(e) => {
             warn!("image decode failed for {url}: {e}; storing raw");
             // Store as rgba with w/h header if we really fail (rare)
-            let out = cache_dir().join(format!("{key}.rgba"));
+            let out = poster_cache_dir().join(format!("{key}.rgba"));
             let mut f =
                 fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
             // We don't know w/h here; write zeros so loader will reject gracefully
@@ -153,7 +170,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
 }
 /// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
 /// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
-/// This writes `<cache_dir>/<key>.jpg`.
+/// This writes `<poster_cache_dir>/<key>.jpg`.
 pub fn download_and_store_resized(
     url: &str,
     key: &str,
@@ -164,7 +181,7 @@ pub fn download_and_store_resized(
     use reqwest::blocking::Client;
     use std::{fs, io::Write};
 
-    let dest = cache_dir().join(format!("{key}.jpg"));
+    let dest = poster_cache_dir().join(format!("{key}.jpg"));
 
     // If already present, return immediately.
     if dest.exists() {
@@ -241,7 +258,7 @@ pub fn download_and_store_resized_with_client(
     use image::{imageops::FilterType, DynamicImage};
     use std::{fs, io::Write};
 
-    let dest = cache_dir().join(format!("{key}.jpg"));
+    let dest = poster_cache_dir().join(format!("{key}.jpg"));
 
     // If already present, return immediately.
     if dest.exists() {

@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub cache_dir: Option<String>,
     pub plex_db_source: Option<String>,
     pub ffprobe_cmd: Option<String>,
+    pub omdb_api_key: Option<String>,
     pub library_roots: Vec<String>,
     pub hide_owned_by_default: bool,
     pub dim_owned_by_default: bool,
@@ -29,6 +30,7 @@ impl Default for AppConfig {
             cache_dir: None,
             plex_db_source: None,
             ffprobe_cmd: None,
+            omdb_api_key: None,
             library_roots: Vec::new(),
             hide_owned_by_default: false,
             dim_owned_by_default: false,
@@ -51,6 +53,7 @@ struct RawConfig {
     plex_db_source: Option<String>,
     library_roots: Option<Vec<String>>,
     ffprobe_cmd: Option<String>,
+    omdb_api_key: Option<String>,
     hide_owned_by_default: Option<bool>,
     dim_owned_by_default: Option<bool>,
     ui: Option<RawUi>,
@@ -74,6 +77,9 @@ pub fn load_config() -> AppConfig {
                 }
                 if parsed.ffprobe_cmd.is_some() {
                     cfg.ffprobe_cmd = parsed.ffprobe_cmd;
+                }
+                if parsed.omdb_api_key.is_some() {
+                    cfg.omdb_api_key = parsed.omdb_api_key;
                 }
                 if let Some(list) = parsed.library_roots {
                     cfg.library_roots = list;

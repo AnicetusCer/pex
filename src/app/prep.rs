@@ -21,7 +21,11 @@ SELECT
   mi.begins_at,
   m.year,
   m.tags_genre,
-  mi.extra_data
+  mi.extra_data,
+  m.guid,
+  m.summary,
+  m.audience_rating,
+  m.rating
 FROM metadata_items m
 LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
 WHERE m.metadata_type = 1
@@ -38,7 +42,11 @@ SELECT
   mi.begins_at,
   m.year,
   m.tags_genre,
-  mi.extra_data
+  mi.extra_data,
+  m.guid,
+  m.summary,
+  m.audience_rating,
+  m.rating
 FROM metadata_items m
 LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
 WHERE m.metadata_type = 1
@@ -193,6 +201,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     Some(1982),
                     Some("Sci-Fi|Thriller".into()),
                     Some("ITV2".into()),
+                    Some("com.plexapp.agents.imdb://tt0083658".into()),
+                    Some("In the future, blade runners hunt replicants.".into()),
+                    Some(8.5),
+                    Some(8.9),
                 ),
                 (
                     "Alien".into(),
@@ -202,6 +214,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     Some(1979),
                     Some("Sci-Fi|Horror".into()),
                     Some("ITV2".into()),
+                    Some("com.plexapp.agents.imdb://tt0078748".into()),
+                    Some("The crew of the Nostromo encounters a deadly alien.".into()),
+                    Some(8.4),
+                    Some(9.0),
                 ),
                 (
                     "Arrival".into(),
@@ -211,6 +227,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     Some(2016),
                     Some("Sci-Fi|Drama".into()),
                     Some("ITV2".into()),
+                    Some("com.plexapp.agents.imdb://tt2543164".into()),
+                    Some("A linguist communicates with extraterrestrial visitors.".into()),
+                    Some(8.0),
+                    Some(8.4),
                 ),
             ];
             send(PrepMsg::Done(fake));
@@ -339,13 +359,37 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             let year: Option<i32> = row.get(3).ok().flatten();
             let tags: Option<String> = row.get(4).ok().flatten();
             let extra: Option<String> = row.get(5).ok().flatten();
+            let guid: Option<String> = row.get(6).ok().flatten();
+            let summary: Option<String> = row.get(7).ok().flatten();
+            let audience_rating: Option<f32> = row
+                .get::<_, Option<f64>>(8)
+                .ok()
+                .flatten()
+                .map(|v| v as f32);
+            let critic_rating: Option<f32> = row
+                .get::<_, Option<f64>>(9)
+                .ok()
+                .flatten()
+                .map(|v| v as f32);
 
             if let (Some(t), Some(u)) = (title, url) {
                 let tt = t.trim();
                 if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
                     let key = url_to_cache_key(&u);
                     let ch = extra.as_deref().and_then(parse_channel_from_extra);
-                    list.push((tt.to_owned(), u, key, begins, year, tags, ch));
+                    list.push((
+                        tt.to_owned(),
+                        u,
+                        key,
+                        begins,
+                        year,
+                        tags,
+                        ch,
+                        guid,
+                        summary,
+                        audience_rating,
+                        critic_rating,
+                    ));
                     if last_emit.elapsed() >= Duration::from_millis(600) {
                         send(PrepMsg::Info(format!("Found {} posters…", list.len())));
                         last_emit = Instant::now();
@@ -414,9 +458,23 @@ impl crate::app::PexApp {
                     }
                     Ok(crate::app::PrepMsg::Done(list)) => {
                         // Convert manifest rows into UI rows
+                        self.rating_states.clear();
                         self.rows = list
                             .into_iter()
-                            .map(|(t, u, base_k, ts_opt, year_opt, tags_opt, ch_opt)| {
+                            .map(
+                                |(
+                                    t,
+                                    u,
+                                    base_k,
+                                    ts_opt,
+                                    year_opt,
+                                    tags_opt,
+                                    ch_opt,
+                                    guid_opt,
+                                    summary_opt,
+                                    audience_rating,
+                                    critic_rating,
+                                )| {
                                 let airing = ts_opt.map(|ts| {
                                     std::time::SystemTime::UNIX_EPOCH
                                         + std::time::Duration::from_secs(ts as u64)
@@ -437,6 +495,14 @@ impl crate::app::PexApp {
                                     .as_deref()
                                     .map(crate::app::utils::parse_genres)
                                     .unwrap_or_default();
+                                let summary = summary_opt.and_then(|s| {
+                                    let trimmed = s.trim();
+                                    if trimmed.is_empty() {
+                                        None
+                                    } else {
+                                        Some(trimmed.to_string())
+                                    }
+                                });
 
                                 crate::app::PosterRow {
                                     title: t,
@@ -446,12 +512,17 @@ impl crate::app::PexApp {
                                     year: year_opt,
                                     channel,
                                     genres,
+                                    guid: guid_opt,
+                                    summary,
+                                    audience_rating,
+                                    critic_rating,
                                     path,
                                     tex: None,
                                     state,
                                     owned: false, // filled in by apply_owned_flags()
                                 }
-                            })
+                            },
+                            )
                             .collect();
 
                         // Warm-start: upload last hotset first (bounded)
