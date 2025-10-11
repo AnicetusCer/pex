@@ -333,6 +333,28 @@ impl ProbeCache {
     fn update(&mut self, key: String, entry: ProbeEntry) {
         self.entries.insert(key, entry);
     }
+
+    fn refresh_stale_entries(&mut self) -> io::Result<usize> {
+        use std::path::Path;
+        let mut stale_keys: Vec<String> = Vec::new();
+        for (key, entry) in self.entries.iter() {
+            let path = Path::new(key);
+            let current = file_modified_seconds(path);
+            if current != entry.mtime {
+                stale_keys.push(key.clone());
+            }
+        }
+
+        for key in &stale_keys {
+            self.entries.remove(key);
+        }
+
+        if !stale_keys.is_empty() {
+            self.save()?;
+        }
+
+        Ok(stale_keys.len())
+    }
 }
 
 fn file_modified_seconds(path: &Path) -> Option<u64> {
@@ -370,6 +392,11 @@ pub(crate) fn reset_ffprobe_runtime_state() {
     if let Ok(mut cache) = FFPROBE_CACHE.lock() {
         *cache = ProbeCache::default();
     }
+}
+
+pub(crate) fn refresh_ffprobe_cache() -> io::Result<usize> {
+    let mut cache = FFPROBE_CACHE.lock().expect("ffprobe cache mutex poisoned");
+    cache.refresh_stale_entries()
 }
 
 pub(crate) fn ffprobe_available() -> bool {

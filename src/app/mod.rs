@@ -533,7 +533,7 @@ impl PexApp {
 
     fn clear_owned_cache(&mut self) -> Result<usize, String> {
         let removed = self.clear_owned_cache_files()?;
-        self.restart_owned_scan();
+        self.refresh_owned_scan();
         Ok(removed)
     }
 
@@ -543,16 +543,25 @@ impl PexApp {
         Ok(removed)
     }
 
-    fn restart_owned_scan(&mut self) {
+    fn refresh_ffprobe_cache(&mut self) -> Result<usize, String> {
+        crate::app::utils::refresh_ffprobe_cache().map_err(|e| e.to_string())
+    }
+
+    fn refresh_poster_cache_light(&mut self) -> Result<usize, String> {
+        crate::app::cache::refresh_poster_cache_light().map_err(|e| e.to_string())
+    }
+
+    fn refresh_owned_scan(&mut self) {
         self.owned_rx = None;
         self.owned_keys = None;
         self.owned_hd_keys = None;
+        self.owned_modified = None;
         for row in &mut self.rows {
             row.owned = false;
         }
         self.mark_dirty();
         self.owned_scan_in_progress = false;
-        self.record_owned_message("Restarting owned scan…");
+        self.record_owned_message("Refreshing owned scan…");
         self.start_owned_scan();
     }
 }

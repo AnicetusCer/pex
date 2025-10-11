@@ -395,6 +395,22 @@ impl crate::app::PexApp {
                             }
                         }
                     }
+                    if ui.button("Refresh poster cache").clicked() {
+                        match self.refresh_poster_cache_light() {
+                            Ok(removed) => {
+                                self.advanced_feedback = Some(format!(
+                                    "Poster cache refresh removed {removed} stale file(s)."
+                                ));
+                                self.set_status("Poster cache refreshed.");
+                            }
+                            Err(err) => {
+                                self.advanced_feedback = Some(format!(
+                                    "Poster cache refresh failed: {err}"
+                                ));
+                                self.set_status("Poster cache refresh failed.");
+                            }
+                        }
+                    }
                     if ui.button("Restart poster prep").clicked() {
                         self.restart_poster_pipeline(&ctx_clone);
                         self.advanced_feedback =
@@ -424,11 +440,11 @@ impl crate::app::PexApp {
                             }
                         }
                     }
-                    if ui.button("Restart owned scan").clicked() {
-                        self.restart_owned_scan();
+                    if ui.button("Refresh owned scan").clicked() {
+                        self.refresh_owned_scan();
                         self.advanced_feedback =
-                            Some("Owned scan restarted (existing cache kept).".into());
-                        self.set_status("Owned scan restarting…");
+                            Some("Owned scan refresh started (incremental).".into());
+                        self.set_status("Refreshing owned library…");
                     }
 
                     let owned_running = self.owned_scan_in_progress;
@@ -459,6 +475,22 @@ impl crate::app::PexApp {
 
                     ui.separator();
                     ui.label(eg::RichText::new("ffprobe cache").strong());
+                    if ui.button("Refresh ffprobe cache").clicked() {
+                        match self.refresh_ffprobe_cache() {
+                            Ok(removed) => {
+                                self.advanced_feedback = Some(format!(
+                                    "ffprobe cache refresh removed {removed} stale entry(s)."
+                                ));
+                                self.set_status("ffprobe cache refreshed.");
+                            }
+                            Err(err) => {
+                                self.advanced_feedback = Some(format!(
+                                    "ffprobe cache refresh failed: {err}"
+                                ));
+                                self.set_status("ffprobe cache refresh failed.");
+                            }
+                        }
+                    }
                     if ui.button("Clear ffprobe cache").clicked() {
                         match self.clear_ffprobe_cache() {
                             Ok(removed) => {
