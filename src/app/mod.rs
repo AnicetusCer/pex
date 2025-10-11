@@ -97,6 +97,7 @@ pub struct PexApp {
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
+    owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
     rating_tx: Option<Sender<RatingMsg>>,
@@ -105,10 +106,13 @@ pub struct PexApp {
 
     // search/filter/sort controls
     search_query: String,
+    filter_hd_only: bool,
 
     // channel filter
     show_channel_filter_popup: bool,
     selected_channels: std::collections::BTreeSet<String>,
+    selected_genres: std::collections::BTreeSet<String>,
+    show_genre_filter_popup: bool,
     show_advanced_popup: bool,
     advanced_feedback: Option<String>,
 
@@ -172,6 +176,7 @@ impl Default for PexApp {
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
             owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_modified: None,
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
             rating_tx: None,
@@ -179,9 +184,12 @@ impl Default for PexApp {
             rating_states: HashMap::new(),
 
             search_query: String::new(),
+            filter_hd_only: false,
 
             show_channel_filter_popup: false,
             selected_channels: std::collections::BTreeSet::new(),
+            selected_genres: std::collections::BTreeSet::new(),
+            show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
 
@@ -453,6 +461,7 @@ impl PexApp {
         self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
         self.selected_idx = None;
         self.rating_states.clear();
+        self.owned_modified = None;
         self.set_status("Restarting poster prep…");
         self.start_poster_prep();
         ctx.request_repaint();
@@ -715,8 +724,9 @@ impl eframe::App for PexApp {
             // Top bar (range/search/sort/workers/owned)
             self.ui_render_topbar(ui);
 
-            // Channel filter popup (separate window)
+            // Channel & genre filter popups (separate windows)
             self.ui_render_channel_filter_popup(ctx);
+            self.ui_render_genre_filter_popup(ctx);
             self.ui_render_advanced_popup(ctx);
 
             // Decide whether to show the early splash (before enough textures ready)

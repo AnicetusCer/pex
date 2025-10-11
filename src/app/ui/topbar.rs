@@ -1,6 +1,7 @@
 // src/app/ui/topbar.rs
 use super::super::{DayRange, SortKey};
 use eframe::egui as eg;
+use std::path::Path;
 
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
@@ -64,11 +65,23 @@ impl crate::app::PexApp {
                 self.mark_dirty();
             }
 
+            if ui
+                .toggle_value(&mut self.filter_hd_only, "HD only")
+                .on_hover_text("Show only broadcast HD airings")
+                .changed()
+            {
+                self.mark_dirty();
+            }
+
             ui.separator();
 
             // Channel filter popup trigger
             if ui.button("Channel filter…").clicked() {
                 self.show_channel_filter_popup = true;
+            }
+
+            if ui.button("Genre filter…").clicked() {
+                self.show_genre_filter_popup = true;
             }
 
             // Clear active channel filter (only when something is selected)
@@ -221,6 +234,61 @@ impl crate::app::PexApp {
         self.show_channel_filter_popup = open;
     }
 
+    pub(crate) fn ui_render_genre_filter_popup(&mut self, ctx: &eg::Context) {
+        if !self.show_genre_filter_popup {
+            return;
+        }
+
+        let mut genres: Vec<String> = self
+            .rows
+            .iter()
+            .flat_map(|r| r.genres.clone())
+            .collect();
+        genres.sort();
+        genres.dedup();
+
+        let mut open = self.show_genre_filter_popup;
+        eg::Window::new("Genre filter")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(280.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(eg::RichText::new("Include only these genres:").strong());
+                    if ui.small_button("Select all").clicked() {
+                        self.selected_genres = genres.iter().cloned().collect();
+                        self.mark_dirty();
+                    }
+                    if ui.small_button("Select none").clicked() {
+                        self.selected_genres.clear();
+                        self.mark_dirty();
+                    }
+                    if !self.selected_genres.is_empty() && ui.small_button("Clear").clicked() {
+                        self.selected_genres.clear();
+                        self.mark_dirty();
+                    }
+                });
+
+                ui.separator();
+                eg::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for genre in genres.iter() {
+                        let mut checked = self.selected_genres.contains(genre);
+                        if ui.checkbox(&mut checked, genre).clicked() {
+                            if checked {
+                                self.selected_genres.insert(genre.clone());
+                            } else {
+                                self.selected_genres.remove(genre);
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                });
+            });
+
+        self.show_genre_filter_popup = open;
+    }
+
     pub(crate) fn ui_render_advanced_popup(&mut self, ctx: &eg::Context) {
         if !self.show_advanced_popup {
             return;
@@ -228,6 +296,15 @@ impl crate::app::PexApp {
 
         let mut open = self.show_advanced_popup;
         let ctx_clone = ctx.clone();
+        let cfg = crate::config::load_config();
+        let db_path_str = cfg
+            .plex_db_local
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("plex_epg.db");
+        let db_exists = Path::new(db_path_str).exists();
+        let using_demo_omdb = cfg.omdb_api_key.is_none();
+
         eg::Window::new("Advanced controls")
             .collapsible(false)
             .resizable(false)
@@ -235,6 +312,33 @@ impl crate::app::PexApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
+                    ui.label(
+                        eg::RichText::new(format!(
+                            "Plex DB: {}",
+                            db_path_str
+                        ))
+                        .color(if db_exists {
+                            eg::Color32::LIGHT_GREEN
+                        } else {
+                            eg::Color32::LIGHT_RED
+                        }),
+                    );
+                    if !db_exists {
+                        ui.label(
+                            eg::RichText::new("Database file missing at the configured path.")
+                                .color(eg::Color32::LIGHT_RED),
+                        );
+                    }
+                    if using_demo_omdb {
+                        ui.label(
+                            eg::RichText::new(
+                                "Using demo OMDb key (config omdb_api_key not set).",
+                            )
+                            .weak(),
+                        );
+                    }
+                    ui.separator();
+
                     ui.label(eg::RichText::new("Prefetch workers").strong());
                     let workers_resp =
                         ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32).text("Threads"));
@@ -247,6 +351,20 @@ impl crate::app::PexApp {
 
                     ui.separator();
                     ui.label(eg::RichText::new("Poster cache").strong());
+                    if let Some(limit) = crate::app::cache::poster_cache_limit() {
+                        ui.label(
+                            eg::RichText::new(format!(
+                                "Current limit: {} files",
+                                limit
+                            ))
+                            .weak(),
+                        );
+                    } else {
+                        ui.label(
+                            eg::RichText::new("Current limit: unlimited (set poster_cache_max_files in config.json)")
+                                .weak(),
+                        );
+                    }
                     if ui.button("Clear poster cache").clicked() {
                         match self.clear_poster_cache_files() {
                             Ok(removed) => {
@@ -258,6 +376,20 @@ impl crate::app::PexApp {
                             }
                             Err(err) => {
                                 let msg = format!("Poster cache clear failed: {err}");
+                                self.advanced_feedback = Some(msg.clone());
+                                self.set_status(msg);
+                            }
+                        }
+                    }
+                    if ui.button("Prune over limit").clicked() {
+                        match crate::app::cache::prune_poster_cache_now() {
+                            Ok(removed) => {
+                                self.advanced_feedback = Some(format!(
+                                    "Pruned {removed} poster file(s) beyond limit."
+                                ));
+                            }
+                            Err(err) => {
+                                let msg = format!("Poster prune failed: {err}");
                                 self.advanced_feedback = Some(msg.clone());
                                 self.set_status(msg);
                             }
@@ -343,6 +475,40 @@ impl crate::app::PexApp {
                                 let msg = format!("ffprobe cache clear failed: {err}");
                                 self.advanced_feedback = Some(msg.clone());
                                 self.set_status(msg);
+                            }
+                        }
+                    }
+
+                    ui.separator();
+                    ui.label(eg::RichText::new("Preferences").strong());
+                    if ui.button("Backup UI prefs").clicked() {
+                        match crate::app::prefs::backup_ui_prefs() {
+                            Ok(path) => {
+                                self.advanced_feedback =
+                                    Some(format!("Prefs backed up to {}", path.display()));
+                            }
+                            Err(err) => {
+                                self.advanced_feedback =
+                                    Some(format!("Prefs backup failed: {err}"));
+                            }
+                        }
+                    }
+                    if ui.button("Restore latest prefs backup").clicked() {
+                        match crate::app::prefs::restore_latest_ui_prefs_backup() {
+                            Ok(Some(path)) => {
+                                self.load_prefs();
+                                self.advanced_feedback = Some(format!(
+                                    "Prefs restored from {}",
+                                    path.display()
+                                ));
+                            }
+                            Ok(None) => {
+                                self.advanced_feedback =
+                                    Some("No prefs backups found.".into());
+                            }
+                            Err(err) => {
+                                self.advanced_feedback =
+                                    Some(format!("Prefs restore failed: {err}"));
                             }
                         }
                     }

@@ -1,13 +1,16 @@
 // src/app/types.rs
 use eframe::egui::TextureHandle;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 // ---- cross-thread messages / data ----
 pub enum OwnedMsg {
     Info(String),
-    Done(HashSet<String>),
+    Done {
+        keys: HashSet<String>,
+        modified: HashMap<String, Option<u64>>,
+    },
     Error(String),
 }
 
