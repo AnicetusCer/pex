@@ -44,19 +44,8 @@ impl crate::app::PexApp {
 
                 // include-only channel filter
                 if have_channel_filter {
-                    // Compare against BOTH the raw channel string and the humanized label
-                    let raw = row.channel.as_deref().unwrap_or("");
-                    let human = row
-                        .channel
-                        .as_deref()
-                        .map(crate::app::utils::humanize_channel);
-
-                    let selected_match = self.selected_channels.contains(raw)
-                        || human
-                            .as_ref()
-                            .is_some_and(|h| self.selected_channels.contains(h));
-
-                    if !selected_match {
+                    let raw = row.channel_raw.as_deref().unwrap_or("");
+                    if !self.selected_channels.contains(raw) {
                         return None;
                     }
                 }

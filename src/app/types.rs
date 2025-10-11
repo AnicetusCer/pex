@@ -14,19 +14,22 @@ pub enum OwnedMsg {
     Error(String),
 }
 
-pub type PrepItem = (
-    String,
-    String,
-    String,
-    Option<i64>,
-    Option<i32>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<f32>,
-    Option<f32>,
-);
+#[derive(Clone, Debug)]
+pub struct PrepItem {
+    pub title: String,
+    pub thumb_url: String,
+    pub key: String,
+    pub begins_at: Option<i64>,
+    pub year: Option<i32>,
+    pub tags_genre: Option<String>,
+    pub channel_call_sign: Option<String>,
+    pub channel_title: Option<String>,
+    pub channel_thumb: Option<String>,
+    pub guid: Option<String>,
+    pub summary: Option<String>,
+    pub audience_rating: Option<f32>,
+    pub critic_rating: Option<f32>,
+}
 
 pub enum PrepMsg {
     Info(String),
@@ -130,6 +133,9 @@ pub struct PosterRow {
     pub airing: Option<SystemTime>,
     pub year: Option<i32>,
     pub channel: Option<String>,
+    pub channel_raw: Option<String>,
+    pub channel_title: Option<String>,
+    pub channel_thumb: Option<String>,
     pub genres: Vec<String>,
     pub guid: Option<String>,
     pub summary: Option<String>,
@@ -139,6 +145,7 @@ pub struct PosterRow {
     pub tex: Option<TextureHandle>, // UI thread only
     pub state: PosterState,
     pub owned: bool,
+    pub owned_modified: Option<u64>,
 }
 
 #[derive(Clone, Debug)]

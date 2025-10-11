@@ -186,7 +186,7 @@ impl crate::app::PexApp {
 
         // Build channel list from current rows (raw values; UI presents humanized label)
         let mut channels: Vec<String> =
-            self.rows.iter().filter_map(|r| r.channel.clone()).collect();
+            self.rows.iter().filter_map(|r| r.channel_raw.clone()).collect();
         channels.sort();
         channels.dedup();
 
@@ -217,7 +217,12 @@ impl crate::app::PexApp {
                 eg::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for ch in channels.iter() {
                         let mut checked = self.selected_channels.contains(ch);
-                        let label = crate::app::utils::humanize_channel(ch);
+                        let label = self
+                            .rows
+                            .iter()
+                            .find(|r| r.channel_raw.as_deref() == Some(ch.as_str()))
+                            .and_then(|r| r.channel.clone())
+                            .unwrap_or_else(|| crate::app::utils::humanize_channel(ch));
                         if ui.checkbox(&mut checked, label).clicked() {
                             if checked {
                                 self.selected_channels.insert(ch.clone());

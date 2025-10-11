@@ -13,6 +13,7 @@ use crate::config::load_config;
 use std::sync::OnceLock;
 static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static CHANNEL_ICON_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static POSTER_LIMIT_ONCE: OnceLock<Option<usize>> = OnceLock::new();
 
 pub fn cache_dir() -> PathBuf {
@@ -345,6 +346,71 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
     }
 
     Ok(removed)
+}
+
+fn channel_icon_dir() -> PathBuf {
+    CHANNEL_ICON_DIR_ONCE
+        .get_or_init(|| {
+            let mut path = cache_dir().join("channel_icons");
+            if let Err(e) = fs::create_dir_all(&path) {
+                warn!(
+                    "failed to create channel icon dir {}: {e}",
+                    path.display()
+                );
+                path = cache_dir();
+            }
+            path
+        })
+        .clone()
+}
+
+pub fn channel_icon_path(url: &str) -> PathBuf {
+    channel_icon_dir().join(format!("{}.png", url_to_cache_key(url)))
+}
+
+pub fn ensure_channel_icon(url: &str) -> Result<PathBuf, String> {
+    if url.trim().is_empty() {
+        return Err("empty url".into());
+    }
+    let dest = channel_icon_path(url);
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("download icon: {e}"))?;
+
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| format!("decode icon: {e}"))?;
+
+    let mut png_bytes: Vec<u8> = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        ImageFormat::Png,
+    )
+    .map_err(|e| format!("encode icon png: {e}"))?;
+
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = dest.with_extension("png.part");
+    {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create icon tmp: {e}"))?;
+        f.write_all(&png_bytes)
+            .map_err(|e| format!("write icon: {e}"))?;
+    }
+    fs::rename(&tmp, &dest).map_err(|e| format!("finalize icon: {e}"))?;
+
+    Ok(dest)
 }
 
 /// Same as `download_and_store_resized` but reuses a provided reqwest Client
