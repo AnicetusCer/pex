@@ -196,6 +196,25 @@ impl crate::app::PexApp {
                                 ("Owned SD", eg::Color32::from_gray(200))
                             };
                             ui.add(eg::Label::new(eg::RichText::new(txt).color(col)));
+
+                            if let Some(Some(ts)) = self
+                                .owned_modified
+                                .as_ref()
+                                .and_then(|map| map.get(&owned_key))
+                            {
+                                if let Some(date_str) =
+                                    crate::app::utils::format_owned_timestamp(*ts)
+                                {
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        eg::RichText::new(format!(
+                                            "Owned file recorded: {}",
+                                            date_str
+                                        ))
+                                        .weak(),
+                                    );
+                                }
+                            }
                         }
                     });
                 }

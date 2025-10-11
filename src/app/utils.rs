@@ -1,12 +1,13 @@
 // src/app/util.rs
+use chrono::{Local, TimeZone};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
 use std::sync::{Mutex, RwLock};
-use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 pub(crate) fn normalize_title(s: &str) -> String {
@@ -127,6 +128,13 @@ pub(crate) fn hhmm_utc(ts: SystemTime) -> String {
     let h = hm / 3600;
     let m = (hm % 3600) / 60;
     format!("{:02}:{:02}", h, m)
+}
+
+pub(crate) fn format_owned_timestamp(ts: u64) -> Option<String> {
+    Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
 }
 
 /// Very light hostname extraction for channel hint (no extra deps).

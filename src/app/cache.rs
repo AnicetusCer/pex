@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use image::{GenericImageView, ImageFormat};
 use reqwest::blocking::Client;
@@ -13,6 +13,7 @@ use crate::config::load_config;
 use std::sync::OnceLock;
 static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
+static POSTER_LIMIT_ONCE: OnceLock<Option<usize>> = OnceLock::new();
 
 pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
@@ -48,6 +49,52 @@ pub fn poster_cache_dir() -> PathBuf {
             path
         })
         .clone()
+}
+
+pub fn poster_cache_limit() -> Option<usize> {
+    POSTER_LIMIT_ONCE
+        .get_or_init(|| load_config().poster_cache_max_files.filter(|n| *n > 0))
+        .clone()
+}
+
+fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
+    let Some(limit) = poster_cache_limit() else {
+        return Ok(0);
+    };
+    let dir = poster_cache_dir();
+    let mut entries: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_ascii_lowercase();
+            if !matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "rgba"
+            ) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        entries.push((modified, path));
+    }
+
+    if entries.len() <= limit {
+        return Ok(0);
+    }
+
+    entries.sort_by_key(|(mtime, _)| *mtime);
+    let remove_count = entries.len() - limit;
+    for (_, path) in entries.into_iter().take(remove_count) {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(remove_count)
 }
 
 pub fn url_to_cache_key(url: &str) -> String {
@@ -149,6 +196,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("encode png: {e}"))?;
             f.write_all(&png_bytes)
                 .map_err(|e| format!("write {}: {e}", out.display()))?;
+            let _ = prune_poster_cache_if_needed();
             Ok(out)
         }
         Err(e) => {
@@ -164,6 +212,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
                 .map_err(|e| format!("write hdr: {e}"))?;
             f.write_all(&body)
                 .map_err(|e| format!("write {}: {e}", out.display()))?;
+            let _ = prune_poster_cache_if_needed();
             Ok(out)
         }
     }
@@ -243,7 +292,12 @@ pub fn download_and_store_resized(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
+    let _ = prune_poster_cache_if_needed();
     Ok(dest)
+}
+
+pub fn prune_poster_cache_now() -> std::io::Result<usize> {
+    prune_poster_cache_if_needed()
 }
 
 /// Same as `download_and_store_resized` but reuses a provided reqwest Client
@@ -315,6 +369,7 @@ pub fn download_and_store_resized_with_client(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
+    let _ = prune_poster_cache_if_needed();
     Ok(dest)
 }
 
