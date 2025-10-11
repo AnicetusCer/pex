@@ -300,6 +300,53 @@ pub fn prune_poster_cache_now() -> std::io::Result<usize> {
     prune_poster_cache_if_needed()
 }
 
+pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
+    let dir = poster_cache_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let metadata = entry.metadata()?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+
+        let should_remove = if let Some(ext) = &ext {
+            if ext == "part" {
+                true
+            } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                metadata.len() == 0
+            } else if ext == "rgba" {
+                metadata.len() <= 8
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        if should_remove {
+            fs::remove_file(&path)?;
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        let _ = prune_poster_cache_if_needed();
+    }
+
+    Ok(removed)
+}
+
 /// Same as `download_and_store_resized` but reuses a provided reqwest Client
 /// for connection pooling (faster parallel downloads).
 pub fn download_and_store_resized_with_client(
