@@ -85,6 +85,12 @@ impl crate::app::PexApp {
 
             ui.separator();
 
+            if ui.button("Advanced…").clicked() {
+                self.show_advanced_popup = true;
+            }
+
+            ui.separator();
+
             // Sort
             let mut changed_sort = false;
             eg::ComboBox::from_id_source("sort_by_combo")
@@ -136,26 +142,6 @@ impl crate::app::PexApp {
                 .changed()
             {
                 self.mark_dirty();
-            }
-
-            ui.separator();
-
-            // Workers
-            ui.label("Workers:");
-            let workers_resp = ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32));
-            if workers_resp.changed() {
-                self.mark_dirty();
-            }
-            workers_resp.on_hover_text(
-                "Parallel downloads. Typical 8–16. New value applies to next prefetch.",
-            );
-            if self.prefetch_started && self.loading_progress < 1.0 {
-                ui.add_space(6.0);
-                ui.label(
-                    eg::RichText::new("(new value applies to next prefetch)")
-                        .italics()
-                        .weak(),
-                );
             }
 
             ui.separator();
@@ -229,14 +215,145 @@ impl crate::app::PexApp {
                         }
                     }
                 });
-
-                ui.separator();
-                if ui.button("Close").clicked() {
-                    // Window will close when `open` is set to false afterward
-                }
             });
 
         // Apply result (avoid E0499 by setting after .show)
         self.show_channel_filter_popup = open;
+    }
+
+    pub(crate) fn ui_render_advanced_popup(&mut self, ctx: &eg::Context) {
+        if !self.show_advanced_popup {
+            return;
+        }
+
+        let mut open = self.show_advanced_popup;
+        let ctx_clone = ctx.clone();
+        eg::Window::new("Advanced controls")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(eg::RichText::new("Prefetch workers").strong());
+                    let workers_resp =
+                        ui.add(eg::Slider::new(&mut self.worker_count_ui, 1..=32).text("Threads"));
+                    if workers_resp.changed() {
+                        self.mark_dirty();
+                    }
+                    workers_resp.on_hover_text(
+                        "Parallel downloads. Typical 8–16. New value applies to next prefetch.",
+                    );
+
+                    ui.separator();
+                    ui.label(eg::RichText::new("Poster cache").strong());
+                    if ui.button("Clear poster cache").clicked() {
+                        match self.clear_poster_cache_files() {
+                            Ok(removed) => {
+                                self.restart_poster_pipeline(&ctx_clone);
+                                self.advanced_feedback = Some(format!(
+                                    "Poster cache cleared (removed {removed} files). Prefetch restarting…"
+                                ));
+                                self.set_status("Poster cache cleared; restarting prefetch…");
+                            }
+                            Err(err) => {
+                                let msg = format!("Poster cache clear failed: {err}");
+                                self.advanced_feedback = Some(msg.clone());
+                                self.set_status(msg);
+                            }
+                        }
+                    }
+                    if ui.button("Restart poster prep").clicked() {
+                        self.restart_poster_pipeline(&ctx_clone);
+                        self.advanced_feedback =
+                            Some("Poster prep restarted without clearing cache.".into());
+                        self.set_status("Poster prep restarting…");
+                    }
+
+                    ui.separator();
+                    ui.label(eg::RichText::new("Owned library cache").strong());
+                    if ui.button("Clear owned cache").clicked() {
+                        match self.clear_owned_cache() {
+                            Ok(removed) => {
+                                self.record_owned_message(format!(
+                                    "Owned cache cleared manually (removed {removed} file{}).",
+                                    if removed == 1 { "" } else { "s" }
+                                ));
+                                self.advanced_feedback = Some(format!(
+                                    "Owned cache cleared (removed {removed} files). Rescanning library…"
+                                ));
+                                self.set_status("Owned cache cleared; rescanning library…");
+                            }
+                            Err(err) => {
+                                let msg = format!("Owned cache clear failed: {err}");
+                                self.advanced_feedback = Some(msg.clone());
+                                self.set_status(msg.clone());
+                                self.record_owned_message(msg);
+                            }
+                        }
+                    }
+                    if ui.button("Restart owned scan").clicked() {
+                        self.restart_owned_scan();
+                        self.advanced_feedback =
+                            Some("Owned scan restarted (existing cache kept).".into());
+                        self.set_status("Owned scan restarting…");
+                    }
+
+                    let owned_running = self.owned_scan_in_progress;
+                    let owned_messages: Vec<String> = self
+                        .owned_scan_messages
+                        .iter()
+                        .take(6)
+                        .cloned()
+                        .collect();
+
+                    ui.add_space(4.0);
+                    if owned_running {
+                        ui.horizontal(|ui| {
+                            ui.add(eg::Spinner::new().size(14.0));
+                            ui.label("Owned scan in progress…");
+                        });
+                    } else {
+                        ui.label(eg::RichText::new("Owned scan idle.").weak());
+                    }
+                    for (idx, msg) in owned_messages.iter().enumerate() {
+                        let text = if idx == 0 {
+                            eg::RichText::new(msg).strong()
+                        } else {
+                            eg::RichText::new(msg).weak()
+                        };
+                        ui.label(text);
+                    }
+
+                    ui.separator();
+                    ui.label(eg::RichText::new("ffprobe cache").strong());
+                    if ui.button("Clear ffprobe cache").clicked() {
+                        match self.clear_ffprobe_cache() {
+                            Ok(removed) => {
+                                if removed {
+                                    self.advanced_feedback =
+                                        Some("ffprobe cache cleared.".into());
+                                } else {
+                                    self.advanced_feedback =
+                                        Some("ffprobe cache already clear.".into());
+                                }
+                                self.set_status("ffprobe cache reset.");
+                            }
+                            Err(err) => {
+                                let msg = format!("ffprobe cache clear failed: {err}");
+                                self.advanced_feedback = Some(msg.clone());
+                                self.set_status(msg);
+                            }
+                        }
+                    }
+
+                    if let Some(msg) = &self.advanced_feedback {
+                        ui.separator();
+                        ui.label(eg::RichText::new(msg).italics());
+                    }
+                });
+            });
+
+        self.show_advanced_popup = open;
     }
 }

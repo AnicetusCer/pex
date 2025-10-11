@@ -7,11 +7,11 @@ Pex is an egui desktop app that inspects a Plex EPG database, prepares poster as
 - **ffprobe** (ships with [FFmpeg](https://ffmpeg.org/download.html)). The owned library scan uses it to read real video dimensions so it can accurately mark HD holdings.
   - Windows: install the static FFmpeg build and add the folder containing `ffprobe.exe` to your `PATH`.
   - macOS: `brew install ffmpeg` (or another package manager of choice).
-  - Linux: install the ffmpeg package from your distro (for example `sudo apt install ffmpeg`).
+  - Linux/WSL: install the ffmpeg package from your distro (for example `sudo apt install ffmpeg` or `sudo dnf install ffmpeg` on Fedora). If the binary isn’t on your `PATH`, set `"ffprobe_cmd"` in `config.json` to the absolute path (e.g. `/usr/bin/ffprobe`).
 
 If `ffprobe` is missing the app falls back to filename heuristics and warns in the status area.
 
-Verify the binary is available by running `ffprobe -version` in a terminal before launching Pex.
+Verify the binary is available by running `ffprobe -version` (or using the configured path) in a terminal before launching Pex.
 
 ## Running
 

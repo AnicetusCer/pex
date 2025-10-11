@@ -1,17 +1,42 @@
 // src/app/util.rs
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
+use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 pub(crate) fn normalize_title(s: &str) -> String {
-    let s = s.to_lowercase();
-    let s = s.replace(['.', '_', '-', ':', '–', '—', '(', ')', '[', ']'], " ");
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut normalized = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\'' | '’' | '‘' | '`' => {
+                // Drop apostrophes entirely so “Schindler's” matches “Schindlers”.
+            }
+            '&' => {
+                normalized.push(' ');
+                normalized.push_str("and");
+                normalized.push(' ');
+            }
+            ch if ch.is_alphanumeric() => {
+                for lower in ch.to_lowercase() {
+                    normalized.push(lower);
+                }
+            }
+            _ => {
+                normalized.push(' ');
+            }
+        }
+    }
+
+    normalized
+        .split_whitespace()
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn find_year_in_str(s: &str) -> Option<i32> {
@@ -250,6 +275,8 @@ struct ProbeCache {
 }
 
 static FFPROBE_CACHE: Lazy<Mutex<ProbeCache>> = Lazy::new(|| Mutex::new(ProbeCache::load()));
+static FFPROBE_CMD: Lazy<RwLock<Option<OsString>>> = Lazy::new(|| RwLock::new(None));
+static FFPROBE_AVAILABLE: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::new(None));
 
 impl ProbeCache {
     fn cache_path() -> std::path::PathBuf {
@@ -307,15 +334,55 @@ fn file_modified_seconds(path: &Path) -> Option<u64> {
     Some(duration.as_secs())
 }
 
+fn ffprobe_cmd() -> OsString {
+    if let Ok(guard) = FFPROBE_CMD.read() {
+        if let Some(cmd) = guard.as_ref() {
+            return cmd.clone();
+        }
+    }
+    let cmd = {
+        let cfg = crate::config::load_config();
+        cfg.ffprobe_cmd
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("ffprobe"))
+    };
+    if let Ok(mut guard) = FFPROBE_CMD.write() {
+        *guard = Some(cmd.clone());
+    }
+    cmd
+}
+
+pub(crate) fn reset_ffprobe_runtime_state() {
+    if let Ok(mut guard) = FFPROBE_CMD.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = FFPROBE_AVAILABLE.lock() {
+        *guard = None;
+    }
+    if let Ok(mut cache) = FFPROBE_CACHE.lock() {
+        *cache = ProbeCache::default();
+    }
+}
+
 pub(crate) fn ffprobe_available() -> bool {
-    static FFPROBE_AVAILABLE: OnceCell<bool> = OnceCell::new();
-    *FFPROBE_AVAILABLE.get_or_init(|| {
-        std::process::Command::new("ffprobe")
+    if let Ok(mut guard) = FFPROBE_AVAILABLE.lock() {
+        if let Some(val) = *guard {
+            return val;
+        }
+        let cmd = ffprobe_cmd();
+        let result = std::process::Command::new(&cmd)
             .arg("-version")
             .output()
             .map(|out| out.status.success())
-            .unwrap_or(false)
-    })
+            .unwrap_or_else(|err| {
+                warn!("Failed to run ffprobe command {:?}: {err}", cmd);
+                false
+            });
+        *guard = Some(result);
+        result
+    } else {
+        false
+    }
 }
 
 fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
@@ -337,7 +404,8 @@ fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
         return None;
     }
 
-    let output = std::process::Command::new("ffprobe")
+    let cmd = ffprobe_cmd();
+    let output = std::process::Command::new(&cmd)
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
@@ -348,6 +416,13 @@ fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
         .arg("csv=p=0:s=x")
         .arg(path.as_os_str())
         .output()
+        .map_err(|err| {
+            warn!(
+                "Failed to run ffprobe command {:?} on {}: {err}",
+                cmd,
+                path.display()
+            );
+        })
         .ok()?;
     if !output.status.success() {
         return None;

@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub plex_db_local: Option<String>,
     pub cache_dir: Option<String>,
     pub plex_db_source: Option<String>,
+    pub ffprobe_cmd: Option<String>,
     pub library_roots: Vec<String>,
     pub hide_owned_by_default: bool,
     pub dim_owned_by_default: bool,
@@ -27,6 +28,7 @@ impl Default for AppConfig {
             plex_db_local: Some("plex_epg.db".into()),
             cache_dir: None,
             plex_db_source: None,
+            ffprobe_cmd: None,
             library_roots: Vec::new(),
             hide_owned_by_default: false,
             dim_owned_by_default: false,
@@ -48,6 +50,7 @@ struct RawConfig {
     cache_dir: Option<String>,
     plex_db_source: Option<String>,
     library_roots: Option<Vec<String>>,
+    ffprobe_cmd: Option<String>,
     hide_owned_by_default: Option<bool>,
     dim_owned_by_default: Option<bool>,
     ui: Option<RawUi>,
@@ -68,6 +71,9 @@ pub fn load_config() -> AppConfig {
                 }
                 if parsed.plex_db_source.is_some() {
                     cfg.plex_db_source = parsed.plex_db_source;
+                }
+                if parsed.ffprobe_cmd.is_some() {
+                    cfg.ffprobe_cmd = parsed.ffprobe_cmd;
                 }
                 if let Some(list) = parsed.library_roots {
                     cfg.library_roots = list;

@@ -246,6 +246,12 @@ impl crate::app::PexApp {
         // Resolve roots from config and launch the scanner thread.
         let cfg = load_config();
         let roots: Vec<PathBuf> = cfg.library_roots.into_iter().map(PathBuf::from).collect();
+        self.owned_scan_in_progress = true;
+        self.record_owned_message(format!(
+            "Owned scan started ({} root{}).",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ));
         Self::spawn_owned_scan(tx, roots);
     }
 
@@ -328,18 +334,35 @@ impl crate::app::PexApp {
                 match rx.try_recv() {
                     Ok(m) => m,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.owned_scan_in_progress = false;
+                        break;
+                    }
                 }
             };
 
             match msg {
-                Info(s) => self.set_status(s),
-                Error(e) => self.set_status(format!("Owned scan error: {e}")),
+                Info(s) => {
+                    self.record_owned_message(s.clone());
+                    self.owned_scan_in_progress = true;
+                    self.set_status(s);
+                }
+                Error(e) => {
+                    let msg = format!("Owned scan error: {e}");
+                    self.record_owned_message(msg.clone());
+                    self.owned_scan_in_progress = false;
+                    self.set_status(msg);
+                }
                 Done(keys) => {
+                    let count = keys.len();
                     self.owned_keys = Some(keys);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
                     self.apply_owned_flags();
                     self.mark_dirty();
+                    self.owned_scan_in_progress = false;
+                    self.record_owned_message(format!(
+                        "Owned scan complete ({count} titles)."
+                    ));
                     self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
