@@ -1,7 +1,9 @@
 // src/app/mod.rs — async DB scan + upfront poster prefetch + resized cache + single splash
 
 // ---- Standard lib imports ----
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -92,6 +94,8 @@ pub struct PexApp {
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
+    owned_scan_in_progress: bool,
+    owned_scan_messages: VecDeque<String>,
 
     // search/filter/sort controls
     search_query: String,
@@ -99,6 +103,8 @@ pub struct PexApp {
     // channel filter
     show_channel_filter_popup: bool,
     selected_channels: std::collections::BTreeSet<String>,
+    show_advanced_popup: bool,
+    advanced_feedback: Option<String>,
 
     // sorting
     sort_key: SortKey,
@@ -160,11 +166,15 @@ impl Default for PexApp {
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
             owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_scan_in_progress: false,
+            owned_scan_messages: VecDeque::new(),
 
             search_query: String::new(),
 
             show_channel_filter_popup: false,
             selected_channels: std::collections::BTreeSet::new(),
+            show_advanced_popup: false,
+            advanced_feedback: None,
 
             sort_key: SortKey::Time,
             sort_desc: false,
@@ -333,6 +343,125 @@ impl PexApp {
         self.ready_count() >= MIN_READY_BEFORE_GRID
             || (self.prefetch_started && self.loading_progress >= 1.0)
     }
+
+    fn record_owned_message<S: Into<String>>(&mut self, msg: S) {
+        const MAX_MESSAGES: usize = 8;
+        self.owned_scan_messages.push_front(msg.into());
+        while self.owned_scan_messages.len() > MAX_MESSAGES {
+            self.owned_scan_messages.pop_back();
+        }
+    }
+
+    fn restart_poster_pipeline(&mut self, ctx: &eg::Context) {
+        self.prep_started = false;
+        self.prep_rx = None;
+        self.prefetch_started = false;
+        self.work_tx = None;
+        self.done_rx = None;
+        self.rows.clear();
+        self.total_targets = 0;
+        self.completed = 0;
+        self.failed = 0;
+        self.loading_progress = 0.0;
+        self.last_item_msg.clear();
+        self.phase = Phase::Prefetching;
+        self.phase_started = Instant::now();
+        self.boot_phase = BootPhase::Starting;
+        self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
+        self.selected_idx = None;
+        self.set_status("Restarting poster prep…");
+        self.start_poster_prep();
+        ctx.request_repaint();
+    }
+
+    fn clear_poster_cache_files(&self) -> Result<usize, String> {
+        let dir = crate::app::cache::cache_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        let entries =
+            fs::read_dir(&dir).map_err(|err| format!("Failed to read {}: {err}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|err| format!("Failed to read entry in {}: {err}", dir.display()))?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|err| format!("Failed to stat {}: {err}", path.display()))?
+                .is_file()
+            {
+                continue;
+            }
+            let remove = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    let ext = ext.to_ascii_lowercase();
+                    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba")
+                })
+                .unwrap_or(false);
+            if !remove {
+                continue;
+            }
+            fs::remove_file(&path)
+                .map_err(|err| format!("Failed to remove {}: {err}", path.display()))?;
+            removed += 1;
+        }
+        let _ = fs::remove_file(dir.join("hotset.txt"));
+        Ok(removed)
+    }
+
+    fn clear_owned_cache_files(&self) -> Result<usize, String> {
+        let dir = crate::app::cache::cache_dir();
+        let mut removed = 0usize;
+        for name in ["owned_all.txt", "owned_hd.txt", "owned_manifest.json"] {
+            let path = dir.join(name);
+            match fs::remove_file(&path) {
+                Ok(_) => removed += 1,
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(format!("Failed to remove {}: {err}", path.display()));
+                }
+            }
+        }
+        let _ = fs::remove_file(dir.join("owned_manifest.json.tmp"));
+        Ok(removed)
+    }
+
+    fn clear_ffprobe_cache_file(&self) -> Result<bool, String> {
+        let path = crate::app::cache::cache_dir().join("ffprobe_cache.json");
+        match fs::remove_file(&path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(format!("Failed to remove {}: {err}", path.display())),
+        }
+    }
+
+    fn clear_owned_cache(&mut self) -> Result<usize, String> {
+        let removed = self.clear_owned_cache_files()?;
+        self.restart_owned_scan();
+        Ok(removed)
+    }
+
+    fn clear_ffprobe_cache(&mut self) -> Result<bool, String> {
+        let removed = self.clear_ffprobe_cache_file()?;
+        crate::app::utils::reset_ffprobe_runtime_state();
+        Ok(removed)
+    }
+
+    fn restart_owned_scan(&mut self) {
+        self.owned_rx = None;
+        self.owned_keys = None;
+        self.owned_hd_keys = None;
+        for row in &mut self.rows {
+            row.owned = false;
+        }
+        self.mark_dirty();
+        self.owned_scan_in_progress = false;
+        self.record_owned_message("Restarting owned scan…");
+        self.start_owned_scan();
+    }
 }
 
 impl eframe::App for PexApp {
@@ -401,6 +530,7 @@ impl eframe::App for PexApp {
 
             // Channel filter popup (separate window)
             self.ui_render_channel_filter_popup(ctx);
+            self.ui_render_advanced_popup(ctx);
 
             // Decide whether to show the early splash (before enough textures ready)
             let show_splash = !self.should_show_grid();

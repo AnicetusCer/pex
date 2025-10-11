@@ -3,21 +3,18 @@ use eframe::egui as eg;
 
 impl crate::app::PexApp {
     pub(crate) fn ui_render_detail_panel(&mut self, ctx: &eg::Context) {
-        // Read screen width and snap panel width to poster "column steps"
+        // Use poster/card sizing to keep the panel width within a sane range
         let screen_w: f32 = ctx.input(|i| i.screen_rect().width());
         let step: f32 = (self.poster_width_ui + crate::app::ui::grid::H_SPACING).max(1.0); // poster + gutter
         let max_w: f32 = (screen_w * 0.45).clamp(360.0, 520.0);
-        let snapped_max: f32 = ((max_w / step).floor() * step).max(260.0);
-
-        // Start from the last saved width, but snap it into a valid step and clamp to min..max
-        let snapped_default: f32 =
-            ((self.detail_panel_width / step).round() * step).clamp(260.0, snapped_max);
+        let min_w: f32 = 260.0;
+        let default_width = self.detail_panel_width.clamp(min_w, max_w);
 
         let panel = eg::SidePanel::right("detail_panel")
             .resizable(true)
-            .default_width(snapped_default)
-            .min_width(260.0)
-            .max_width(snapped_max)
+            .default_width(default_width)
+            .min_width(min_w)
+            .max_width(max_w)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -153,11 +150,10 @@ impl crate::app::PexApp {
                 ui.label("IMDb review integration (planned).");
             });
 
-        // Persist the (snapped) width so it sticks between runs
-        let actual_w = panel.response.rect.width();
-        let snapped_new = ((actual_w / step).round() * step).clamp(260.0, snapped_max);
-        if (snapped_new - self.detail_panel_width).abs() > 0.5 {
-            self.detail_panel_width = snapped_new;
+        // Persist the width so it sticks between runs
+        let actual_w = panel.response.rect.width().clamp(min_w, max_w);
+        if (actual_w - self.detail_panel_width).abs() > (step * 0.05).max(0.5) {
+            self.detail_panel_width = actual_w;
             self.mark_dirty(); // let your prefs autosave pick this up
         }
     }

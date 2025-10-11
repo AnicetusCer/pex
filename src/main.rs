@@ -1,4 +1,5 @@
 // src/main.rs
+use eframe::egui::{Vec2, ViewportBuilder};
 use std::env;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -31,9 +32,14 @@ fn main() -> eframe::Result<()> {
         info!("WINIT_UNIX_BACKEND={:?}", env::var_os("WINIT_UNIX_BACKEND"));
     }
 
+    let viewport = ViewportBuilder::default()
+        .with_inner_size(Vec2::new(1600.0, 900.0))
+        .with_maximized(true);
+
     let options = eframe::NativeOptions {
         renderer: pick_renderer(),
         multisampling: 0,
+        viewport,
         ..Default::default()
     };
 
