@@ -3,6 +3,8 @@ use std::io::{Read, Write};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io};
+use tracing::{info, warn};
+
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -181,9 +183,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         };
 
         if DIAG_FAKE_STARTUP {
-            send(PrepMsg::Info(
-                "DIAG: synthesizing small poster list…".into(),
-            ));
+            send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
             let fake: Vec<PrepItem> = vec![
                 (
                     "Blade Runner".into(),
@@ -227,6 +227,11 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             }
         };
 
+        // Tell both the UI and the terminal which DB we’re using
+        let msg = format!("EPG DB: {}", db_path);
+        send(PrepMsg::Info(msg.clone()));
+        info!("prep: {}", msg);
+
         // Optional daily copy from source to local
         if let Some(src_path) = cfg.plex_db_source.as_deref() {
             match needs_db_update_daily(src_path, &db_path) {
@@ -236,24 +241,23 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     let _ = copy_with_progress(src_path, &db_path, |_c, _t, _p, _mbps| {});
                     let _ = touch_last_sync(&marker);
                 }
-                Ok(false) => send(PrepMsg::Info(
-                    "Local EPG DB fresh — skipping update.".into(),
-                )),
-                Err(e) => send(PrepMsg::Info(format!(
-                    "Freshness check failed (continuing): {e}"
-                ))),
+                Ok(false) => send(PrepMsg::Info("Local EPG DB fresh — skipping update.".into())),
+                Err(e) => send(PrepMsg::Info(format!("Freshness check failed (continuing): {e}"))),
             }
         } else {
             send(PrepMsg::Info("Using existing local EPG DB.".into()));
         }
 
         // Open DB read-only
-        let conn = match Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) {
+        let flags_common =
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+
+        #[cfg(not(windows))]
+        let flags = flags_common | OpenFlags::SQLITE_OPEN_URI;
+        #[cfg(windows)]
+        let flags = flags_common;
+
+        let conn = match Connection::open_with_flags(&db_path, flags) {
             Ok(c) => c,
             Err(e) => {
                 send(PrepMsg::Error(format!("open db failed: {e}")));
@@ -263,12 +267,38 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         let _ = conn.busy_timeout(Duration::from_secs(10));
         let _ = conn.pragma_update(None, "temp_store", "MEMORY");
 
-        if !(table_exists(&conn, "metadata_items") && table_exists(&conn, "media_items")) {
-            send(PrepMsg::Error(
-                "required tables missing (metadata_items, media_items)".into(),
-            ));
+
+        let have_meta = table_exists(&conn, "metadata_items");
+        let have_media = table_exists(&conn, "media_items");
+        info!("prep: table check metadata_items={have_meta}, media_items={have_media}");
+        send(PrepMsg::Info(format!(
+            "Tables present → metadata_items: {have_meta}, media_items: {have_media}"
+        )));
+        if !(have_meta && have_media) {
+            send(PrepMsg::Error("required tables missing (metadata_items, media_items)".into()));
             return;
         }
+
+        // Quick counts to see if our WHERE will match anything
+        let cnt_total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM metadata_items WHERE metadata_type=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let cnt_with_thumb: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM metadata_items \
+                 WHERE metadata_type=1 AND (COALESCE(user_thumb_url,'')<>'' OR COALESCE(thumb_url,'')<>'')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        info!("prep: movies total={cnt_total}, with_thumb={cnt_with_thumb}");
+        send(PrepMsg::Info(format!(
+            "Movies in DB: total {cnt_total}, with thumbs {cnt_with_thumb}"
+        )));
 
         // SQL with fallback (includes mi.extra_data for channel extraction)
         let mut st = match conn.prepare(SQL_POSTERS_USER_THUMB) {
@@ -278,9 +308,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     match conn.prepare(SQL_POSTERS_THUMB) {
                         Ok(s) => s,
                         Err(e2) => {
-                            send(PrepMsg::Error(format!(
-                                "prepare failed: {e1} / fallback: {e2}"
-                            )));
+                            send(PrepMsg::Error(format!("prepare failed: {e1} / fallback: {e2}")));
                             return;
                         }
                     }
@@ -293,7 +321,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         // Harvest list — NO network here
         send(PrepMsg::Info("Scanning EPG…".into()));
-        let mut q = match st.query([i64::MAX]) {
+        let mut q = match st.query([1_000_000_i64]) {
             Ok(r) => r,
             Err(e) => {
                 send(PrepMsg::Error(format!("query failed: {e}")));
@@ -329,6 +357,12 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         // Dedupe by title (stable)
         let mut seen = std::collections::HashSet::new();
         list.retain(|(t, ..)| seen.insert(t.to_ascii_lowercase()));
+
+        info!("prep: final poster rows after dedupe = {}", list.len());
+        if list.is_empty() {
+            warn!("prep: no posters found — likely DB path/columns mismatch");
+            send(PrepMsg::Info("No posters found — check DB path/type in config.json".into()));
+        }
 
         send(PrepMsg::Done(list));
     });
