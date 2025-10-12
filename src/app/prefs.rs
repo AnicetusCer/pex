@@ -2,6 +2,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use std::{fs, io};
+use tracing::warn;
 
 impl crate::app::PexApp {
     // ---- tiny flags ----
@@ -13,9 +14,15 @@ impl crate::app::PexApp {
     pub(crate) fn maybe_save_prefs(&mut self) {
         // debounce a bit to avoid writing every frame
         if self.prefs_dirty && self.prefs_last_write.elapsed() >= Duration::from_millis(300) {
-            self.save_prefs();
-            self.prefs_dirty = false;
-            self.prefs_last_write = Instant::now();
+            match self.save_prefs() {
+                Ok(()) => {
+                    self.prefs_dirty = false;
+                    self.prefs_last_write = Instant::now();
+                }
+                Err(err) => {
+                    warn!("Failed to save UI preferences: {err}");
+                }
+            }
         }
     }
 
@@ -92,9 +99,9 @@ impl crate::app::PexApp {
         }
     }
 
-    pub(crate) fn save_prefs(&self) {
+    pub(crate) fn save_prefs(&self) -> io::Result<()> {
         let path = prefs_path();
-        let _ = fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
+        fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")))?;
 
         let channels_csv = if self.selected_channels.is_empty() {
             String::new()
@@ -146,7 +153,8 @@ impl crate::app::PexApp {
             if self.filter_hd_only { "1" } else { "0" },
         );
 
-        let _ = fs::write(path, txt);
+        fs::write(path, txt)?;
+        Ok(())
     }
 
     /// record up to N posters that already have textures this run

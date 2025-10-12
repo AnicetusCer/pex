@@ -95,6 +95,16 @@ impl DayRange {
             _ => None,
         }
     }
+
+    pub fn max_bucket(self, now_bucket: i64) -> Option<i64> {
+        match self {
+            Self::Two => Some(now_bucket + 2),
+            Self::Four => Some(now_bucket + 4),
+            Self::Five => Some(now_bucket + 5),
+            Self::Seven => Some(now_bucket + 7),
+            Self::Fourteen => Some(now_bucket + 14),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -146,6 +156,8 @@ pub struct PosterRow {
     pub state: PosterState,
     pub owned: bool,
     pub owned_modified: Option<u64>,
+    pub owned_key: String,
+    pub broadcast_hd: bool,
 }
 
 #[derive(Clone, Debug)]

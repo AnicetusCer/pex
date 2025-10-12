@@ -64,9 +64,8 @@ impl crate::app::PexApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = eg::vec2(H_SPACING, V_SPACING);
 
-                        let mut col = 0usize;
-                        for idx in idxs {
-                            if col > 0 && col % cols == 0 {
+                        for (col, &idx) in idxs.iter().enumerate() {
+                            if col > 0 && col.is_multiple_of(cols) {
                                 ui.end_row();
                             }
 
@@ -119,20 +118,8 @@ impl crate::app::PexApp {
                                         }
 
                                         // --- Compute statuses (needed for badges & dimming) ---
-                                        let tags_joined = if !row.genres.is_empty() {
-                                            Some(row.genres.join("|"))
-                                        } else {
-                                            None
-                                        };
-                                        let broadcast_hd = crate::app::utils::infer_broadcast_hd(
-                                            tags_joined.as_deref(),
-                                            row.channel.as_deref(),
-                                        );
-                                        let owned_key = Self::make_owned_key(&row.title, row.year);
-                                        let owned_is_hd = self
-                                            .owned_hd_keys
-                                            .as_ref()
-                                            .map_or(false, |set| set.contains(&owned_key));
+                                        let broadcast_hd = Self::row_broadcast_hd(row);
+                                        let owned_is_hd = self.row_owned_is_hd(row);
                                         let better_hd_available =
                                             row.owned && !owned_is_hd && broadcast_hd;
 
@@ -204,7 +191,6 @@ impl crate::app::PexApp {
                                 },
                             );
 
-                            col += 1;
                         }
 
                         ui.end_row();

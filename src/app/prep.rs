@@ -519,6 +519,14 @@ impl crate::app::PexApp {
                                     .as_deref()
                                     .map(crate::app::utils::parse_genres)
                                     .unwrap_or_default();
+                                let tags_joined =
+                                    (!genres.is_empty()).then(|| genres.join("|"));
+                                let broadcast_hd = crate::app::utils::infer_broadcast_hd(
+                                    tags_joined.as_deref(),
+                                    channel_display.as_deref(),
+                                );
+                                let owned_key =
+                                    crate::app::PexApp::make_owned_key(&item.title, item.year);
                                 let summary = item.summary.and_then(|s| {
                                     let trimmed = s.trim();
                                     if trimmed.is_empty() {
@@ -546,9 +554,11 @@ impl crate::app::PexApp {
                                     path,
                                     tex: None,
                                     state,
-                            owned: false, // filled in by apply_owned_flags()
-                            owned_modified: None,
-                        }
+                                    owned: false, // filled in by apply_owned_flags()
+                                    owned_modified: None,
+                                    owned_key,
+                                    broadcast_hd,
+                                }
                     })
                     .collect();
 

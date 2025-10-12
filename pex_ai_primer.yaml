@@ -15,8 +15,17 @@ human:
 
 project:
   purpose: >
-    Desktop viewer for the Plex EPG database. Pex renders a fast poster grid, highlights titles you already own,
-    shows channel badges/icons and detailed metadata, and supports on-demand rating lookups.
+    Desktop viewer and triage tool for the Plex EPG SQLite database. Pex boots quickly into an egui desktop UI,
+    streams programme rows into a poster-first grid, highlights owned titles (with HD-upgrade hints),
+    pulls channel badges/icons, and exposes a detail pane with synopsis, airing schedule, and on-demand IMDb ratings.
+    Posters are cached & resized locally, owned status is derived from library scans, and the UX stays snappy through
+    aggressive background prep/prefetch stages.
+  feature_highlights:
+    - "Splash -> poster prep -> grid transition designed to keep first paint under ~1s on warm cache."
+    - "Multi-stage caching: poster resize/store, channel icon prefetch, owned manifest with HD sidecar."
+    - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
+    - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
+    - "Advanced menu: clear/prune caches, refresh owned scan, manage ffprobe cache, backup/restore UI prefs."
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)
@@ -43,6 +52,12 @@ project:
     epg_explorer_tool/
       db_explorer.rs   # CLI to inspect DB tables
     Cargo.toml
+  tips_for_new_work:
+    - "Start from `src/app/mod.rs` to understand app state transitions; it wires prep, owned, filters, and UI."
+    - "`PosterRow` carries precomputed `owned_key` + `broadcast_hd`; prefer using those instead of recomputing."
+    - "Any new UI lives under `src/app/ui/`; keep expensive work off the paint path and return early when splash is active."
+    - "Reuse helpers in `utils.rs` for date/ordinal logic and channel normalization."
+    - "When touching caching logic, review `cache.rs` + `prefs.rs` to keep sidecars/prefs consistent."
   platforms:
     windows:
       notes:
@@ -158,6 +173,19 @@ config:
   env_flags:
     - PEX_DISABLE_PREFETCH=1
     - RUST_LOG=info
+database:
+  files:
+    - plex_epg.db: "Primary SQLite the app reads (metadata_items, media_items, assets, etc.)"
+    - plex_epg.db-shm / -wal: "SQLite WAL files; safe to leave in place during read-only access"
+    - owned_manifest.json: "Cached snapshot of library_roots → owned titles"
+  schema_entry_points:
+    - "app::prep::SQL_POSTERS_USER_THUMB (metadata_items + media_items join) for poster rows"
+    - "app::prep::parse_channel_meta(extra_data) extracts `at:channelCallSign/title/thumb` from JSON-ish blob"
+    - "`epg_explorer_tool/db_explorer.rs` has helper queries for debugging tables/columns"
+  exploration:
+    - "Iterate quickly with `cargo run --bin db_explorer -- <path-to-plex_epg.db> --help`."
+    - "Inside the GUI, set `RUST_LOG=info` to surface prep/owned messages while validating data pulls."
+    - "For ad-hoc SQL, use `sqlite3 plex_epg.db '.schema metadata_items'` (database is read-only from Pex)."
 
 cache_keys:
   - base_key: "md5(url)"
