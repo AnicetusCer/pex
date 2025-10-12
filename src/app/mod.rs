@@ -371,14 +371,26 @@ impl PexApp {
             .as_ref()
             .map(|s| s.trim())
         {
-            Some("") => self.setup_errors.push(
-                "config.json: plex_db_local is empty; set it to your Plex EPG database file."
+            Some("") | Some("REPLACE_ME_WITH_PATH/plex_epg.db") => self.setup_errors.push(
+                "config.json: plex_db_local still uses the REPLACE_ME placeholder; set it to your Plex EPG database file."
                     .into(),
             ),
             Some(path) => {
+                if path.contains("REPLACE_ME") {
+                    self.setup_errors.push(
+                        "config.json: plex_db_local still contains a REPLACE_ME placeholder."
+                            .into(),
+                    );
+                }
                 if !Path::new(path).exists() {
-                    self.setup_errors
-                        .push(format!("config.json: plex_db_local not found: {path}"));
+                    if cfg.plex_db_source.as_deref().map_or(false, |s| !s.trim().is_empty()) {
+                        self.setup_warnings.push(format!(
+                            "config.json: plex_db_local not found ({path}); will copy from plex_db_source on startup."
+                        ));
+                    } else {
+                        self.setup_errors
+                            .push(format!("config.json: plex_db_local not found: {path}"));
+                    }
                 }
             }
             None => self
@@ -393,6 +405,13 @@ impl PexApp {
                     .into());
         } else {
             for root in &cfg.library_roots {
+                if root.contains("REPLACE_ME") {
+                    self.setup_errors.push(
+                        "config.json: library_roots contains a REPLACE_ME placeholder; replace it with your library path."
+                            .into(),
+                    );
+                    continue;
+                }
                 if !Path::new(root).exists() {
                     self.setup_warnings
                         .push(format!("config.json: library root not found: {root}"));
@@ -415,6 +434,14 @@ impl PexApp {
         if omdb_missing {
             self.setup_warnings
                 .push("omdb_api_key not set; using the public demo key (rate limited).".into());
+        } else if cfg
+            .omdb_api_key
+            .as_ref()
+            .is_some_and(|k| k.contains("REPLACE_ME"))
+        {
+            self.setup_warnings
+                .push("omdb_api_key still uses the REPLACE_ME placeholder; add your own key for reliable ratings."
+                    .into());
         }
 
         if !self.setup_errors.is_empty() {

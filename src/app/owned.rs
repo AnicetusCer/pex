@@ -140,22 +140,7 @@ fn reuse_directory(
 ) {
     if let Some(snapshot) = manifest.get(dir) {
         for file in &snapshot.files {
-            owned.insert(file.key.clone());
-            if file.hd {
-                hd_keys.insert(file.key.clone());
-            }
-            owned_dates.insert(file.key.clone(), file.modified);
-
-            if let Some(title) = &file.title_hint {
-                let alt_key = crate::app::PexApp::make_owned_key(title, None);
-                if alt_key != file.key {
-                    owned.insert(alt_key.clone());
-                    if file.hd {
-                        hd_keys.insert(alt_key.clone());
-                    }
-                    owned_dates.insert(alt_key, file.modified);
-                }
-            }
+            accumulate_owned_entry(file, owned, hd_keys, owned_dates);
         }
         new_manifest.insert_snapshot(dir.to_owned(), snapshot.clone());
         for sub in &snapshot.subdirs {
@@ -246,34 +231,16 @@ fn scan_directory(
         let year = extract_year_from_filename(stem);
         let title = clean_owned_title(stem, year);
         let key = crate::app::PexApp::make_owned_key(&title, year);
-
-        let alt_key = crate::app::PexApp::make_owned_key(&title, None);
-
-        owned.insert(key.clone());
-        if alt_key != key {
-            owned.insert(alt_key.clone());
-        }
-
         let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
-        if hd {
-            hd_keys.insert(key.clone());
-            if alt_key != key {
-                hd_keys.insert(alt_key.clone());
-            }
-        }
-
-        owned_dates.insert(key.clone(), file_mtime);
-        if alt_key != key {
-            owned_dates.insert(alt_key.clone(), file_mtime);
-        }
-
-        snapshot.files.push(FileSnapshot {
+        let file_entry = FileSnapshot {
             key,
             hd,
             modified: file_mtime,
             title_hint: Some(title.clone()),
             path: path.to_string_lossy().into_owned(),
-        });
+        };
+        accumulate_owned_entry(&file_entry, owned, hd_keys, owned_dates);
+        snapshot.files.push(file_entry);
     }
 
     new_manifest.insert_snapshot(dir_str, snapshot);
