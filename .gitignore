@@ -1,8 +1,8 @@
 /target
 .pex_cache
-config.json
+/config.json
 plex_epg.db
 Cargo.lock
 *.Zone.Identifier
-release/dist/
-release/*.zip
+make_portable/dist/
+make_portable/*.zip
