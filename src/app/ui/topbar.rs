@@ -482,9 +482,11 @@ impl crate::app::PexApp {
                         match self.refresh_ffprobe_cache() {
                             Ok(removed) => {
                                 self.advanced_feedback = Some(format!(
-                                    "ffprobe cache refresh removed {removed} stale entry(s)."
+                                    "ffprobe cache refresh removed {removed} stale entry(s). Rebuilding HD flags in the background..."
                                 ));
-                                self.set_status("ffprobe cache refreshed.");
+                                self.set_status(
+                                    "Stage 3/4 - Refreshing HD flags (ffprobe cache refresh).",
+                                );
                             }
                             Err(err) => {
                                 self.advanced_feedback = Some(format!(
@@ -499,12 +501,14 @@ impl crate::app::PexApp {
                             Ok(removed) => {
                                 if removed {
                                     self.advanced_feedback =
-                                        Some("ffprobe cache cleared.".into());
+                                        Some("ffprobe cache cleared. Rebuilding HD flags in the background...".into());
                                 } else {
                                     self.advanced_feedback =
-                                        Some("ffprobe cache already clear.".into());
+                                        Some("ffprobe cache already clear. Re-running HD flag refresh...".into());
                                 }
-                                self.set_status("ffprobe cache reset.");
+                                self.set_status(
+                                    "Stage 3/4 - Refreshing HD flags after clearing ffprobe cache.",
+                                );
                             }
                             Err(err) => {
                                 let msg = format!("ffprobe cache clear failed: {err}");

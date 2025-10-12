@@ -47,7 +47,8 @@ const STATUS_EMIT_EVERY_MS: u64 = 120;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
-pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str = "Owned scan complete.";
+pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str =
+    "Stage 3/4 - Owned scan complete (Owned and HD badges ready). Finishing artwork cache...";
 
 pub struct PexApp {
     // data
@@ -119,6 +120,7 @@ pub struct PexApp {
     setup_checked: bool,
     setup_errors: Vec<String>,
     setup_warnings: Vec<String>,
+    stage4_complete_message: Option<String>,
     channel_icon_textures: HashMap<String, eg::TextureHandle>,
     channel_icon_pending: HashSet<String>,
 
@@ -201,6 +203,7 @@ impl Default for PexApp {
             setup_checked: false,
             setup_errors: Vec::new(),
             setup_warnings: Vec::new(),
+            stage4_complete_message: None,
             channel_icon_textures: HashMap::new(),
             channel_icon_pending: HashSet::new(),
 
@@ -351,6 +354,9 @@ impl PexApp {
         self.setup_checked = true;
         self.setup_errors.clear();
         self.setup_warnings.clear();
+        self.set_status(
+            "Stage 1/4 – Checking config & cache (validates Plex paths and tools).",
+        );
 
         let cfg_path = Path::new("config.json");
         if !cfg_path.exists() {
@@ -596,6 +602,7 @@ impl PexApp {
         self.failed = 0;
         self.loading_progress = 0.0;
         self.last_item_msg.clear();
+        self.stage4_complete_message = None;
         self.phase = Phase::Prefetching;
         self.phase_started = Instant::now();
         self.boot_phase = BootPhase::Starting;
@@ -726,11 +733,15 @@ impl PexApp {
     fn clear_ffprobe_cache(&mut self) -> Result<bool, String> {
         let removed = self.clear_ffprobe_cache_file()?;
         crate::app::utils::reset_ffprobe_runtime_state();
+        self.stage4_complete_message = None;
+        self.start_owned_hd_refresh()?;
         Ok(removed)
     }
 
     fn refresh_ffprobe_cache(&mut self) -> Result<usize, String> {
-        crate::app::utils::refresh_ffprobe_cache().map_err(|e| e.to_string())
+        let removed = crate::app::utils::refresh_ffprobe_cache().map_err(|e| e.to_string())?;
+        self.start_owned_hd_refresh()?;
+        Ok(removed)
     }
 
     fn refresh_poster_cache_light(&mut self) -> Result<usize, String> {
@@ -874,16 +885,16 @@ impl eframe::App for PexApp {
             self.prefs_dirty = false;
             self.did_init = true;
             self.loading_message = if self.setup_warnings.is_empty() {
-                "Starting.".into()
+                "Stage 1/4 - Setup complete. Loading saved preferences.".into()
             } else {
-                "Starting (warnings detected; see Advanced menu).".into()
+                "Stage 1/4 - Setup complete with warnings (see Advanced menu).".into()
             };
             self.heartbeat_last = Instant::now();
             self.heartbeat_dots = 0;
 
-            // Kick off owned scan (non-blocking) + DB warm-up
-            self.start_owned_scan();
+            // Kick off poster prep first (Stage 2), then owned scan (Stage 3)
             self.start_poster_prep();
+            self.start_owned_scan();
         }
 
         // Drive warm-up progress
@@ -914,7 +925,13 @@ impl eframe::App for PexApp {
             && !matches!(self.phase, types::Phase::Ready)
         {
             self.set_phase(types::Phase::Ready);
-            self.set_status("All posters processed.");
+            let message = self.stage4_complete_message.clone().unwrap_or_else(|| {
+                "Stage 4/4 - Artwork cache ready (all posters processed).".into()
+            });
+            self.stage4_complete_message = Some(message.clone());
+            if !self.owned_scan_in_progress {
+                self.set_status(message);
+            }
         }
 
         // Soft heartbeat ticker for subtle activity (optional)
@@ -997,4 +1014,6 @@ impl eframe::App for PexApp {
         }
     }
 }
+
+
 

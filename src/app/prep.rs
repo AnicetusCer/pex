@@ -260,25 +260,28 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             }
         };
 
-        // Tell both the UI and the terminal which DB we’re using
-        let msg = format!("EPG DB: {}", db_path);
+        // Tell both the UI and the terminal which DB we're using
+        let msg = format!(
+            "Stage 2/4 – Opening Plex EPG database\n{}",
+            db_path
+        );
         send(PrepMsg::Info(msg.clone()));
-        info!("prep: {}", msg);
+        info!("prep: {msg}");
 
         // Optional daily copy from source to local
         if let Some(src_path) = cfg.plex_db_source.as_deref() {
             match needs_db_update_daily(src_path, &db_path) {
                 Ok(true) => {
-                    send(PrepMsg::Info("Updating local EPG DB…".into()));
+                    send(PrepMsg::Info("Stage 2/4 – Copying Plex DB from source (enables offline start-ups). First run may take a while.".into()));
                     let marker = last_sync_marker_path(&db_path);
                     let _ = copy_with_progress(src_path, &db_path, |_c, _t, _p, _mbps| {});
                     let _ = touch_last_sync(&marker);
                 }
-                Ok(false) => send(PrepMsg::Info("Local EPG DB fresh — skipping update.".into())),
-                Err(e) => send(PrepMsg::Info(format!("Freshness check failed (continuing): {e}"))),
+                Ok(false) => send(PrepMsg::Info("Stage 2/4 – Local Plex DB already fresh; skipping copy.".into())),
+                Err(e) => send(PrepMsg::Info(format!("Stage 2/4 – Freshness check failed (continuing anyway): {e}"))),
             }
         } else {
-            send(PrepMsg::Info("Using existing local EPG DB.".into()));
+            send(PrepMsg::Info("Stage 2/4 – Using existing local EPG DB (no source copy configured).".into()));
         }
 
         // Open DB read-only
@@ -353,7 +356,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         };
 
         // Harvest list — NO network here
-        send(PrepMsg::Info("Scanning EPG…".into()));
+        send(PrepMsg::Info("Stage 2/4 - Parsing Plex guide data (collecting posters and metadata for the grid).".into()));
         let mut q = match st.query([1_000_000_i64]) {
             Ok(r) => r,
             Err(e) => {
@@ -410,7 +413,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                         critic_rating,
                     });
                     if last_emit.elapsed() >= Duration::from_millis(600) {
-                        send(PrepMsg::Info(format!("Found {} posters…", list.len())));
+                        send(PrepMsg::Info(format!("Stage 2/4 - Parsing Plex guide data ({} posters discovered so far; powers the main grid).", list.len())));
                         last_emit = Instant::now();
                     }
                 }
@@ -439,7 +442,7 @@ impl crate::app::PexApp {
         }
         self.prep_started = true;
         self.boot_phase = super::BootPhase::CheckingNew;
-        self.set_status("Checking for new posters…");
+        self.set_status("Stage 2/4 - Preparing Plex guide data (scans the EPG so the grid knows what's airing).");
         self.last_item_msg.clear();
 
         let (tx, rx) = std::sync::mpsc::channel::<crate::app::PrepMsg>();
@@ -642,3 +645,13 @@ impl crate::app::PexApp {
         }
     }
 }
+
+
+
+
+
+
+
+
+
+

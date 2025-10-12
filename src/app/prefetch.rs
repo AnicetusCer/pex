@@ -17,11 +17,19 @@ impl crate::app::PexApp {
         let prefetch_disabled = std::env::var_os("PEX_DISABLE_PREFETCH").is_some();
 
         if prefetch_disabled || self.rows.is_empty() {
-            self.set_status(if prefetch_disabled {
-                format!("Prefetch disabled (PEX_DISABLE_PREFETCH set). Showing {} items.", self.rows.len())
+            let message = if prefetch_disabled {
+                format!(
+                    "Stage 4/4 - Prefetch disabled via PEX_DISABLE_PREFETCH (posters will load on demand). {} items queued.",
+                    self.rows.len()
+                )
             } else {
-                "No posters to prefetch.".into()
-            });
+                "Stage 4/4 - No posters to prefetch (empty dataset).".into()
+            };
+            self.stage4_complete_message = Some(message.clone());
+            if !self.owned_scan_in_progress {
+                self.set_status(message.clone());
+            }
+            self.last_item_msg = message;
             self.total_targets = 0;
             self.completed = 0;
             self.failed = 0;
@@ -38,9 +46,16 @@ impl crate::app::PexApp {
         self.failed = 0;
         self.total_targets = self.rows.len();
         self.loading_progress = if self.total_targets == 0 { 1.0 } else { 0.0 };
-        self.last_item_msg.clear();
+        self.last_item_msg = if self.total_targets > 0 {
+            format!(
+                "Artwork cache progress: 0/{} cached (0 failed).",
+                self.total_targets
+            )
+        } else {
+            String::new()
+        };
         self.set_phase(super::Phase::Prefetching);
-        self.set_status(format!("Prefetching {} posters…", self.total_targets));
+        self.stage4_complete_message = None;
 
         let (work_tx, work_rx) = mpsc::channel::<super::WorkItem>();
         let (done_tx, done_rx) = mpsc::channel::<crate::app::PrefetchDone>();
@@ -185,6 +200,23 @@ impl crate::app::PexApp {
         if self.total_targets > 0 {
             self.loading_progress =
                 ((self.completed + self.failed) as f32 / self.total_targets as f32).clamp(0.0, 1.0);
+
+            self.last_item_msg = format!(
+                "Artwork cache progress: {}/{} cached ({} failed).",
+                self.completed, self.total_targets, self.failed
+            );
+
+            if (self.completed + self.failed) >= self.total_targets {
+                let message = format!(
+                    "Stage 4/4 - Artwork cache ready ({} posters cached, {} failed).",
+                    self.completed, self.failed
+                );
+                self.stage4_complete_message = Some(message.clone());
+                if !self.owned_scan_in_progress {
+                    self.set_status(message.clone());
+                }
+                self.last_item_msg = message;
+            }
         } else {
             self.loading_progress = 1.0;
         }
@@ -194,3 +226,6 @@ impl crate::app::PexApp {
         }
     }
 }
+
+
+
