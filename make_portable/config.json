@@ -1,0 +1,20 @@
+{
+  "plex_db_local": "plex_epg.db",
+  "plex_db_source": "/mnt/plexms/AppData/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud-772bbb8c-1739-45e4-b2a1-ab7563685c7d.db",
+  "cache_dir": ".pex_cache",
+  "library_roots": [
+    "/mnt/plex/Movies/Family",
+    "/mnt/plex/Movies/Miles",
+    "/mnt/plex/Movies/Vicky"
+  ],
+  "ffprobe_cmd": null,
+  "omdb_api_key": "4a3b711b",
+  "poster_cache_max_files": 3000,
+  "hide_owned_by_default": false,
+  "dim_owned_by_default": false,
+  "ui": {
+    "hide_owned": null,
+    "dim_owned": null,
+    "schedule_window": null
+  }
+}
