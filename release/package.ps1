@@ -1,5 +1,5 @@
 param (
-    [string]$BinaryPath = "target\release\pex.exe",
+    [string]$BinaryPath = "..\target\release\pex.exe",
     [string]$OutputDir = "dist",
     [switch]$Zip
 )
