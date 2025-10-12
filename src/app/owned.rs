@@ -29,6 +29,8 @@ struct FileSnapshot {
     key: String,
     hd: bool,
     modified: Option<u64>,
+    #[serde(default)]
+    title_hint: Option<String>,
 }
 
 impl OwnedManifest {
@@ -99,6 +101,17 @@ fn reuse_directory(
                 hd_keys.insert(file.key.clone());
             }
             owned_dates.insert(file.key.clone(), file.modified);
+
+            if let Some(title) = &file.title_hint {
+                let alt_key = crate::app::PexApp::make_owned_key(title, None);
+                if alt_key != file.key {
+                    owned.insert(alt_key.clone());
+                    if file.hd {
+                        hd_keys.insert(alt_key.clone());
+                    }
+                    owned_dates.insert(alt_key, file.modified);
+                }
+            }
         }
         new_manifest.insert_snapshot(dir.to_owned(), snapshot.clone());
         for sub in &snapshot.subdirs {
@@ -186,22 +199,35 @@ fn scan_directory(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        let year = crate::app::utils::find_year_in_str(stem);
-        let title = year
-            .map(|y| stem.replace(&y.to_string(), " "))
-            .unwrap_or_else(|| stem.to_string());
+        let year = extract_year_from_filename(stem);
+        let title = clean_owned_title(stem, year);
         let key = crate::app::PexApp::make_owned_key(&title, year);
 
+        let alt_key = crate::app::PexApp::make_owned_key(&title, None);
+
         owned.insert(key.clone());
+        if alt_key != key {
+            owned.insert(alt_key.clone());
+        }
+
         let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
         if hd {
             hd_keys.insert(key.clone());
+            if alt_key != key {
+                hd_keys.insert(alt_key.clone());
+            }
         }
+
         owned_dates.insert(key.clone(), file_mtime);
+        if alt_key != key {
+            owned_dates.insert(alt_key.clone(), file_mtime);
+        }
+
         snapshot.files.push(FileSnapshot {
             key,
             hd,
             modified: file_mtime,
+            title_hint: Some(title.clone()),
         });
     }
 
@@ -219,6 +245,165 @@ fn is_video_ext(p: &Path) -> bool {
         ext.as_str(),
         "mkv" | "mp4" | "avi" | "mov" | "mpg" | "mpeg" | "m4v" | "wmv"
     )
+}
+
+fn extract_year_from_filename(stem: &str) -> Option<i32> {
+    let mut candidate: Option<i32> = None;
+    let mut buffer = String::new();
+    let mut in_bracket = false;
+
+    for ch in stem.chars() {
+        match ch {
+            '(' | '[' | '{' => {
+                buffer.clear();
+                in_bracket = true;
+            }
+            ')' | ']' | '}' => {
+                if in_bracket && buffer.len() == 4 && buffer.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(val) = buffer.parse::<i32>() {
+                        candidate = Some(val);
+                    }
+                }
+                in_bracket = false;
+                buffer.clear();
+            }
+            _ => {
+                if in_bracket {
+                    buffer.push(ch);
+                }
+            }
+        }
+    }
+
+    if candidate.is_some() {
+        candidate
+    } else {
+        crate::app::utils::find_year_in_str(stem)
+    }
+}
+
+fn clean_owned_title(stem: &str, year: Option<i32>) -> String {
+    let mut title = stem.trim().to_string();
+
+    if let Some(year) = year {
+        let year_str = year.to_string();
+        if let Some(pos) = title.find(&year_str) {
+            let mut start = pos;
+            while start > 0 {
+                let c = title.as_bytes()[start - 1] as char;
+                if c == '(' || c == '[' || c == '{' || c.is_whitespace() {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let mut end = pos + year_str.len();
+            while end < title.len() {
+                let c = title.as_bytes()[end] as char;
+                if c == ')' || c == ']' || c == '}' || c.is_whitespace() {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            if start < end && end <= title.len() {
+                title.replace_range(start..end, "");
+            }
+        }
+    }
+
+    let mut collapsed = String::with_capacity(title.len());
+    let mut prev_space = false;
+    for ch in title.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+                prev_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            prev_space = false;
+        }
+    }
+    title = collapsed.trim().to_string();
+
+    for marker in [" - ", " – ", " — ", " -- ", "- "] {
+        if let Some(idx) = title.rfind(marker) {
+            let remainder = title[idx + marker.len()..].trim();
+            if remainder.len() <= 24 {
+                title.truncate(idx);
+                break;
+            }
+        }
+    }
+
+    while title
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace() || "-_.,".contains(c))
+        .unwrap_or(false)
+    {
+        title.pop();
+    }
+
+    if title.is_empty() {
+        stem.trim().to_string()
+    } else {
+        title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clean_owned_title, extract_year_from_filename};
+    use crate::app::PexApp;
+
+    #[test]
+    fn strips_year_and_suffix_hyphen() {
+        let stem = "Harry Potter and the Goblet of Fire (2005) - 4";
+        let year = extract_year_from_filename(stem);
+        assert_eq!(year, Some(2005));
+        let cleaned = clean_owned_title(stem, year);
+        assert_eq!(cleaned, "Harry Potter and the Goblet of Fire");
+
+        let key_file = PexApp::make_owned_key(&cleaned, Some(2005));
+        let key_row = PexApp::make_owned_key(
+            "Harry Potter and the Goblet of Fire",
+            Some(2005),
+        );
+        assert_eq!(key_file, key_row);
+    }
+
+    #[test]
+    fn trims_brackets_and_extra_comment() {
+        let stem = "Some Film (2000) - TVHD";
+        let year = extract_year_from_filename(stem);
+        assert_eq!(year, Some(2000));
+        let cleaned = clean_owned_title(stem, year);
+        assert_eq!(cleaned, "Some Film");
+    }
+
+    #[test]
+    fn falls_back_when_no_year() {
+        let stem = "Example Movie - Director's Cut";
+        let year = extract_year_from_filename(stem);
+        assert_eq!(year, None);
+        let cleaned = clean_owned_title(stem, year);
+        assert_eq!(cleaned, "Example Movie");
+    }
+
+    #[test]
+    fn prefers_trailing_parenthetical_year() {
+        let stem = "2012 (2009)";
+        let year = extract_year_from_filename(stem);
+        assert_eq!(year, Some(2009));
+        let cleaned = clean_owned_title(stem, year);
+        assert_eq!(cleaned, "2012");
+
+        let key_file = PexApp::make_owned_key(&cleaned, year);
+        let key_row = PexApp::make_owned_key("2012", Some(2009));
+        assert_eq!(key_file, key_row);
+    }
 }
 
 fn persist_owned_keys_sidecar(
