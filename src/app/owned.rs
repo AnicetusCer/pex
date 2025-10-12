@@ -272,10 +272,10 @@ impl crate::app::PexApp {
         };
         let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
-            let key = Self::make_owned_key(&row.title, row.year);
-            row.owned = keys.contains(&key);
+            let key = row.owned_key.as_str();
+            row.owned = keys.contains(key);
             row.owned_modified = modified
-                .and_then(|m| m.get(&key))
+                .and_then(|m| m.get(key))
                 .and_then(|v| *v);
         }
     }

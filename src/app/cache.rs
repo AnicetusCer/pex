@@ -53,9 +53,8 @@ pub fn poster_cache_dir() -> PathBuf {
 }
 
 pub fn poster_cache_limit() -> Option<usize> {
-    POSTER_LIMIT_ONCE
+    *POSTER_LIMIT_ONCE
         .get_or_init(|| load_config().poster_cache_max_files.filter(|n| *n > 0))
-        .clone()
 }
 
 fn prune_poster_cache_if_needed() -> std::io::Result<usize> {

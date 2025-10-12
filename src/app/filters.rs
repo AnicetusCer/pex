@@ -1,7 +1,7 @@
 // src/app/filters.rs
 use std::time::SystemTime;
 
-use super::{DayRange, SortKey};
+use super::SortKey;
 
 impl crate::app::PexApp {
     /// Build grouped indices for the grid: per-day buckets with intra-day sorting applied.
@@ -11,7 +11,7 @@ impl crate::app::PexApp {
 
         let now_bucket = crate::app::utils::day_bucket(SystemTime::now());
         // The helper is in this module — call it directly.
-        let max_bucket_opt = max_bucket_for_range(self.current_range, now_bucket);
+        let max_bucket_opt = self.current_range.max_bucket(now_bucket);
 
         // Precompute filters
         let query = self.search_query.to_ascii_lowercase();
@@ -50,7 +50,6 @@ impl crate::app::PexApp {
                     }
                 }
 
-                let tags_joined = (!row.genres.is_empty()).then(|| row.genres.join("|"));
                 if have_genre_filter {
                     let mut match_genre = false;
                     for g in &row.genres {
@@ -63,10 +62,7 @@ impl crate::app::PexApp {
                         return None;
                     }
                 }
-                let broadcast_hd = crate::app::utils::infer_broadcast_hd(
-                    tags_joined.as_deref(),
-                    row.channel.as_deref(),
-                );
+                let broadcast_hd = Self::row_broadcast_hd(row);
 
                 if self.filter_hd_only && !broadcast_hd {
                     return None;
@@ -74,11 +70,7 @@ impl crate::app::PexApp {
 
                 // hide-owned, but KEEP rows that are HD upgrades (airing HD while owned is SD)
                 if self.hide_owned && row.owned {
-                    let owned_key = Self::make_owned_key(&row.title, row.year);
-                    let owned_is_hd = self
-                        .owned_hd_keys
-                        .as_ref()
-                        .map_or(false, |set| set.contains(&owned_key));
+                    let owned_is_hd = self.row_owned_is_hd(row);
 
                     let is_upgrade = broadcast_hd && !owned_is_hd;
                     if !is_upgrade {
@@ -123,7 +115,7 @@ impl crate::app::PexApp {
     }
 
     /// Sort a day's indices according to the current SortKey.
-    fn sort_intra_day(&self, idxs: &mut Vec<usize>) {
+    fn sort_intra_day(&self, idxs: &mut [usize]) {
         match self.sort_key {
             SortKey::Time => {
                 idxs.sort_by_key(|&i| {
@@ -163,16 +155,5 @@ impl crate::app::PexApp {
                 });
             }
         }
-    }
-}
-
-/// Map the current DayRange to a max day-bucket (exclusive upper bound).
-fn max_bucket_for_range(range: DayRange, now_bucket: i64) -> Option<i64> {
-    match range {
-        DayRange::Two => Some(now_bucket + 2),
-        DayRange::Four => Some(now_bucket + 4),
-        DayRange::Five => Some(now_bucket + 5),
-        DayRange::Seven => Some(now_bucket + 7),
-        DayRange::Fourteen => Some(now_bucket + 14),
     }
 }

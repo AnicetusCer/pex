@@ -1,8 +1,14 @@
 // src/main.rs
-use eframe::egui::{IconData, Vec2, ViewportBuilder};
+use eframe::egui::{IconData, ViewportBuilder};
+
+#[cfg(not(target_os = "windows"))]
+use eframe::egui::Vec2;
 use std::env;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
+
+#[cfg(target_os = "linux")]
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
     fn pick_renderer() -> eframe::Renderer {
@@ -33,9 +39,13 @@ fn main() -> eframe::Result<()> {
         info!("WINIT_UNIX_BACKEND={:?}", env::var_os("WINIT_UNIX_BACKEND"));
     }
 
-    let mut viewport = ViewportBuilder::default()
-        .with_inner_size(Vec2::new(1600.0, 900.0))
-        .with_maximized(true);
+    let mut viewport = ViewportBuilder::default().with_maximized(true);
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Keep a sensible restore size for platforms where this does not break maximization.
+        viewport = viewport.with_inner_size(Vec2::new(1600.0, 900.0));
+    }
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(Arc::new(icon));
     }

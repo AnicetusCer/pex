@@ -85,15 +85,14 @@ impl crate::app::PexApp {
             }
 
             // Clear active channel filter (only when something is selected)
-            if !self.selected_channels.is_empty() {
-                if ui
+            if !self.selected_channels.is_empty()
+                && ui
                     .small_button("Clear channels")
                     .on_hover_text("Clear the channel include-only filter")
                     .clicked()
-                {
-                    self.selected_channels.clear();
-                    self.mark_dirty();
-                }
+            {
+                self.selected_channels.clear();
+                self.mark_dirty();
             }
 
             ui.separator();
@@ -164,13 +163,12 @@ impl crate::app::PexApp {
                 self.mark_dirty();
             }
             let mut dim_changed = ui.checkbox(&mut self.dim_owned, "Dim owned").changed();
-            if self.dim_owned {
-                if ui
+            if self.dim_owned
+                && ui
                     .add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %"))
                     .changed()
-                {
-                    dim_changed = true;
-                }
+            {
+                dim_changed = true;
             }
             if dim_changed {
                 self.mark_dirty();

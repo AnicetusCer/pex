@@ -4,13 +4,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 // ---- Crates ----
 use eframe::egui as eg;
 use serde::Deserialize;
+use tracing::warn;
 use urlencoding::encode;
 
 // ---- Local modules ----
@@ -115,6 +116,9 @@ pub struct PexApp {
     show_genre_filter_popup: bool,
     show_advanced_popup: bool,
     advanced_feedback: Option<String>,
+    setup_checked: bool,
+    setup_errors: Vec<String>,
+    setup_warnings: Vec<String>,
     channel_icon_textures: HashMap<String, eg::TextureHandle>,
     channel_icon_pending: HashSet<String>,
 
@@ -194,6 +198,9 @@ impl Default for PexApp {
             show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
+            setup_checked: false,
+            setup_errors: Vec::new(),
+            setup_warnings: Vec::new(),
             channel_icon_textures: HashMap::new(),
             channel_icon_pending: HashSet::new(),
 
@@ -225,11 +232,28 @@ impl PexApp {
     }
 
     pub(crate) fn make_owned_key(title: &str, year: Option<i32>) -> String {
-        format!(
-            "{}:{}",
-            utils::normalize_title(title),
-            year.unwrap_or_default()
-        )
+        let normalized = utils::normalize_title(title);
+        let year = year.or_else(|| utils::find_year_in_str(title));
+        if let Some(year) = year {
+            format!("{normalized}:{year}")
+        } else {
+            let digest = md5::compute(normalized.as_bytes());
+            let short = format!("{:x}", digest);
+            let short = &short[..short.len().min(8)];
+            format!("{normalized}:0:{short}")
+        }
+    }
+
+    /// Determine whether the airing metadata implies an HD broadcast.
+    pub(crate) fn row_broadcast_hd(row: &PosterRow) -> bool {
+        row.broadcast_hd
+    }
+
+    /// Determine whether the owned library already has an HD copy of this title.
+    pub(crate) fn row_owned_is_hd(&self, row: &PosterRow) -> bool {
+        self.owned_hd_keys
+            .as_ref()
+            .is_some_and(|set| set.contains(&row.owned_key))
     }
 
     fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
@@ -289,13 +313,7 @@ impl PexApp {
     fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
         // Only target near-future rows (for 2d/7d/etc.) and take the first PREWARM_UPLOADS
         let now_bucket = utils::day_bucket(SystemTime::now());
-        let max_bucket_opt: Option<i64> = match self.current_range {
-            DayRange::Two => Some(now_bucket + 2),
-            DayRange::Four => Some(now_bucket + 4),
-            DayRange::Five => Some(now_bucket + 5),
-            DayRange::Seven => Some(now_bucket + 7),
-            DayRange::Fourteen => Some(now_bucket + 14),
-        };
+        let max_bucket_opt = self.current_range.max_bucket(now_bucket);
 
         let targets: Vec<usize> = self
             .rows
@@ -327,6 +345,125 @@ impl PexApp {
                 uploaded += 1;
             }
         }
+    }
+
+    fn run_setup_checks(&mut self) {
+        self.setup_checked = true;
+        self.setup_errors.clear();
+        self.setup_warnings.clear();
+
+        let cfg_path = Path::new("config.json");
+        if !cfg_path.exists() {
+            self.setup_warnings.push(
+                "config.json not found next to the executable; using built-in defaults.".into(),
+            );
+        }
+
+        let cfg = load_config();
+        match cfg
+            .plex_db_local
+            .as_ref()
+            .map(|s| s.trim())
+        {
+            Some("") => self.setup_errors.push(
+                "config.json: plex_db_local is empty; set it to your Plex EPG database file."
+                    .into(),
+            ),
+            Some(path) => {
+                if !Path::new(path).exists() {
+                    self.setup_errors
+                        .push(format!("config.json: plex_db_local not found: {path}"));
+                }
+            }
+            None => self
+                .setup_errors
+                .push("config.json: add plex_db_local pointing at your Plex EPG database."
+                    .into()),
+        }
+
+        if cfg.library_roots.is_empty() {
+            self.setup_warnings
+                .push("config.json: library_roots is empty; owned titles will not be marked."
+                    .into());
+        } else {
+            for root in &cfg.library_roots {
+                if !Path::new(root).exists() {
+                    self.setup_warnings
+                        .push(format!("config.json: library root not found: {root}"));
+                }
+            }
+        }
+
+        if !crate::app::utils::ffprobe_available() {
+            self.setup_warnings.push(
+                "ffprobe not found on PATH; HD detection falls back to filename heuristics."
+                    .into(),
+            );
+        }
+
+        let omdb_missing = cfg
+            .omdb_api_key
+            .as_ref()
+            .map(|k| k.trim().is_empty())
+            .unwrap_or(true);
+        if omdb_missing {
+            self.setup_warnings
+                .push("omdb_api_key not set; using the public demo key (rate limited).".into());
+        }
+
+        if !self.setup_errors.is_empty() {
+            if let Some(first) = self.setup_errors.first() {
+                self.set_status(format!("Setup required: {first}"));
+            }
+        } else if self.advanced_feedback.is_none() && !self.setup_warnings.is_empty() {
+            self.advanced_feedback = Some(self.setup_warnings.join("\n"));
+        }
+    }
+
+    fn render_setup_gate(&mut self, ctx: &eg::Context) {
+        eg::CentralPanel::default()
+            .frame(
+                eg::Frame::default()
+                    .inner_margin(eg::Margin::symmetric(16.0, 20.0))
+                    .fill(ctx.style().visuals.panel_fill),
+            )
+            .show(ctx, |ui| {
+                ui.heading("Pex setup required");
+                ui.add_space(8.0);
+                if !self.setup_errors.is_empty() {
+                    ui.label(
+                        eg::RichText::new("Fix these before Pex can start:")
+                            .strong()
+                            .color(eg::Color32::LIGHT_RED),
+                    );
+                    ui.add_space(6.0);
+                    for err in &self.setup_errors {
+                    ui.label(
+                        eg::RichText::new(format!("- {err}")).color(eg::Color32::LIGHT_RED),
+                    );
+                    }
+                }
+
+                if !self.setup_warnings.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(
+                        eg::RichText::new(
+                            "Warnings (the app can run, but some features may be limited):",
+                        )
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    for warn in &self.setup_warnings {
+                        ui.label(format!("- {warn}"));
+                    }
+                }
+
+                ui.add_space(16.0);
+                if ui.button("Retry checks").clicked() {
+                    self.setup_checked = false;
+                }
+                ui.label("Edit config.json next to the executable, then press Retry.");
+            });
     }
 
     fn set_status<S: Into<String>>(&mut self, s: S) {
@@ -412,7 +549,7 @@ impl PexApp {
             return;
         }
 
-        let imdb_id = row.guid.as_deref().and_then(|g| imdb_id_from_guid(g));
+        let imdb_id = row.guid.as_deref().and_then(imdb_id_from_guid);
         let title = row.title.clone();
         let year = row.year;
         let sender = self.ensure_rating_channel();
@@ -724,10 +861,23 @@ impl eframe::App for PexApp {
 
         // First frame
         if !self.did_init {
+            if !self.setup_checked {
+                self.run_setup_checks();
+            }
+
+            if !self.setup_errors.is_empty() {
+                self.render_setup_gate(ctx);
+                return;
+            }
+
             self.load_prefs();
             self.prefs_dirty = false;
             self.did_init = true;
-            self.loading_message = "Starting…".into();
+            self.loading_message = if self.setup_warnings.is_empty() {
+                "Starting.".into()
+            } else {
+                "Starting (warnings detected; see Advanced menu).".into()
+            };
             self.heartbeat_last = Instant::now();
             self.heartbeat_dots = 0;
 
@@ -842,6 +992,9 @@ impl eframe::App for PexApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = self.save_hotset_manifest(180); // remember ~a couple of screens
-        self.save_prefs();
+        if let Err(err) = self.save_prefs() {
+            warn!("Failed to persist UI preferences on exit: {err}");
+        }
     }
 }
+

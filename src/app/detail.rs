@@ -39,6 +39,9 @@ impl crate::app::PexApp {
                     return;
                 };
 
+                let broadcast_hd = Self::row_broadcast_hd(row);
+                let owned_is_hd = self.row_owned_is_hd(row);
+
                 // Snapshot values so we can release the immutable borrow on self.rows
                 let poster_tex = row.tex.clone();
                 let title_text = row.title.clone();
@@ -121,10 +124,17 @@ impl crate::app::PexApp {
                                 .map(|raw| crate::app::utils::humanize_channel(raw))
                         })
                         .unwrap_or_else(|| "—".into());
-                    let tm = airing
-                        .map(crate::app::utils::hhmm_utc)
-                        .unwrap_or_else(|| "—".into());
-                    ui.label(eg::RichText::new(format!("{ch}  •  {tm} UTC")).weak());
+                    let schedule = airing
+                        .map(|ts| {
+                            let bucket = crate::app::utils::day_bucket(ts);
+                            let (_, _, day) = crate::app::utils::civil_from_days(bucket);
+                            let weekday = crate::app::utils::weekday_full_from_bucket(bucket);
+                            let suffix = crate::app::utils::ordinal_suffix(day);
+                            let hhmm = crate::app::utils::hhmm_utc(ts);
+                            format!("{weekday} {day}{suffix} {hhmm} UTC")
+                        })
+                        .unwrap_or_else(|| "— UTC".into());
+                    ui.label(eg::RichText::new(format!("{ch}  •  {schedule}")).weak());
                 }
 
                 if critic_rating.is_some() || audience_rating.is_some() {
@@ -188,22 +198,6 @@ impl crate::app::PexApp {
 
                 // --- Owned tags (explicit SD/HD) + optional Airing status ---
                 {
-                    let tags_joined = if !genres.is_empty() {
-                        Some(genres.join("|"))
-                    } else {
-                        None
-                    };
-                    let broadcast_hd = crate::app::utils::infer_broadcast_hd(
-                        tags_joined.as_deref(),
-                        channel_display.as_deref(),
-                    );
-
-                    let owned_key = Self::make_owned_key(&title_text, year);
-                    let owned_is_hd = self
-                        .owned_hd_keys
-                        .as_ref()
-                        .map_or(false, |set| set.contains(&owned_key));
-
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         // Airing chip (HD/SD)
