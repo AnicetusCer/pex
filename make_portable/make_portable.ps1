@@ -1,5 +1,5 @@
 param (
-    [string]$BinaryPath = "..\target\release\pex.exe",
+    [string]$BinaryPath,
     [string]$OutputDir = "dist",
     [switch]$Zip
 )
@@ -7,6 +7,37 @@ param (
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent $scriptDir
+$runtimeInfo = [System.Runtime.InteropServices.RuntimeInformation]
+$isWindows = $runtimeInfo::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+
+if (-not $isWindows) {
+    throw "This PowerShell packaging script is Windows-only. Use release/package.sh when running on Linux."
+}
+
+if (-not $BinaryPath) {
+    $releaseDir = Join-Path (Join-Path $repoRoot "target") "release"
+    $preferredNames = @("pex.exe", "pex")
+    foreach ($name in $preferredNames) {
+        $candidate = Join-Path $releaseDir $name
+        if (Test-Path $candidate) {
+            $BinaryPath = $candidate
+            break
+        }
+    }
+
+    if (-not $BinaryPath) {
+        $BinaryPath = Join-Path $releaseDir $preferredNames[0]
+    }
+}
+
+if ($BinaryPath -and -not [System.IO.Path]::IsPathRooted($BinaryPath)) {
+    $scriptRelativeBinary = Join-Path $scriptDir $BinaryPath
+    if (Test-Path $scriptRelativeBinary) {
+        $BinaryPath = $scriptRelativeBinary
+    }
+}
+
 $distPath = Join-Path $scriptDir $OutputDir
 
 if (Test-Path $distPath) {
