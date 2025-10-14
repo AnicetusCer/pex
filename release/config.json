@@ -1,0 +1,18 @@
+{
+  "plex_db_local": "REPLACE_ME_WITH_PATH/plex_epg.db",
+  "plex_db_source": null,
+  "cache_dir": ".pex_cache",
+  "library_roots": [
+    "REPLACE_ME_WITH_PATH/Movies"
+  ],
+  "ffprobe_cmd": null,
+  "omdb_api_key": "REPLACE_ME",
+  "poster_cache_max_files": 1500,
+  "hide_owned_by_default": false,
+  "dim_owned_by_default": false,
+  "ui": {
+    "hide_owned": null,
+    "dim_owned": null,
+    "schedule_window": null
+  }
+}
