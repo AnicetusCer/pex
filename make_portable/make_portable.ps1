@@ -9,9 +9,9 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $runtimeInfo = [System.Runtime.InteropServices.RuntimeInformation]
-$isWindows = $runtimeInfo::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$isWindowsPlatform = $runtimeInfo::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
-if (-not $isWindows) {
+if (-not $isWindowsPlatform) {
     throw "This PowerShell packaging script is Windows-only. Use release/package.sh when running on Linux."
 }
 
