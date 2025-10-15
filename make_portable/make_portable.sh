@@ -95,12 +95,14 @@ fi
 mkdir -p "$DIST_PATH"
 
 CONFIG_SRC="$SCRIPT_DIR/config.json"
-README_SRC="$SCRIPT_DIR/README.txt"
+README_SRC="$SCRIPT_DIR/README.md"
 [[ -f "$CONFIG_SRC" ]] || { echo "Missing config.json in $SCRIPT_DIR." >&2; exit 1; }
 [[ -f "$README_SRC" ]] || { echo "Missing README.txt in $SCRIPT_DIR." >&2; exit 1; }
 
 cp "$CONFIG_SRC" "$DIST_PATH/config.json"
-cp "$README_SRC" "$DIST_PATH/README.txt"
+cp "$README_SRC" "$DIST_PATH/README.md"
+[ -f "$REPO_ROOT/LICENSE" ] && cp "$REPO_ROOT/LICENSE" "$DIST_PATH/LICENSE"
+[ -f "$REPO_ROOT/NOTICE" ] && cp "$REPO_ROOT/NOTICE" "$DIST_PATH/NOTICE"
 cp "$BINARY_PATH" "$DIST_PATH/$(basename "$BINARY_PATH")"
 
 if (( ZIP_REQUESTED )); then

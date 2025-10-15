@@ -1,5 +1,4 @@
 {
-  "plex_db_local": "C:/Plex/Databases/plex_epg.db",
   "plex_db_source": "\\\\plex-server\\Config\\tv.plex.providers.epg.cloud.db",
   "library_roots": [
     "D:/Media/Movies",
@@ -9,13 +8,5 @@
   "cache_dir": ".pex_cache",
   "ffprobe_cmd": "C:/Tools/ffmpeg/bin/ffprobe.exe",
   "omdb_api_key": "your-omdb-key-here",
-  "poster_cache_max_files": 1500,
-  "hide_owned_by_default": false,
-  "dim_owned_by_default": true,
-  "ui": {
-    "hide_owned": false,
-    "dim_owned": false,
-    "schedule_window": "AllUpcoming"
-  },
   "log_level": "info"
 }

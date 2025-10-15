@@ -11,16 +11,20 @@ use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-    fn pick_renderer() -> eframe::Renderer {
+fn pick_renderer() -> eframe::Renderer {
     match env::var("PEX_RENDERER").as_deref() {
         Ok("glow") => eframe::Renderer::Glow,
         Ok("wgpu") => eframe::Renderer::Wgpu,
         _ => {
             // Default: Windows = WGPU (DX12), Others = Glow (GL)
             #[cfg(target_os = "windows")]
-            { eframe::Renderer::Wgpu }
+            {
+                eframe::Renderer::Wgpu
+            }
             #[cfg(not(target_os = "windows"))]
-            { eframe::Renderer::Glow }
+            {
+                eframe::Renderer::Glow
+            }
         }
     }
 }

@@ -1,8 +1,6 @@
 // src/app/ui/topbar.rs
 use super::super::{DayRange, SortKey};
 use eframe::egui as eg;
-use std::path::Path;
-
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
     pub(crate) fn ui_render_topbar(&mut self, ui: &mut eg::Ui) {
@@ -183,8 +181,11 @@ impl crate::app::PexApp {
         }
 
         // Build channel list from current rows (raw values; UI presents humanized label)
-        let mut channels: Vec<String> =
-            self.rows.iter().filter_map(|r| r.channel_raw.clone()).collect();
+        let mut channels: Vec<String> = self
+            .rows
+            .iter()
+            .filter_map(|r| r.channel_raw.clone())
+            .collect();
         channels.sort();
         channels.dedup();
 
@@ -242,11 +243,7 @@ impl crate::app::PexApp {
             return;
         }
 
-        let mut genres: Vec<String> = self
-            .rows
-            .iter()
-            .flat_map(|r| r.genres.clone())
-            .collect();
+        let mut genres: Vec<String> = self.rows.iter().flat_map(|r| r.genres.clone()).collect();
         genres.sort();
         genres.dedup();
 
@@ -300,12 +297,8 @@ impl crate::app::PexApp {
         let mut open = self.show_advanced_popup;
         let ctx_clone = ctx.clone();
         let cfg = crate::config::load_config();
-        let db_path_str = cfg
-            .plex_db_local
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or("plex_epg.db");
-        let db_exists = Path::new(db_path_str).exists();
+        let db_path = crate::config::local_db_path();
+        let db_exists = db_path.exists();
         let using_demo_omdb = cfg.omdb_api_key.is_none();
 
         eg::Window::new("Advanced controls")
@@ -318,7 +311,7 @@ impl crate::app::PexApp {
                     ui.label(
                         eg::RichText::new(format!(
                             "Plex DB: {}",
-                            db_path_str
+                            db_path.display()
                         ))
                         .color(if db_exists {
                             eg::Color32::LIGHT_GREEN
@@ -354,20 +347,12 @@ impl crate::app::PexApp {
 
                     ui.separator();
                     ui.label(eg::RichText::new("Poster cache").strong());
-                    if let Some(limit) = crate::app::cache::poster_cache_limit() {
-                        ui.label(
-                            eg::RichText::new(format!(
-                                "Current limit: {} files",
-                                limit
-                            ))
-                            .weak(),
-                        );
-                    } else {
-                        ui.label(
-                            eg::RichText::new("Current limit: unlimited (set poster_cache_max_files in config.json)")
-                                .weak(),
-                        );
-                    }
+                    ui.label(
+                        eg::RichText::new(
+                            "Posters older than 14 days are pruned automatically on startup.",
+                        )
+                        .weak(),
+                    );
                     if ui.button("Clear poster cache").clicked() {
                         match self.clear_poster_cache_files() {
                             Ok(removed) => {
@@ -384,11 +369,11 @@ impl crate::app::PexApp {
                             }
                         }
                     }
-                    if ui.button("Prune over limit").clicked() {
+                    if ui.button("Prune old posters now").clicked() {
                         match crate::app::cache::prune_poster_cache_now() {
                             Ok(removed) => {
                                 self.advanced_feedback = Some(format!(
-                                    "Pruned {removed} poster file(s) beyond limit."
+                                    "Removed {removed} poster file(s) older than 14 days."
                                 ));
                             }
                             Err(err) => {

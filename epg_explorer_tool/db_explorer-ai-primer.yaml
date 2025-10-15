@@ -27,10 +27,9 @@ usage:
 
 db_resolution:
   order:
-    - load_config().plex_db_local if non-empty
-    - else use "./plex_epg.db"
+    - use the working copy at "db/plex_epg.db"
   mirrors_gui:
-    - Same `config.json` as GUI (so both read the same DB).
+    - Same `config.json` as the GUI; optional `plex_db_source` keeps the working copy fresh.
 
 field_reference:  # ← PRIME: where to find what the GUI needs
   posters:

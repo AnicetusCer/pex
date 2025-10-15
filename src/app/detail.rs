@@ -186,8 +186,10 @@ impl crate::app::PexApp {
                         }
                         RatingState::MissingApiKey => {
                             ui.label(
-                                eg::RichText::new("Set omdb_api_key in config.json to enable ratings.")
-                                    .weak(),
+                                eg::RichText::new(
+                                    "Set omdb_api_key in config.json to enable ratings.",
+                                )
+                                .weak(),
                             );
                         }
                         RatingState::Idle => {
@@ -253,7 +255,11 @@ impl crate::app::PexApp {
                 if let Some(summary) = summary.as_deref() {
                     ui.add(eg::Label::new(eg::RichText::new(summary)).wrap());
                 } else {
-                    ui.label(eg::RichText::new("No description available.").italics().weak());
+                    ui.label(
+                        eg::RichText::new("No description available.")
+                            .italics()
+                            .weak(),
+                    );
                 }
 
                 ui.add_space(12.0);

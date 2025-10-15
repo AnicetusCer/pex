@@ -17,7 +17,7 @@ use urlencoding::encode;
 // ---- Local modules ----
 pub mod cache;
 use crate::app::cache::find_any_by_key;
-use crate::config::load_config;
+use crate::config::{load_config, local_db_path};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -179,7 +179,7 @@ impl Default for PexApp {
 
             hide_owned: false,
             dim_owned: false,
-            dim_strength_ui: 0.6, // sensible default, darker not lighter
+            dim_strength_ui: 0.8, // stronger dimming by default
 
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
@@ -210,7 +210,7 @@ impl Default for PexApp {
             sort_key: SortKey::Time,
             sort_desc: false,
 
-            poster_width_ui: 140.0,        // matches current card_w
+            poster_width_ui: 143.0,        // tuned default card width
             worker_count_ui: WORKER_COUNT, // show the current worker count
 
             prefs_dirty: false,
@@ -354,9 +354,7 @@ impl PexApp {
         self.setup_checked = true;
         self.setup_errors.clear();
         self.setup_warnings.clear();
-        self.set_status(
-            "Stage 1/4 – Checking config & cache (validates Plex paths and tools).",
-        );
+        self.set_status("Stage 1/4 – Checking config & cache (validates Plex paths and tools).");
 
         let cfg_path = Path::new("config.json");
         if !cfg_path.exists() {
@@ -366,43 +364,29 @@ impl PexApp {
         }
 
         let cfg = load_config();
-        match cfg
-            .plex_db_local
-            .as_ref()
-            .map(|s| s.trim())
-        {
-            Some("") | Some("REPLACE_ME_WITH_PATH/plex_epg.db") => self.setup_errors.push(
-                "config.json: plex_db_local still uses the REPLACE_ME placeholder; set it to your Plex EPG database file."
-                    .into(),
-            ),
-            Some(path) => {
-                if path.contains("REPLACE_ME") {
-                    self.setup_errors.push(
-                        "config.json: plex_db_local still contains a REPLACE_ME placeholder."
-                            .into(),
-                    );
-                }
-                if !Path::new(path).exists() {
-                    if cfg.plex_db_source.as_deref().map_or(false, |s| !s.trim().is_empty()) {
-                        self.setup_warnings.push(format!(
-                            "config.json: plex_db_local not found ({path}); will copy from plex_db_source on startup."
-                        ));
-                    } else {
-                        self.setup_errors
-                            .push(format!("config.json: plex_db_local not found: {path}"));
-                    }
-                }
+        let local_db = local_db_path();
+        if !local_db.exists() {
+            if cfg
+                .plex_db_source
+                .as_deref()
+                .map_or(false, |s| !s.trim().is_empty())
+            {
+                self.setup_warnings.push(format!(
+                    "Local Plex EPG database not found at {}; it will be copied from plex_db_source on startup.",
+                    local_db.display()
+                ));
+            } else {
+                self.setup_errors.push(format!(
+                    "Local Plex EPG database not found at {}. Provide plex_db_source in config.json or copy the DB into the db/ folder.",
+                    local_db.display()
+                ));
             }
-            None => self
-                .setup_errors
-                .push("config.json: add plex_db_local pointing at your Plex EPG database."
-                    .into()),
         }
 
         if cfg.library_roots.is_empty() {
-            self.setup_warnings
-                .push("config.json: library_roots is empty; owned titles will not be marked."
-                    .into());
+            self.setup_warnings.push(
+                "config.json: library_roots is empty; owned titles will not be marked.".into(),
+            );
         } else {
             for root in &cfg.library_roots {
                 if root.contains("REPLACE_ME") {
@@ -421,8 +405,7 @@ impl PexApp {
 
         if !crate::app::utils::ffprobe_available() {
             self.setup_warnings.push(
-                "ffprobe not found on PATH; HD detection falls back to filename heuristics."
-                    .into(),
+                "ffprobe not found on PATH; HD detection falls back to filename heuristics.".into(),
             );
         }
 
@@ -471,9 +454,9 @@ impl PexApp {
                     );
                     ui.add_space(6.0);
                     for err in &self.setup_errors {
-                    ui.label(
-                        eg::RichText::new(format!("- {err}")).color(eg::Color32::LIGHT_RED),
-                    );
+                        ui.label(
+                            eg::RichText::new(format!("- {err}")).color(eg::Color32::LIGHT_RED),
+                        );
                     }
                 }
 
@@ -564,10 +547,7 @@ impl PexApp {
             return;
         };
         let key = row.key.clone();
-        if matches!(
-            self.rating_states.get(&key),
-            Some(RatingState::Pending)
-        ) {
+        if matches!(self.rating_states.get(&key), Some(RatingState::Pending)) {
             return;
         }
 
@@ -577,8 +557,7 @@ impl PexApp {
             .filter(|k| !k.trim().is_empty())
             .unwrap_or_else(|| "4a3b711b".to_string());
         if api_key.trim().is_empty() {
-            self.rating_states
-                .insert(key, RatingState::MissingApiKey);
+            self.rating_states.insert(key, RatingState::MissingApiKey);
             return;
         }
 
@@ -587,8 +566,7 @@ impl PexApp {
         let year = row.year;
         let sender = self.ensure_rating_channel();
 
-        self.rating_states
-            .insert(key.clone(), RatingState::Pending);
+        self.rating_states.insert(key.clone(), RatingState::Pending);
 
         std::thread::spawn(move || {
             let state = fetch_rating_from_omdb(api_key, imdb_id, title, year);
@@ -668,10 +646,7 @@ impl PexApp {
 
         let size = [w as usize, h as usize];
         let image = eg::ColorImage::from_rgba_unmultiplied(size, &rgba);
-        let key = format!(
-            "channel_icon_{}",
-            crate::app::cache::url_to_cache_key(url)
-        );
+        let key = format!("channel_icon_{}", crate::app::cache::url_to_cache_key(url));
         let tex = ctx.load_texture(key, image, eg::TextureOptions::LINEAR);
         let handle = tex.clone();
         self.channel_icon_textures.insert(url.to_string(), tex);
@@ -1041,6 +1016,3 @@ impl eframe::App for PexApp {
         }
     }
 }
-
-
-

@@ -10,11 +10,14 @@ use tracing::warn;
 use crate::config::load_config;
 
 // Chosen once on first call
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 static CACHE_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static CHANNEL_ICON_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
-static POSTER_LIMIT_ONCE: OnceLock<Option<usize>> = OnceLock::new();
+static POSTER_PRUNE_ONCE: Once = Once::new();
+
+const POSTER_RETENTION_DAYS: u64 = 14;
+const POSTER_RETENTION_SECS: u64 = POSTER_RETENTION_DAYS * 24 * 60 * 60;
 
 pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
@@ -37,33 +40,38 @@ pub fn cache_dir() -> PathBuf {
 }
 
 pub fn poster_cache_dir() -> PathBuf {
-    POSTER_DIR_ONCE
-        .get_or_init(|| {
-            let mut path = cache_dir().join("posters");
-            if let Err(e) = fs::create_dir_all(&path) {
-                warn!(
-                    "failed to create poster cache dir {}: {e}",
-                    path.display()
-                );
-                path = cache_dir();
-            }
-            path
-        })
-        .clone()
-}
+    let dir = POSTER_DIR_ONCE.get_or_init(|| {
+        let mut path = cache_dir().join("posters");
+        if let Err(e) = fs::create_dir_all(&path) {
+            warn!("failed to create poster cache dir {}: {e}", path.display());
+            path = cache_dir();
+        }
+        path
+    });
 
-pub fn poster_cache_limit() -> Option<usize> {
-    *POSTER_LIMIT_ONCE
-        .get_or_init(|| load_config().poster_cache_max_files.filter(|n| *n > 0))
+    POSTER_PRUNE_ONCE.call_once({
+        let path = dir.clone();
+        move || {
+            if let Err(err) = prune_poster_cache_in_dir(&path) {
+                warn!("poster cache prune failed: {err}");
+            }
+        }
+    });
+
+    dir.clone()
 }
 
 fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
-    let Some(limit) = poster_cache_limit() else {
-        return Ok(0);
-    };
     let dir = poster_cache_dir();
-    let mut entries: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(&dir)? {
+    prune_poster_cache_in_dir(&dir)
+}
+
+fn prune_poster_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(POSTER_RETENTION_SECS))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut removed = 0usize;
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -71,10 +79,7 @@ fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
         let path = entry.path();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let ext = ext.to_ascii_lowercase();
-            if !matches!(
-                ext.as_str(),
-                "png" | "jpg" | "jpeg" | "webp" | "rgba"
-            ) {
+            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba") {
                 continue;
             }
         } else {
@@ -82,32 +87,16 @@ fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
         }
         let metadata = entry.metadata()?;
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        entries.push((modified, path));
+        if modified < cutoff {
+            let _ = fs::remove_file(&path);
+            removed += 1;
+        }
     }
-
-    if entries.len() <= limit {
-        return Ok(0);
-    }
-
-    entries.sort_by_key(|(mtime, _)| *mtime);
-    let remove_count = entries.len() - limit;
-    for (_, path) in entries.into_iter().take(remove_count) {
-        let _ = fs::remove_file(&path);
-    }
-    Ok(remove_count)
+    Ok(removed)
 }
 
 pub fn url_to_cache_key(url: &str) -> String {
     format!("{:x}", md5::compute(url.as_bytes()))
-}
-
-// for legacy file names we used the basename without extension as the key
-#[allow(dead_code)]
-pub fn basename_key(url: &str) -> String {
-    Path::new(url)
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| url_to_cache_key(url))
 }
 
 /// Return (width, height, RGBA8 bytes) from either an image file (.png/.jpg/.jpeg/.webp)
@@ -340,11 +329,9 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
         }
     }
 
-    if removed > 0 {
-        let _ = prune_poster_cache_if_needed();
-    }
+    let aged_removed = prune_poster_cache_if_needed()?;
 
-    Ok(removed)
+    Ok(removed + aged_removed)
 }
 
 fn channel_icon_dir() -> PathBuf {
@@ -352,10 +339,7 @@ fn channel_icon_dir() -> PathBuf {
         .get_or_init(|| {
             let mut path = cache_dir().join("channel_icons");
             if let Err(e) = fs::create_dir_all(&path) {
-                warn!(
-                    "failed to create channel icon dir {}: {e}",
-                    path.display()
-                );
+                warn!("failed to create channel icon dir {}: {e}", path.display());
                 path = cache_dir();
             }
             path
@@ -388,15 +372,11 @@ pub fn ensure_channel_icon(url: &str) -> Result<PathBuf, String> {
         .and_then(|r| r.bytes())
         .map_err(|e| format!("download icon: {e}"))?;
 
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| format!("decode icon: {e}"))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("decode icon: {e}"))?;
 
     let mut png_bytes: Vec<u8> = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut png_bytes),
-        ImageFormat::Png,
-    )
-    .map_err(|e| format!("encode icon png: {e}"))?;
+    img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .map_err(|e| format!("encode icon png: {e}"))?;
 
     if let Some(parent) = dest.parent() {
         let _ = fs::create_dir_all(parent);

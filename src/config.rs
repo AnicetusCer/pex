@@ -3,63 +3,37 @@ use std::{fs, path::PathBuf};
 use serde::Deserialize;
 use tracing::{info, warn};
 
-#[derive(Clone, Debug, Default)]
-pub struct UiOverrides {
-    pub hide_owned: Option<bool>,
-    pub dim_owned: Option<bool>,
-    pub schedule_window: Option<String>,
-}
+pub const LOCAL_DB_DIR: &str = "db";
+pub const LOCAL_DB_FILE: &str = "plex_epg.db";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    pub plex_db_local: Option<String>,
     pub cache_dir: Option<String>,
     pub plex_db_source: Option<String>,
     pub ffprobe_cmd: Option<String>,
     pub omdb_api_key: Option<String>,
-    pub poster_cache_max_files: Option<usize>,
     pub library_roots: Vec<String>,
-    pub hide_owned_by_default: bool,
-    pub dim_owned_by_default: bool,
-    pub ui: UiOverrides,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            plex_db_local: Some("plex_epg.db".into()),
             cache_dir: None,
             plex_db_source: None,
             ffprobe_cmd: None,
             omdb_api_key: None,
-            poster_cache_max_files: Some(1500),
             library_roots: Vec::new(),
-            hide_owned_by_default: false,
-            dim_owned_by_default: false,
-            ui: UiOverrides::default(),
         }
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct RawUi {
-    hide_owned: Option<bool>,
-    dim_owned: Option<bool>,
-    schedule_window: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct RawConfig {
-    plex_db_local: Option<String>,
     cache_dir: Option<String>,
     plex_db_source: Option<String>,
     library_roots: Option<Vec<String>>,
     ffprobe_cmd: Option<String>,
     omdb_api_key: Option<String>,
-    poster_cache_max_files: Option<usize>,
-    hide_owned_by_default: Option<bool>,
-    dim_owned_by_default: Option<bool>,
-    ui: Option<RawUi>,
 }
 
 pub fn load_config() -> AppConfig {
@@ -69,9 +43,6 @@ pub fn load_config() -> AppConfig {
     match fs::read_to_string(&cfg_path) {
         Ok(raw) => match serde_json::from_str::<RawConfig>(&raw) {
             Ok(parsed) => {
-                if parsed.plex_db_local.is_some() {
-                    cfg.plex_db_local = parsed.plex_db_local;
-                }
                 if parsed.cache_dir.is_some() {
                     cfg.cache_dir = parsed.cache_dir;
                 }
@@ -84,22 +55,8 @@ pub fn load_config() -> AppConfig {
                 if parsed.omdb_api_key.is_some() {
                     cfg.omdb_api_key = parsed.omdb_api_key;
                 }
-                if parsed.poster_cache_max_files.is_some() {
-                    cfg.poster_cache_max_files = parsed.poster_cache_max_files;
-                }
                 if let Some(list) = parsed.library_roots {
                     cfg.library_roots = list;
-                }
-                if let Some(flag) = parsed.hide_owned_by_default {
-                    cfg.hide_owned_by_default = flag;
-                }
-                if let Some(flag) = parsed.dim_owned_by_default {
-                    cfg.dim_owned_by_default = flag;
-                }
-                if let Some(ui) = parsed.ui {
-                    cfg.ui.hide_owned = ui.hide_owned;
-                    cfg.ui.dim_owned = ui.dim_owned;
-                    cfg.ui.schedule_window = ui.schedule_window;
                 }
                 info!("Loaded config from {}", cfg_path.display());
             }
@@ -113,4 +70,8 @@ pub fn load_config() -> AppConfig {
     }
 
     cfg
+}
+
+pub fn local_db_path() -> PathBuf {
+    PathBuf::from(LOCAL_DB_DIR).join(LOCAL_DB_FILE)
 }
