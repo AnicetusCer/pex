@@ -12,9 +12,26 @@ use tracing::warn;
 use crate::app::types::OwnedMsg;
 use crate::config::load_config;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+const OWNED_MANIFEST_VERSION: u32 = 1;
+
+fn default_manifest_version() -> u32 {
+    0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct OwnedManifest {
+    #[serde(default = "default_manifest_version")]
+    version: u32,
     dirs: HashMap<String, DirSnapshot>,
+}
+
+impl Default for OwnedManifest {
+    fn default() -> Self {
+        Self {
+            version: OWNED_MANIFEST_VERSION,
+            dirs: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,13 +50,35 @@ struct FileSnapshot {
     title_hint: Option<String>,
     #[serde(default)]
     path: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 impl OwnedManifest {
     fn load() -> Self {
         let path = Self::path();
         match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Ok(bytes) => match serde_json::from_slice::<Self>(&bytes) {
+                Ok(mut manifest) => {
+                    if manifest.needs_upgrade() {
+                        warn!(
+                            "Owned manifest {} is outdated; forcing full rescan.",
+                            path.display()
+                        );
+                        Self::default()
+                    } else {
+                        manifest.version = OWNED_MANIFEST_VERSION;
+                        manifest
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to parse owned manifest {}: {err}. Forcing rebuild.",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
             Err(err) if err.kind() == ErrorKind::NotFound => Self::default(),
             Err(err) => {
                 warn!("Failed to read owned manifest {}: {err}", path.display());
@@ -49,13 +88,15 @@ impl OwnedManifest {
     }
 
     fn save(&self) -> io::Result<()> {
+        let mut manifest = self.clone();
+        manifest.version = OWNED_MANIFEST_VERSION;
         let path = Self::path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let data =
-            serde_json::to_vec_pretty(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        let data = serde_json::to_vec_pretty(&manifest)
+            .map_err(|err| io::Error::new(ErrorKind::Other, err))?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, path)
     }
@@ -77,6 +118,20 @@ impl OwnedManifest {
 
     fn get(&self, dir: &str) -> Option<&DirSnapshot> {
         self.dirs.get(dir)
+    }
+
+    fn needs_upgrade(&self) -> bool {
+        if self.version < OWNED_MANIFEST_VERSION {
+            return true;
+        }
+        for snapshot in self.dirs.values() {
+            for file in &snapshot.files {
+                if file.path.trim().is_empty() || file.size.is_none() {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn rebuild_hd_flags(
@@ -107,6 +162,16 @@ impl OwnedManifest {
                 }
 
                 let path = Path::new(&file.path);
+                let (modified, size) = crate::app::utils::file_modified_and_size(path);
+                if file.modified != modified {
+                    file.modified = modified;
+                    changed = true;
+                }
+                if file.size != size {
+                    file.size = size;
+                    changed = true;
+                }
+
                 if let Some(result) = crate::app::utils::is_path_hd(path) {
                     if result != file.hd {
                         file.hd = result;
@@ -149,6 +214,74 @@ fn reuse_directory(
     }
 }
 
+#[derive(Clone, Copy)]
+enum EntryKind {
+    Directory,
+    VideoFile,
+}
+
+struct DirEntryInfo {
+    path: PathBuf,
+    modified: Option<u64>,
+    size: Option<u64>,
+    kind: EntryKind,
+}
+
+fn snapshot_matches(snapshot: &DirSnapshot, entries: &[DirEntryInfo]) -> bool {
+    use std::collections::{HashMap, HashSet};
+
+    let mut actual_dirs: HashSet<String> = HashSet::new();
+    let mut actual_files: HashMap<String, (Option<u64>, Option<u64>)> = HashMap::new();
+
+    for entry in entries {
+        match entry.kind {
+            EntryKind::Directory => {
+                actual_dirs.insert(entry.path.to_string_lossy().to_string());
+            }
+            EntryKind::VideoFile => {
+                actual_files.insert(
+                    entry.path.to_string_lossy().to_string(),
+                    (entry.modified, entry.size),
+                );
+            }
+        }
+    }
+
+    if snapshot.subdirs.len() != actual_dirs.len() {
+        return false;
+    }
+    for subdir in &snapshot.subdirs {
+        if !actual_dirs.remove(subdir) {
+            return false;
+        }
+    }
+    if !actual_dirs.is_empty() {
+        return false;
+    }
+
+    if snapshot.files.len() != actual_files.len() {
+        return false;
+    }
+    for file in &snapshot.files {
+        match actual_files.remove(&file.path) {
+            None => return false,
+            Some((modified, size)) => {
+                if file.modified != modified {
+                    return false;
+                }
+                match (file.size, size) {
+                    (Some(expected), Some(actual)) if expected == actual => {}
+                    (Some(_), Some(_)) => return false,
+                    (Some(_), None) | (None, Some(_)) => return false,
+                    (None, None) => {}
+                }
+            }
+        }
+    }
+
+    actual_files.is_empty()
+}
+
 fn scan_directory(
     dir: &Path,
     manifest: &OwnedManifest,
@@ -161,28 +294,6 @@ fn scan_directory(
     let dir_str = dir.to_string_lossy().to_string();
     let mtime = path_modified_seconds(dir);
 
-    if let Some(snapshot) = manifest.get(&dir_str) {
-        if snapshot.mtime == mtime {
-            let _ = tx.send(OwnedMsg::Info(format!(
-                "Stage 3/4 - Owned scan: reusing snapshot for {}",
-                dir.display()
-            )));
-            reuse_directory(&dir_str, manifest, new_manifest, owned, hd_keys, owned_dates);
-            return;
-        }
-    }
-
-    let _ = tx.send(OwnedMsg::Info(format!(
-        "Stage 3/4 - Owned scan: walking {}",
-        dir.display()
-    )));
-
-    let mut snapshot = DirSnapshot {
-        mtime,
-        files: Vec::new(),
-        subdirs: Vec::new(),
-    };
-
     let read_dir = match fs::read_dir(dir) {
         Ok(iter) => iter,
         Err(err) => {
@@ -191,6 +302,7 @@ fn scan_directory(
         }
     };
 
+    let mut entries: Vec<DirEntryInfo> = Vec::new();
     for entry in read_dir {
         let entry = match entry {
             Ok(e) => e,
@@ -213,9 +325,12 @@ fn scan_directory(
         };
 
         if file_type.is_dir() {
-            let subdir_str = path.to_string_lossy().to_string();
-            snapshot.subdirs.push(subdir_str.clone());
-            scan_directory(&path, manifest, new_manifest, owned, hd_keys, owned_dates, tx);
+            entries.push(DirEntryInfo {
+                path,
+                modified: None,
+                size: None,
+                kind: EntryKind::Directory,
+            });
             continue;
         }
 
@@ -223,24 +338,89 @@ fn scan_directory(
             continue;
         }
 
-        let file_mtime = path_modified_seconds(&path);
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let year = extract_year_from_filename(stem);
-        let title = clean_owned_title(stem, year);
-        let key = crate::app::PexApp::make_owned_key(&title, year);
-        let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
-        let file_entry = FileSnapshot {
-            key,
-            hd,
-            modified: file_mtime,
-            title_hint: Some(title.clone()),
-            path: path.to_string_lossy().into_owned(),
-        };
-        accumulate_owned_entry(&file_entry, owned, hd_keys, owned_dates);
-        snapshot.files.push(file_entry);
+        let (modified, size) = crate::app::utils::file_modified_and_size(&path);
+        entries.push(DirEntryInfo {
+            path,
+            modified,
+            size,
+            kind: EntryKind::VideoFile,
+        });
+    }
+
+    if let Some(snapshot) = manifest.get(&dir_str) {
+        if snapshot.mtime == mtime && snapshot_matches(snapshot, &entries) {
+            let _ = tx.send(OwnedMsg::Info(format!(
+                "Stage 3/4 - Owned scan: reusing snapshot for {}",
+                dir.display()
+            )));
+            reuse_directory(
+                &dir_str,
+                manifest,
+                new_manifest,
+                owned,
+                hd_keys,
+                owned_dates,
+            );
+            return;
+        }
+    }
+
+    let _ = tx.send(OwnedMsg::Info(format!(
+        "Stage 3/4 - Owned scan: walking {}",
+        dir.display()
+    )));
+
+    let mut snapshot = DirSnapshot {
+        mtime,
+        files: Vec::new(),
+        subdirs: Vec::new(),
+    };
+
+    for entry in entries {
+        match entry {
+            DirEntryInfo {
+                kind: EntryKind::Directory,
+                path,
+                ..
+            } => {
+                let subdir_str = path.to_string_lossy().to_string();
+                snapshot.subdirs.push(subdir_str.clone());
+                scan_directory(
+                    &path,
+                    manifest,
+                    new_manifest,
+                    owned,
+                    hd_keys,
+                    owned_dates,
+                    tx,
+                );
+            }
+            DirEntryInfo {
+                kind: EntryKind::VideoFile,
+                path,
+                modified,
+                size,
+            } => {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                let year = extract_year_from_filename(stem);
+                let title = clean_owned_title(stem, year);
+                let key = crate::app::PexApp::make_owned_key(&title, year);
+                let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
+                let file_entry = FileSnapshot {
+                    key,
+                    hd,
+                    modified,
+                    title_hint: Some(title.clone()),
+                    path: path.to_string_lossy().into_owned(),
+                    size,
+                };
+                accumulate_owned_entry(&file_entry, owned, hd_keys, owned_dates);
+                snapshot.files.push(file_entry);
+            }
+        }
     }
 
     new_manifest.insert_snapshot(dir_str, snapshot);
@@ -403,10 +583,7 @@ mod tests {
         assert_eq!(cleaned, "Harry Potter and the Goblet of Fire");
 
         let key_file = PexApp::make_owned_key(&cleaned, Some(2005));
-        let key_row = PexApp::make_owned_key(
-            "Harry Potter and the Goblet of Fire",
-            Some(2005),
-        );
+        let key_row = PexApp::make_owned_key("Harry Potter and the Goblet of Fire", Some(2005));
         assert_eq!(key_file, key_row);
     }
 
@@ -520,9 +697,8 @@ impl crate::app::PexApp {
                 Ok((owned, hd_keys, owned_dates, changed)) => {
                     if changed {
                         if let Err(save_err) = manifest.save() {
-                            let _ = tx.send(Error(format!(
-                                "Failed to save owned manifest: {save_err}"
-                            )));
+                            let _ = tx
+                                .send(Error(format!("Failed to save owned manifest: {save_err}")));
                             return;
                         }
                     }
@@ -555,9 +731,7 @@ impl crate::app::PexApp {
         for row in &mut self.rows {
             let key = row.owned_key.as_str();
             row.owned = keys.contains(key);
-            row.owned_modified = modified
-                .and_then(|m| m.get(key))
-                .and_then(|v| *v);
+            row.owned_modified = modified.and_then(|m| m.get(key)).and_then(|v| *v);
         }
     }
 
@@ -578,9 +752,9 @@ impl crate::app::PexApp {
 
             let manifest = OwnedManifest::load();
             let mut new_manifest = OwnedManifest::default();
-        let mut owned: HashSet<String> = HashSet::new();
-        let mut hd_keys: HashSet<String> = HashSet::new();
-        let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
+            let mut owned: HashSet<String> = HashSet::new();
+            let mut hd_keys: HashSet<String> = HashSet::new();
+            let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
 
             for root in &library_roots {
                 if !root.exists() {
@@ -664,9 +838,7 @@ impl crate::app::PexApp {
                     self.apply_owned_flags();
                     self.mark_dirty();
                     self.owned_scan_in_progress = false;
-                    self.record_owned_message(format!(
-                        "Owned scan complete ({count} titles)."
-                    ));
+                    self.record_owned_message(format!("Owned scan complete ({count} titles)."));
                     if let Some(msg) = self.stage4_complete_message.clone() {
                         self.set_status(msg);
                     } else {
@@ -680,4 +852,3 @@ impl crate::app::PexApp {
         }
     }
 }
-

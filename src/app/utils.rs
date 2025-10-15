@@ -273,6 +273,8 @@ pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bo
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct ProbeEntry {
     mtime: Option<u64>,
+    #[serde(default)]
+    size: Option<u64>,
     width: u32,
     height: u32,
 }
@@ -310,7 +312,8 @@ impl ProbeCache {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp");
-        let data = serde_json::to_vec(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        let data =
+            serde_json::to_vec_pretty(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, path)?;
         Ok(())
@@ -320,9 +323,11 @@ impl ProbeCache {
         Some(path.to_str()?.to_owned())
     }
 
-    fn lookup(&self, key: &str, mtime: Option<u64>) -> Option<ProbeEntry> {
+    fn lookup(&self, key: &str, mtime: Option<u64>, size: Option<u64>) -> Option<ProbeEntry> {
         self.entries.get(key).and_then(|entry| {
-            if entry.mtime == mtime {
+            let mtime_matches = entry.mtime == mtime;
+            let size_matches = entry.size == size;
+            if mtime_matches && size_matches {
                 Some(*entry)
             } else {
                 None
@@ -339,8 +344,8 @@ impl ProbeCache {
         let mut stale_keys: Vec<String> = Vec::new();
         for (key, entry) in self.entries.iter() {
             let path = Path::new(key);
-            let current = file_modified_seconds(path);
-            if current != entry.mtime {
+            let (current_mtime, current_size) = file_modified_and_size(path);
+            if current_mtime != entry.mtime || current_size != entry.size {
                 stale_keys.push(key.clone());
             }
         }
@@ -357,11 +362,19 @@ impl ProbeCache {
     }
 }
 
-fn file_modified_seconds(path: &Path) -> Option<u64> {
-    let meta = fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let duration = modified.duration_since(UNIX_EPOCH).ok()?;
-    Some(duration.as_secs())
+pub fn file_modified_and_size(path: &Path) -> (Option<u64>, Option<u64>) {
+    match fs::metadata(path) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|dur| dur.as_secs());
+            let size = Some(meta.len());
+            (modified, size)
+        }
+        Err(_) => (None, None),
+    }
 }
 
 fn ffprobe_cmd() -> OsString {
@@ -420,20 +433,31 @@ pub(crate) fn ffprobe_available() -> bool {
     }
 }
 
-fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
+fn ffprobe_cached_resolution(path: &Path) -> Option<(u32, u32)> {
     let cache_key = ProbeCache::key_for(path);
-    let mtime = file_modified_seconds(path);
+    let (mtime, size) = file_modified_and_size(path);
 
     if let Some(ref key) = cache_key {
         if let Some(hit) = FFPROBE_CACHE
             .lock()
             .expect("ffprobe cache mutex poisoned")
-            .lookup(key, mtime)
+            .lookup(key, mtime, size)
         {
             debug!("ffprobe cache hit for {key}");
             return Some((hit.width, hit.height));
         }
     }
+
+    None
+}
+
+fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
+    if let Some(hit) = ffprobe_cached_resolution(path) {
+        return Some(hit);
+    }
+
+    let cache_key = ProbeCache::key_for(path);
+    let (mtime, size) = file_modified_and_size(path);
 
     if !ffprobe_available() {
         return None;
@@ -470,6 +494,7 @@ fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
     let height: u32 = h.trim().parse().ok()?;
     let entry = ProbeEntry {
         mtime,
+        size,
         width,
         height,
     };
@@ -493,12 +518,6 @@ fn ffprobe_resolution(path: &Path) -> Option<(u32, u32)> {
 /// Heuristic for "is this file HD?" based on filename/path only (>=720p).
 /// Returns Some(true/false) if we can tell, or None if unknown.
 pub fn is_path_hd(p: &Path) -> Option<bool> {
-    if let Some((width, height)) = ffprobe_resolution(p) {
-        if width > 0 && height > 0 {
-            return Some(width >= 1_280 || height >= 720);
-        }
-    }
-
     // Look at filename *and* parent dir for quality hints.
     let stem = p
         .file_stem()
@@ -512,6 +531,21 @@ pub fn is_path_hd(p: &Path) -> Option<bool> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let hay = format!("{stem} {parent}");
+
+    // Strong SD indicators first — no probing needed.
+    for n in [
+        "480p", "576p", "sd ", "vhs", "svcd", "xvid", "divx", "dvdrip",
+    ] {
+        if hay.contains(n) {
+            return Some(false);
+        }
+    }
+
+    if let Some((width, height)) = ffprobe_cached_resolution(p) {
+        if width > 0 && height > 0 {
+            return Some(width >= 1_280 || height >= 720);
+        }
+    }
 
     // Positive HD/UHD signals
     for n in [
@@ -534,13 +568,12 @@ pub fn is_path_hd(p: &Path) -> Option<bool> {
             return Some(true);
         }
     }
-    // Strong SD indicators
-    for n in [
-        "480p", "576p", "sd ", "vhs", "svcd", "xvid", "divx", "dvdrip",
-    ] {
-        if hay.contains(n) {
-            return Some(false);
+
+    if let Some((width, height)) = ffprobe_resolution(p) {
+        if width > 0 && height > 0 {
+            return Some(width >= 1_280 || height >= 720);
         }
     }
+
     None
 }

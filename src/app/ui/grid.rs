@@ -190,7 +190,6 @@ impl crate::app::PexApp {
                                     }
                                 },
                             );
-
                         }
 
                         ui.end_row();

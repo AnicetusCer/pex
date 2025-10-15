@@ -142,13 +142,11 @@ flow:
 config:
   file: config.json
   keys:
-    - plex_db_local: "Path to local plex EPG sqlite"
-    - plex_db_source: "Optional source DB to daily copy from"
+    - plex_db_source: "Optional source DB copied into db/plex_epg.db once per day"
     - cache_dir: "Poster/prefs cache root"
     - library_roots: "Dirs to scan for 'owned' titles"
     - ffprobe_cmd: "Optional over-ride for ffprobe location"
     - omdb_api_key: "Optional OMDb key for IMDb ratings"
-    - poster_cache_max_files: "Optional soft limit for poster cache"
   persistence:
     prefs_path: "<cache_dir>/ui_prefs.txt"
     prefs_fields:

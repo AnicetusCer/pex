@@ -1,7 +1,8 @@
 /target
 .pex_cache
 /config.json
-plex_epg.db
+db/*
+!db/.gitkeep
 Cargo.lock
 *.Zone.Identifier
 make_portable/dist/

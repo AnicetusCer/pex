@@ -1,16 +1,16 @@
 // src/app/prep.rs
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io};
 use tracing::{info, warn};
 
-
 use rusqlite::{Connection, OpenFlags};
 
 use crate::app::cache::url_to_cache_key;
 use crate::app::{PrepItem, PrepMsg}; // <- use the re-export from app::types
-use crate::config::load_config;
+use crate::config::{load_config, local_db_path};
 use eframe::egui as eg; // <- gives us eg::Context
 
 // --- local SQL (newer plex uses user_thumb_url; older uses thumb_url) ---
@@ -100,11 +100,11 @@ fn parse_channel_meta(extra: &str) -> ChannelMeta {
 
 const MIN_COPY_INTERVAL_HOURS: u64 = 24;
 
-fn last_sync_marker_path(local_db: &str) -> String {
-    format!("{}.last_sync", local_db)
+fn last_sync_marker_path(local_db: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.last_sync", local_db.display()))
 }
 
-fn fresh_enough(marker_path: &str) -> io::Result<bool> {
+fn fresh_enough(marker_path: &Path) -> io::Result<bool> {
     fs::metadata(marker_path).map_or(Ok(false), |meta| {
         let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let age = SystemTime::now().duration_since(m).unwrap_or_default();
@@ -112,11 +112,11 @@ fn fresh_enough(marker_path: &str) -> io::Result<bool> {
     })
 }
 
-fn touch_last_sync(marker_path: &str) -> io::Result<()> {
+fn touch_last_sync(marker_path: &Path) -> io::Result<()> {
     fs::write(marker_path, b"ok")
 }
 
-fn needs_db_update_daily(src: &str, dst: &str) -> io::Result<bool> {
+fn needs_db_update_daily(src: &Path, dst: &Path) -> io::Result<bool> {
     if fresh_enough(&last_sync_marker_path(dst))? {
         return Ok(false);
     }
@@ -136,14 +136,14 @@ fn needs_db_update_daily(src: &str, dst: &str) -> io::Result<bool> {
     Ok(src_m > dst_m)
 }
 
-fn copy_with_progress<F>(src: &str, dst: &str, mut on_prog: F) -> io::Result<()>
+fn copy_with_progress<F>(src: &Path, dst: &Path, mut on_prog: F) -> io::Result<()>
 where
     F: FnMut(u64, u64, f32, f64),
 {
     let mut in_f = fs::File::open(src)?;
     let total = in_f.metadata()?.len();
 
-    let tmp_path = format!("{}.tmp", dst);
+    let tmp_path = PathBuf::from(format!("{}.tmp", dst.display()));
     let mut out_f = fs::File::create(&tmp_path)?;
 
     let mut buf = vec![0u8; 8 * 1024 * 1024];
@@ -198,7 +198,9 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         };
 
         if DIAG_FAKE_STARTUP {
-            send(PrepMsg::Info("DIAG: synthesizing small poster list…".into()));
+            send(PrepMsg::Info(
+                "DIAG: synthesizing small poster list…".into(),
+            ));
             let fake: Vec<PrepItem> = vec![
                 PrepItem {
                     title: "Blade Runner".into(),
@@ -252,41 +254,50 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         // Resolve DB paths from config
         let cfg = load_config();
-        let db_path = match cfg.plex_db_local.clone() {
-            Some(p) => p,
-            None => {
-                send(PrepMsg::Error("No plex_db_local set in config.json".into()));
+        let db_path = local_db_path();
+        if let Some(parent) = db_path.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                send(PrepMsg::Error(format!(
+                    "Failed to create database directory {}: {err}",
+                    parent.display()
+                )));
                 return;
             }
-        };
+        }
 
         // Tell both the UI and the terminal which DB we're using
         let msg = format!(
             "Stage 2/4 – Opening Plex EPG database\n{}",
-            db_path
+            db_path.display()
         );
         send(PrepMsg::Info(msg.clone()));
         info!("prep: {msg}");
 
         // Optional daily copy from source to local
         if let Some(src_path) = cfg.plex_db_source.as_deref() {
-            match needs_db_update_daily(src_path, &db_path) {
+            let src = Path::new(src_path);
+            match needs_db_update_daily(src, &db_path) {
                 Ok(true) => {
                     send(PrepMsg::Info("Stage 2/4 – Copying Plex DB from source (enables offline start-ups). First run may take a while.".into()));
                     let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_with_progress(src_path, &db_path, |_c, _t, _p, _mbps| {});
+                    let _ = copy_with_progress(src, &db_path, |_c, _t, _p, _mbps| {});
                     let _ = touch_last_sync(&marker);
                 }
-                Ok(false) => send(PrepMsg::Info("Stage 2/4 – Local Plex DB already fresh; skipping copy.".into())),
-                Err(e) => send(PrepMsg::Info(format!("Stage 2/4 – Freshness check failed (continuing anyway): {e}"))),
+                Ok(false) => send(PrepMsg::Info(
+                    "Stage 2/4 – Local Plex DB already fresh; skipping copy.".into(),
+                )),
+                Err(e) => send(PrepMsg::Info(format!(
+                    "Stage 2/4 – Freshness check failed (continuing anyway): {e}"
+                ))),
             }
         } else {
-            send(PrepMsg::Info("Stage 2/4 – Using existing local EPG DB (no source copy configured).".into()));
+            send(PrepMsg::Info(
+                "Stage 2/4 – Using existing local EPG DB (no source copy configured).".into(),
+            ));
         }
 
         // Open DB read-only
-        let flags_common =
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let flags_common = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
         #[cfg(not(windows))]
         let flags = flags_common | OpenFlags::SQLITE_OPEN_URI;
@@ -303,7 +314,6 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         let _ = conn.busy_timeout(Duration::from_secs(10));
         let _ = conn.pragma_update(None, "temp_store", "MEMORY");
 
-
         let have_meta = table_exists(&conn, "metadata_items");
         let have_media = table_exists(&conn, "media_items");
         info!("prep: table check metadata_items={have_meta}, media_items={have_media}");
@@ -311,7 +321,9 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             "Tables present → metadata_items: {have_meta}, media_items: {have_media}"
         )));
         if !(have_meta && have_media) {
-            send(PrepMsg::Error("required tables missing (metadata_items, media_items)".into()));
+            send(PrepMsg::Error(
+                "required tables missing (metadata_items, media_items)".into(),
+            ));
             return;
         }
 
@@ -344,7 +356,9 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                     match conn.prepare(SQL_POSTERS_THUMB) {
                         Ok(s) => s,
                         Err(e2) => {
-                            send(PrepMsg::Error(format!("prepare failed: {e1} / fallback: {e2}")));
+                            send(PrepMsg::Error(format!(
+                                "prepare failed: {e1} / fallback: {e2}"
+                            )));
                             return;
                         }
                     }
@@ -356,7 +370,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         };
 
         // Harvest list — NO network here
-        send(PrepMsg::Info("Stage 2/4 - Parsing Plex guide data (collecting posters and metadata for the grid).".into()));
+        send(PrepMsg::Info(
+            "Stage 2/4 - Parsing Plex guide data (collecting posters and metadata for the grid)."
+                .into(),
+        ));
         let mut q = match st.query([1_000_000_i64]) {
             Ok(r) => r,
             Err(e) => {
@@ -392,10 +409,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                 let tt = t.trim();
                 if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
                     let key = url_to_cache_key(&u);
-                    let channel_meta = extra
-                        .as_deref()
-                        .map(parse_channel_meta)
-                        .unwrap_or_default();
+                    let channel_meta = extra.as_deref().map(parse_channel_meta).unwrap_or_default();
 
                     list.push(crate::app::types::PrepItem {
                         title: tt.to_owned(),
@@ -427,7 +441,9 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         info!("prep: final poster rows after dedupe = {}", list.len());
         if list.is_empty() {
             warn!("prep: no posters found — likely DB path/columns mismatch");
-            send(PrepMsg::Info("No posters found — check DB path/type in config.json".into()));
+            send(PrepMsg::Info(
+                "No posters found — check DB path/type in config.json".into(),
+            ));
         }
 
         send(PrepMsg::Done(list));
@@ -495,10 +511,8 @@ impl crate::app::PexApp {
                                     .clone()
                                     .or_else(|| crate::app::utils::host_from_url(&item.thumb_url));
 
-                                let channel_title_original = item
-                                    .channel_title
-                                    .clone()
-                                    .filter(|s| !s.trim().is_empty());
+                                let channel_title_original =
+                                    item.channel_title.clone().filter(|s| !s.trim().is_empty());
 
                                 let normalized_title = channel_title_original
                                     .as_ref()
@@ -522,8 +536,7 @@ impl crate::app::PexApp {
                                     .as_deref()
                                     .map(crate::app::utils::parse_genres)
                                     .unwrap_or_default();
-                                let tags_joined =
-                                    (!genres.is_empty()).then(|| genres.join("|"));
+                                let tags_joined = (!genres.is_empty()).then(|| genres.join("|"));
                                 let broadcast_hd = crate::app::utils::infer_broadcast_hd(
                                     tags_joined.as_deref(),
                                     channel_display.as_deref(),
@@ -539,11 +552,11 @@ impl crate::app::PexApp {
                                     }
                                 });
 
-                        crate::app::PosterRow {
-                            title: item.title,
-                            url: item.thumb_url,
-                            key: small_k,
-                            airing,
+                                crate::app::PosterRow {
+                                    title: item.title,
+                                    url: item.thumb_url,
+                                    key: small_k,
+                                    airing,
                                     year: item.year,
                                     channel: channel_display,
                                     channel_raw,
@@ -562,8 +575,8 @@ impl crate::app::PexApp {
                                     owned_key,
                                     broadcast_hd,
                                 }
-                    })
-                    .collect();
+                            })
+                            .collect();
 
                         let mut seen_icons = std::collections::HashSet::new();
                         let icon_urls: Vec<String> = self
@@ -645,13 +658,3 @@ impl crate::app::PexApp {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-

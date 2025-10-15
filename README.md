@@ -1,101 +1,218 @@
 # Pex – Plex EPG Explorer
 
-Pex is a fast, desktop viewer for the Plex Electronic Program Guide (EPG). It scans the Plex TV database, builds a poster wall, highlights titles you already own, and lets you explore schedules with rich detail overlays, channel badges, and on-demand IMDb lookups.
+Pex is a desktop viewer for the Plex Electronic Program Guide (EPG). It reads
+Plex’s DVR SQLite database, assembles a poster wall of upcoming airings,
+highlights the titles you already own, and layers on rich metadata such as
+channel badges, HD/SD hints, and on-demand IMDb ratings.
 
 ---
 
-## Feature Highlights
-
-- 🚀 **Snappy startup** – pre-caches channel icons and poster thumbnails, loading them lazily when needed.
-- 🗂️ **Smart filtering** – day range, full-text search, HD-only toggle, channel & genre include lists, plus owned/HD badges.
-- 📚 **Owned library awareness** – incremental rescans detect library changes, show “Owned file recorded” dates, and keep SD-vs-HD indicators accurate.
-- 🎨 **Rich details panel** – channel badges, long-title scroller with clipboard button, on-demand IMDb rating fetch, and formatted descriptions.
-- 🧰 **Advanced controls** – gentle refresh buttons for poster, ffprobe, and owned caches, plus the original hard-reset options when you truly need a clean slate.
-- 🪟 **Custom app icon & slick UI** – ships with the included `PEX.ico` and an egui-based layout tuned for keyboard and mouse navigation.
+## Table of Contents
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Getting Started](#getting-started)
+- [Configuration Reference](#configuration-reference)
+- [Data & Cache Locations](#data--cache-locations)
+- [Typical Workflows](#typical-workflows)
+- [Troubleshooting & Diagnostics](#troubleshooting--diagnostics)
+- [Development Notes](#development-notes)
+- [Legal](#legal)
 
 ---
 
-## Quick Start
+## Overview
 
-1. **Install prerequisites**
-   - Rust toolchain (1.74+) and Cargo
-   - `ffprobe` from the FFmpeg suite (add it to your `PATH` or set `ffprobe_cmd` in the config)
-   - Plex running with DVR/EPG data so the `plex_epg.db` SQLite file is available
+Highlights:
 
-2. **Clone and configure**
+- 🚀 **Fast start-up** – poster and channel artwork are cached and uploaded on
+demand, keeping the UI responsive even on large guides.
+- 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
+and genre selectors, plus multiple sort orders.
+- 📚 **Owned library awareness** – incremental scans of your movie folders feed
+owned/HD badges and “recorded on” timestamps directly into the grid.
+- 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
+badges, optional IMDb ratings, and formatted descriptions.
+- 🧰 **Operator controls** – quick refresh/clear actions for poster, ffprobe,
+and owned caches as well as worker tuning knobs.
+
+Pex runs on Windows, macOS, and Linux (including WSL) using
+[egui/eframe](https://github.com/emilk/egui) for the native UI.
+
+---
+
+## Prerequisites
+
+### Plex data access
+- Plex DVR/EPG must be enabled so that `tv.plex.providers.epg.cloud-*.db` (and
+the accompanying WAL/SHM files) exist on disk.
+- Common locations:
+  - **Windows:** `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases`
+  - **Linux (service install):** `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases`
+  - **Docker:** bind the Plex config volume; copy the database out via the host.
+- Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or
+point `plex_db_source` at the live Plex database so Pex pulls in a fresh copy
+once per day.
+
+### Toolchain
+- Rust toolchain **1.74 or newer** (`rustup toolchain install stable`)
+- Cargo (bundled with Rust)
+- `ffprobe` from FFmpeg on your PATH (or set `ffprobe_cmd` in the config)
+- Git (to clone the repository)
+
+### External services
+- **OMDb API key** (optional, but recommended). Supplying a personal key avoids
+the heavy throttling on the public demo key when fetching IMDb ratings.
+
+---
+
+## Getting Started
+
+1. **Clone and bootstrap**
    ```bash
-   git clone https://github.com/your-account/pex.git
+   git clone https://github.com/AnicetusCer/pex.git
    cd pex
    cp config.example.json config.json
    ```
-   Edit `config.json` with your paths and library directories.
 
-3. **Run the app**
+2. **Populate the database folder**
+   - Copy your Plex EPG SQLite file into `db/plex_epg.db`, *or*
+   - Set `plex_db_source` in `config.json` to the path of Plex’s live DB so Pex
+     can maintain `db/plex_epg.db` automatically.
+
+3. **Edit `config.json`** (see the [Configuration Reference](#configuration-reference)).
+
+4. **Build and run the app**
    ```bash
    cargo run --release
    ```
-   The first launch primes the caches. Subsequent runs reuse the cached posters and owned-manifest data for a much faster startup.
+   The first launch will
+   - copy the Plex database if `plex_db_source` is set,
+   - scan your owned library roots,
+   - warm the ffprobe cache, and
+   - start poster prefetching.
+
+   Subsequent runs reuse the cached data, so they reach the UI much faster.
 
 ---
 
-## Configuration
+## Configuration Reference
 
-Pex reads `config.json` from the project root. The most important keys are:
+Pex reads `config.json` from the repository root. All keys are optional unless
+otherwise stated; absent keys fall back to reasonable defaults.
 
-| Key | Description |
-| --- | --- |
-| `plex_db_local` | Path to the Plex EPG SQLite file (e.g., `plex_epg.db`). |
-| `plex_db_source` | Optional upstream DB path; if set, Pex copies it locally once per day. |
-| `library_roots` | Array of library directories to scan for owned titles. |
-| `cache_dir` | Root folder for posters, icons, manifests, and preferences. |
-| `ffprobe_cmd` | Custom path to `ffprobe` (useful on WSL). |
-| `omdb_api_key` | Personal OMDb API key. If omitted, Pex falls back to the demo key. |
-| `poster_cache_max_files` | Optional limit for poster thumbnails (defaults to 1500). |
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `library_roots` | array of strings | `[]` | Absolute paths scanned for owned movie files. Multiple paths are supported. |
+| `plex_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
+| `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned-manifest data, UI prefs, and ffprobe cache. |
+| `ffprobe_cmd` | string or `null` | `ffprobe` | Override the ffprobe executable (useful on Windows/WSL when ffprobe is not on PATH). |
+| `omdb_api_key` | string or `null` | demo key | Personal OMDb API key for IMDb ratings. Leave blank to use the public key (heavy rate limiting). |
+| `log_level` | string | `info` | Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
 
-See [`config.example.json`](./config.example.json) for a complete template with comments.
+Example configuration:
 
----
+```json
+{
+  "library_roots": [
+    "D:/Libraries/Movies",
+    "\\\
+as\Archive\Films"
+  ],
+  "plex_db_source": "\\\
+as\PlexConfig\Databases\\tv.plex.providers.epg.cloud.db",
+  "cache_dir": ".pex_cache",
+  "ffprobe_cmd": "C:/Tools/ffmpeg/bin/ffprobe.exe",
+  "omdb_api_key": "YOUR-OMDB-KEY",
+  "log_level": "info"
+}
+```
 
-## UI Overview
-
-- **Top bar controls** – choose day ranges, search titles, toggle HD-only, open channel/genre filters, change sorting, tweak poster size, and manage owned highlighting.
-- **Poster grid** – grouped by day, showing title/year, humanised channel with HD badge, and airing time in UTC. Owned titles appear dimmed or hidden depending on your toggles.
-- **Detail panel** – expands on selection to show the poster, channel logo, long-title scroller, optional IMDb rating button, owned status (with recorded date), description, and genre list.
-- **Advanced panel** – exposes worker tuning, cache refresh/clear buttons, and UI preference backup/restore utilities.
-
----
-
-## Advanced Controls
-
-Navigate to **Advanced…** (top bar) for:
-
-- Poster cache refresh/prune or full clear
-- Owned library refresh (non-destructive) or full reset
-- ffprobe cache refresh or clear
-- UI preference backups (`.pex_cache/ui_prefs_backup_*.txt`) and one-click restore
-- Status readouts for important config paths (Plex DB location, OMDb key state)
+> Tip: on Linux paths use forward slashes; on Windows double any backslashes in
+JSON strings or switch to forward slashes.
 
 ---
 
-## Tips & Troubleshooting
+## Data & Cache Locations
 
-- **Slow first load?** The initial run downloads channel icons and poster thumbnails. Subsequent launches reuse the cache.
-- **Missing posters?** Ensure `poster_cache_max_files` is large enough and that the HTTP requests aren’t blocked by a firewall.
-- **Owned scan stuck?** Check the Advanced view for log messages; you can refresh the scan without clearing metadata.
-- **IMDb rate limiting?** Supply your own `omdb_api_key` to avoid demo-key throttling.
+- `db/plex_epg.db` — working copy of the Plex EPG database (plus WAL/SHM files
+  created on demand).
+- `.pex_cache/` — posters, channel icons, owned-manifest, ffprobe cache, and UI
+  preference files. Poster images older than 14 days are pruned automatically
+  on startup.
+- `db/` and `.pex_cache/` are created automatically; you can relocate caches by
+  setting `cache_dir` in the config file.
+
+---
+
+## Typical Workflows
+
+### First run (cold start)
+1. Copy or configure access to the Plex DB.
+2. Populate `config.json` with your library roots and ffprobe/OMDb settings.
+3. Launch with `cargo run --release`.
+4. Let the initial owned scan and poster prefetch finish (progress appears in
+the status bar). Large libraries may take several minutes.
+
+### Daily usage
+- Launch the app; the UI resumes where you left off.
+- If `plex_db_source` is set, Pex checks once per day whether the Plex DB needs
+  copying.
+- Owned and HD badges stay up-to-date thanks to incremental scanning and the
+  ffprobe cache.
+
+### Keeping the owned manifest fresh
+- Use **Advanced ▸ Refresh owned scan** after adding/removing many files.
+- Use **Advanced ▸ Clear owned cache** only when you want a full rescan from
+  scratch (e.g., after reorganising folder structures).
+
+### Poster & ffprobe maintenance
+- **Advanced ▸ Refresh poster cache** removes zero-byte / partial downloads and
+enforces the poster limit.
+- **Advanced ▸ Refresh ffprobe cache** re-validates stored resolutions without
+  touching the filesystem.
+- **Advanced ▸ Clear ffprobe cache** clears the cache and immediately rebuilds
+  HD flags; useful after upgrading ffprobe.
+
+### Building a portable package
+See [`make_portable/README.md`](./make_portable/README.md) for instructions on
+producing a self-contained ZIP using the provided PowerShell/Bash scripts.
+
+---
+
+## Troubleshooting & Diagnostics
+
+- **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_db_source` path
+  is reachable and that you have permission to read it.
+- **Owned scan never completes:** check the Advanced panel log for the last
+  processed directory; ensure all library roots are accessible and contain only
+  media files you expect.
+- **Missing posters:** confirm outbound network access to the artwork URLs and
+  that the cache directory is writable. Pex prunes posters older than 14 days
+  automatically, so re-open the app after a while to fetch fresh artwork.
+- **HD badge looks wrong:** run **Advanced ▸ Refresh ffprobe cache** and ensure
+  `ffprobe_cmd` points to a recent FFmpeg build.
+- **Logging:** set `log_level` to `debug` and relaunch to capture richer logs in
+  the console.
 
 ---
 
 ## Development Notes
 
-- Run the app with `cargo run --release` for realistic performance (debug builds are noticeably slower).
-- The codebase follows `rustfmt`; run `cargo fmt` if the toolchain component is installed.
-- Lint with `cargo clippy --all-targets --all-features -- -W clippy::all -W clippy::nursery`.
-- DB exploration utility: `cargo run --bin db_explorer metadata_items 5`.
+- Format the code with `cargo fmt`.
+- Run tests with `cargo test`.
+- Optional: `cargo clippy --all-targets -- -D warnings` (requires the Clippy
+  component).
+- DB inspection helper: `cargo run --bin db_explorer metadata_items 10`.
 
 ---
 
-## License
+## Legal
 
-This project is licensed under the terms specified by the repository owner. See `LICENSE` if provided.
-
+- Licensed under the [PEX Attribution License (PAL)](./LICENSE).
+- This application uses `ffprobe` from the FFmpeg project. If you redistribute
+  the binary with ffprobe bundled, include FFmpeg’s required notices.
+- IMDb ratings are fetched via the OMDb API; please respect their usage terms
+  and attribution requirements.
+- Plex is a registered trademark of Plex, Inc. This project is an independent
+  client that reads the Plex DVR database.
+- Additional third-party notices are listed in [`NOTICE`](./NOTICE).

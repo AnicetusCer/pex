@@ -47,7 +47,13 @@ if (Test-Path $distPath) {
 New-Item -ItemType Directory -Path $distPath | Out-Null
 
 Copy-Item (Join-Path $scriptDir "config.json") (Join-Path $distPath "config.json")
-Copy-Item (Join-Path $scriptDir "README.txt") (Join-Path $distPath "README.txt")
+Copy-Item (Join-Path $scriptDir "README.md") (Join-Path $distPath "README.md")
+if (Test-Path (Join-Path $repoRoot "LICENSE")) {
+    Copy-Item (Join-Path $repoRoot "LICENSE") (Join-Path $distPath "LICENSE")
+}
+if (Test-Path (Join-Path $repoRoot "NOTICE")) {
+    Copy-Item (Join-Path $repoRoot "NOTICE") (Join-Path $distPath "NOTICE")
+}
 
 if (-not (Test-Path $BinaryPath)) {
     throw "Binary not found at '$BinaryPath'. Build with 'cargo build --release' first or pass -BinaryPath."

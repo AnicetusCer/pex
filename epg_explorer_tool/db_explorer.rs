@@ -1,4 +1,4 @@
-use pex::config::load_config;
+use pex::config::local_db_path;
 use rusqlite::{types::ValueRef, Connection, Result};
 use std::env;
 use std::fs::File;
@@ -24,16 +24,10 @@ fn main() -> Result<()> {
         .position(|a| a == "--out")
         .and_then(|i| args.get(i + 1).cloned());
 
-    println!("Opening Plex DB: plex_epg.db");
+    let db_path = local_db_path();
+    println!("Opening Plex DB: {}", db_path.display());
 
-    let config = load_config();
-    let db_path = config
-        .plex_db_local
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("plex_epg.db");
-
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare(&format!("SELECT * FROM {} LIMIT {}", table, limit))?;
 
     // Grab column names now so stmt borrow is released
