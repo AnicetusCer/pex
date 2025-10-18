@@ -1,12 +1,29 @@
 {
-  "plex_db_source": "\\\\plex-server\\Config\\tv.plex.providers.epg.cloud.db",
-  "library_roots": [
-    "D:/Media/Movies",
-    "D:/Media/Animation",
-    "\\\\nas\\Shared\\Movies"
-  ],
-  "cache_dir": ".pex_cache",
-  "ffprobe_cmd": "C:/Tools/ffmpeg/bin/ffprobe.exe",
-  "omdb_api_key": "your-omdb-key-here",
-  "log_level": "info"
+  "_comment": "Copy the profile that matches your platform into config.json and adjust the paths. Remove the other example block after copying.",
+  "windows_example": {
+    "library_roots": [
+      "D:/Media/Movies",
+      "\\\\nas\\Archive\\Films"
+    ],
+    "owned_source": "plex_library",
+    "plex_epg_db_source": "%LOCALAPPDATA%/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
+    "plex_library_db_source": "%LOCALAPPDATA%/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+    "cache_dir": ".pex_cache",
+    "ffprobe_cmd": "C:/Tools/ffmpeg/bin/ffprobe.exe",
+    "omdb_api_key": "Your-OMDb-Key-Here",
+    "log_level": "info"
+  },
+  "linux_example": {
+    "library_roots": [
+      "/mnt/media/Movies",
+      "/srv/nas/Archive/Films"
+    ],
+    "owned_source": "plex_library",
+    "plex_epg_db_source": "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
+    "plex_library_db_source": "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+    "cache_dir": ".pex_cache",
+    "ffprobe_cmd": "/usr/bin/ffprobe",
+    "omdb_api_key": "Your-OMDb-Key-Here",
+    "log_level": "info"
+  }
 }

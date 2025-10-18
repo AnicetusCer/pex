@@ -29,7 +29,7 @@ db_resolution:
   order:
     - use the working copy at "db/plex_epg.db"
   mirrors_gui:
-    - Same `config.json` as the GUI; optional `plex_db_source` keeps the working copy fresh.
+    - Same `config.json` as the GUI; optional `plex_epg_db_source` keeps the working copy fresh.
 
 field_reference:  # ← PRIME: where to find what the GUI needs
   posters:
@@ -143,3 +143,4 @@ quick_commands:
   - Posters sample (new): cargo run --bin db_explorer metadata_items 10
   - Media extras sample:  cargo run --bin db_explorer media_items 5
   - Export:               cargo run --bin db_explorer metadata_items 50 --out posters.txt
+  - Library tables:       cargo run --bin library_db_explorer -- --tables

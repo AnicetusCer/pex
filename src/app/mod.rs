@@ -17,11 +17,13 @@ use urlencoding::encode;
 // ---- Local modules ----
 pub mod cache;
 use crate::app::cache::find_any_by_key;
+use crate::app::scheduled::ScheduledIndex;
 use crate::config::{load_config, local_db_path};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
 pub mod prep;
+pub mod scheduled;
 pub mod types;
 pub mod utils;
 pub use types::{
@@ -105,6 +107,8 @@ pub struct PexApp {
     rating_tx: Option<Sender<RatingMsg>>,
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
+
+    scheduled_index: Option<ScheduledIndex>,
 
     // search/filter/sort controls
     search_query: String,
@@ -190,6 +194,7 @@ impl Default for PexApp {
             rating_tx: None,
             rating_rx: None,
             rating_states: HashMap::new(),
+            scheduled_index: None,
 
             search_query: String::new(),
             filter_hd_only: false,
@@ -282,6 +287,37 @@ impl PexApp {
 }
 
 impl PexApp {
+    fn refresh_scheduled_index(&mut self) {
+        match crate::app::scheduled::load_scheduled_index() {
+            Ok(index) => {
+                if index.is_empty() {
+                    self.scheduled_index = None;
+                } else {
+                    self.scheduled_index = Some(index);
+                }
+            }
+            Err(err) => {
+                warn!("Failed to load scheduled recordings: {err}");
+                self.scheduled_index = None;
+            }
+        }
+        self.apply_scheduled_flags();
+    }
+
+    fn apply_scheduled_flags(&mut self) {
+        for row in &mut self.rows {
+            row.scheduled = false;
+        }
+        let Some(index) = self.scheduled_index.as_ref() else {
+            return;
+        };
+        for row in &mut self.rows {
+            if index.is_scheduled(row.guid.as_deref(), &row.title, row.year, row.airing) {
+                row.scheduled = true;
+            }
+        }
+    }
+
     /// Try to upload texture for a single row if a cached file exists (small variant).
     /// Returns true if a texture was uploaded this call.
     fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
@@ -367,17 +403,17 @@ impl PexApp {
         let local_db = local_db_path();
         if !local_db.exists() {
             if cfg
-                .plex_db_source
+                .plex_epg_db_source
                 .as_deref()
                 .map_or(false, |s| !s.trim().is_empty())
             {
                 self.setup_warnings.push(format!(
-                    "Local Plex EPG database not found at {}; it will be copied from plex_db_source on startup.",
+                    "Local Plex EPG database not found at {}; it will be copied from plex_epg_db_source on startup.",
                     local_db.display()
                 ));
             } else {
                 self.setup_errors.push(format!(
-                    "Local Plex EPG database not found at {}. Provide plex_db_source in config.json or copy the DB into the db/ folder.",
+                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in config.json or copy the DB into the db/ folder.",
                     local_db.display()
                 ));
             }
@@ -762,6 +798,7 @@ impl PexApp {
         self.mark_dirty();
         self.owned_scan_in_progress = false;
         self.record_owned_message("Refreshing owned scan…");
+        self.refresh_scheduled_index();
         self.start_owned_scan();
     }
 }

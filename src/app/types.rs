@@ -158,6 +158,7 @@ pub struct PosterRow {
     pub owned_modified: Option<u64>,
     pub owned_key: String,
     pub broadcast_hd: bool,
+    pub scheduled: bool,
 }
 
 #[derive(Clone, Debug)]

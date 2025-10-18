@@ -26,36 +26,56 @@ below to get going.
    - Install FFmpeg (or just `ffprobe`) and make sure the `ffprobe` command is
      available. If it isn’t, you can point Pex to the executable in the config.
 
-3. **Edit `config.json`**
-   - `library_roots`: list the folders that contain your own movie files. These
-     paths must be valid on this machine. Use forward slashes on every OS, e.g.:
-     - Windows: `"D:/Media/Movies"`
-     - Linux: `"/mnt/media/movies"`
-     Name your files in the usual Plex style: `Title (Year).ext`. Any trailing
-     suffixes (such as `- 4K` or `- Directors Cut`) are ignored automatically
-     during scanning and parsing so they still match the Plex guide entries.
-   - `plex_db_source`: path to Plex’s live DVR database (for example
-     `"C:/Users/You/AppData/Local/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db"`
-     on Windows). Pex copies this file into `db/plex_epg.db` the first time you
-     launch and refreshes the copy roughly once per day. This value is required.
-   - `ffprobe_cmd`: override the location of ffprobe (e.g.
-     `"C:/Tools/ffmpeg/bin/ffprobe.exe"` or `"/usr/bin/ffprobe"`). Leave it
-     blank to use `ffprobe` from the system `PATH`.
-   - `omdb_api_key`: OMDb API key used for IMDb ratings. The bundled config
-     ships with the public demo key (`thewdb`), which is heavily rate-limited.
-     Replace it with your personal key if you plan to use rating lookups (click
-     the ratings button in a movie selection to trigger a lookup).
+3. **Edit `config.json`** – update the paths and options so they match the
+   machine you will run Pex on. Each key is described in detail in
+   [Configuration keys](#configuration-keys) below.
 
 4. **Launch the app**
    - Windows: double-click `pex.exe` or run it from PowerShell.
    - Linux/macOS: `chmod +x ./pex` (if needed) then run `./pex`.
 
 The first start can take a long time (30 minutes or more for ~6,000 movies on a nas):
-- Pex copies the Plex database from `plex_db_source`.
+- Pex copies the Plex database from `plex_epg_db_source`.
+- It copies Plex’s library database if `plex_library_db_source` is set.
 - It scans your `library_roots` to tag owned titles.
 - It warms up poster and ffprobe caches.
 
 Subsequent launches load almost immediately.
+
+---
+
+## Configuration keys
+
+| Key | Required? | Description | Where to find the value |
+| --- | --- | --- | --- |
+| `plex_epg_db_source` | ✅ | Absolute path to Plex’s EPG database (`tv.plex.providers.epg.cloud*.db`). Pex copies it into `db/plex_epg.db` the first time you launch and refreshes the copy roughly once per day. | See [Collecting Plex paths](#collecting-plex-paths). |
+| `plex_library_db_source` | Recommended | Path to `com.plexapp.plugins.library.db`. Enables fast owned detection and the DVR *REC* badge by mirroring Plex’s library database into `db/plex_library.db`. | See [Collecting Plex paths](#collecting-plex-paths). |
+| `library_roots` | ✅ | Array of folders containing your movie files. Use forward slashes on every OS (`"D:/Media/Movies"` or `"/mnt/media/movies"`). Files should follow the Plex naming pattern `Title (Year).ext` so scans match the guide. | Use platform file explorer or the NAS share path mounted on this machine. |
+| `owned_source` | ✅ | `"plex_library"` (recommended) reads owned titles from the copied Plex library DB; `"filesystem"` crawls `library_roots`. Filesystem mode can take a long time on large libraries but works without the library DB. | Choose based on whether you can copy `com.plexapp.plugins.library.db`. |
+| `ffprobe_cmd` | Optional | Override path to `ffprobe` if it isn’t on `PATH`. | `where ffprobe` (Windows) or `which ffprobe` (Linux/macOS). Leave `null` to use the system default. |
+| `omdb_api_key` | Optional | API key for IMDb ratings. The demo key `thewdb` is included but heavily rate limited. | Sign up at <https://www.omdbapi.com/apikey.aspx>. |
+| `cache_dir` | Optional | Relocates `.pex_cache/` (posters, manifests, ffprobe cache, UI prefs). Relative paths are resolved next to the executable. | Pick a writable folder with enough free space. |
+| `log_level` | Optional | Adjusts runtime logging (`trace`, `debug`, `info`, `warn`, `error`). | Set only if you need more verbose console output. |
+
+### Collecting Plex paths
+
+Plex stores its SQLite databases under “Plug-in Support/Databases”. Common locations:
+
+| Platform | Default path |
+| --- | --- |
+| **Windows (desktop)** | `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases\` |
+| **Windows (service install)** | `%PROGRAMDATA%\Plex Media Server\Plug-in Support\Databases\` |
+| **Linux packages** | `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
+| **Synology package** | `/var/packages/Plex Media Server/target/Plex Media Server/Plug-in Support/Databases/` |
+| **Docker** | Host folder bound to `/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
+
+Look in that directory for:
+
+- `tv.plex.providers.epg.cloud.db` (plus any `-wal` / `-shm` companions)
+- `com.plexapp.plugins.library.db` (plus `-wal` / `-shm`)
+
+Copy the full paths into `config.json`. If you cannot copy the library DB, leave
+`plex_library_db_source` unset and use `owned_source = "filesystem"` instead.
 
 ---
 
@@ -64,6 +84,7 @@ Subsequent launches load almost immediately.
 | Location | Purpose |
 | --- | --- |
 | `db/plex_epg.db` | Working copy of Plex’s EPG database (plus WAL/SHM files). |
+| `db/plex_library.db` | Optional working copy of Plex’s library database (if configured). |
 | `.pex_cache/` | Posters, owned-manifest, ffprobe cache, and UI preferences. Poster images older than 14 days are removed automatically. |
 | `config.json` | Runtime configuration – edit before launching. |
 
@@ -86,7 +107,7 @@ the next run (expect another long initial scan while it repopulates).
 
 ## Troubleshooting
 
-- **“Could not open Plex DB”** – check `plex_db_source` or ensure
+- **“Could not open Plex DB”** – check `plex_epg_db_source` or ensure
   `db/plex_epg.db` exists and is readable.
 - **Owned scan never finishes** – confirm each `library_root` path exists and
   that the drive/share is mounted.

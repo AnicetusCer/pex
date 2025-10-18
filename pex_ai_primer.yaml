@@ -26,9 +26,11 @@ project:
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
     - "Advanced menu: clear/prune caches, refresh owned scan, manage ffprobe cache, backup/restore UI prefs."
+    - "DVR awareness: scheduled recordings highlighted with a REC badge sourced from Plex's library database."
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)
+    - library_db_explorer (CLI helper for Plex library DB + DVR metadata)
   layout: |
     src/
       app/
@@ -40,7 +42,11 @@ project:
         gfx.rs         # texture upload helpers
         filters.rs     # day-window filtering, search, channel/genre include filters, sorting & grouping
         types.rs       # shared structs/enums for app messages and rows
-        owned.rs       # background owned scan + manifest/sidecars (owned_all/owned_hd)
+        owned/
+          mod.rs           # orchestrates owned scan workers
+          owned_scan_fs.rs # filesystem crawl for owned detection
+          owned_scan_plex.rs # Plex library DB owned detection + sidecar persistence
+        scheduled.rs    # loads DVR scheduled recordings from media_grabs/media_subscriptions
         prefetch.rs    # worker pool to fetch/resize posters
         detail.rs      # right-side details panel (channel icon, ratings, owned metadata)
         ui/
@@ -49,8 +55,10 @@ project:
           grid.rs    # grouped poster grid (badges, lazy texture uploads)
       assets/PEX.ico  # app icon embedded at compile time
       config.rs        # AppConfig + load_config()
+      bin/             # aux CLIs (when enabled)
     epg_explorer_tool/
       db_explorer.rs   # CLI to inspect DB tables
+      library_db_explorer.rs # CLI to inspect Plex library DB (owned + DVR state)
     Cargo.toml
   tips_for_new_work:
     - "Start from `src/app/mod.rs` to understand app state transitions; it wires prep, owned, filters, and UI."
@@ -58,6 +66,7 @@ project:
     - "Any new UI lives under `src/app/ui/`; keep expensive work off the paint path and return early when splash is active."
     - "Reuse helpers in `utils.rs` for date/ordinal logic and channel normalization."
     - "When touching caching logic, review `cache.rs` + `prefs.rs` to keep sidecars/prefs consistent."
+    - "Scheduled DVR badges are loaded via `app::scheduled`; reuse `ScheduledIndex` helpers instead of duplicating SQL."
   platforms:
     windows:
       notes:
@@ -90,6 +99,7 @@ runtime_model:
     - Prep thread: app::prep::spawn_poster_prep(tx).
     - Owned-scan thread: DFS over library_roots; skips unchanged dirs via owned_manifest.json; writes owned_all / owned_hd sidecars and file modified timestamps.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
+    - Scheduled loader: synchronous read of Plex library DB (`app::scheduled::load_scheduled_index`) triggered after prep and when refreshing owned caches.
   messages:
     - PrepMsg:
         - Info(String)
@@ -129,6 +139,7 @@ flow:
     - Try find_any_by_key(small_key) to attach cached path
     - Load "hotset.txt", attach known paths, prewarm textures
     - Kick channel icon prefetch for unseen URLs
+    - refresh_scheduled_index() to merge DVR metadata from Plex library DB
     - apply_owned_flags() if owned keys ready (sets owned flags + recorded dates)
     - start_prefetch(ctx)
     - prewarm_first_screen(ctx)
@@ -142,11 +153,14 @@ flow:
 config:
   file: config.json
   keys:
-    - plex_db_source: "Optional source DB copied into db/plex_epg.db once per day"
+    - plex_epg_db_source: "Optional source DB copied into db/plex_epg.db once per day"
+    - plex_library_db_source: "Optional library DB copied into db/plex_library.db for owned + DVR state"
+    - owned_source: "filesystem | plex_library (select owned detection mode; filesystem by default)"
     - cache_dir: "Poster/prefs cache root"
     - library_roots: "Dirs to scan for 'owned' titles"
     - ffprobe_cmd: "Optional over-ride for ffprobe location"
     - omdb_api_key: "Optional OMDb key for IMDb ratings"
+    - log_level: "Set tracing verbosity (trace|debug|info|warn|error)"
   persistence:
     prefs_path: "<cache_dir>/ui_prefs.txt"
     prefs_fields:
@@ -175,13 +189,16 @@ database:
   files:
     - plex_epg.db: "Primary SQLite the app reads (metadata_items, media_items, assets, etc.)"
     - plex_epg.db-shm / -wal: "SQLite WAL files; safe to leave in place during read-only access"
+    - plex_library.db: "Mirrored Plex library database used for owned detection + DVR schedule (media_grabs, media_subscriptions, metadata_subscription_desired_items)"
     - owned_manifest.json: "Cached snapshot of library_roots → owned titles"
   schema_entry_points:
     - "app::prep::SQL_POSTERS_USER_THUMB (metadata_items + media_items join) for poster rows"
     - "app::prep::parse_channel_meta(extra_data) extracts `at:channelCallSign/title/thumb` from JSON-ish blob"
+    - "app::scheduled::load_scheduled_index() reads media_grabs/media_subscriptions/metadata_subscription_desired_items for DVR awareness"
     - "`epg_explorer_tool/db_explorer.rs` has helper queries for debugging tables/columns"
   exploration:
     - "Iterate quickly with `cargo run --bin db_explorer -- <path-to-plex_epg.db> --help`."
+    - "Use `cargo run --bin library_db_explorer -- --tables` to inspect the mirrored Plex library DB used for owned/DVR metadata."
     - "Inside the GUI, set `RUST_LOG=info` to surface prep/owned messages while validating data pulls."
     - "For ad-hoc SQL, use `sqlite3 plex_epg.db '.schema metadata_items'` (database is read-only from Pex)."
 
@@ -197,6 +214,8 @@ ui:
   filters:
     - day_range: [2, 4, 5, 7, 14]
     - search: "substring on title"
+  badges:
+    - "REC: row.scheduled flag set by app::scheduled::load_scheduled_index()"
     - channel filter:
         state: "selected_channels: BTreeSet<String> (raw call signs)"
         behavior:

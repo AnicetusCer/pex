@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::app::cache::url_to_cache_key;
 use crate::app::{PrepItem, PrepMsg}; // <- use the re-export from app::types
-use crate::config::{load_config, local_db_path};
+use crate::config::{load_config, local_db_path, local_library_db_path};
 use eframe::egui as eg; // <- gives us eg::Context
 
 // --- local SQL (newer plex uses user_thumb_url; older uses thumb_url) ---
@@ -274,7 +274,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         info!("prep: {msg}");
 
         // Optional daily copy from source to local
-        if let Some(src_path) = cfg.plex_db_source.as_deref() {
+        if let Some(src_path) = cfg.plex_epg_db_source.as_deref() {
             let src = Path::new(src_path);
             match needs_db_update_daily(src, &db_path) {
                 Ok(true) => {
@@ -293,6 +293,51 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         } else {
             send(PrepMsg::Info(
                 "Stage 2/4 – Using existing local EPG DB (no source copy configured).".into(),
+            ));
+        }
+
+        // Optional daily copy for the Plex library database
+        let library_db_path = local_library_db_path();
+        if let Some(src_path) = cfg.plex_library_db_source.as_deref() {
+            let src = Path::new(src_path);
+            match needs_db_update_daily(src, &library_db_path) {
+                Ok(true) => {
+                    send(PrepMsg::Info(
+                        "Stage 2/4 – Copying Plex library DB from plex_library_db_source.".into(),
+                    ));
+                    info!(
+                        "prep: copying Plex library DB from {} to {}",
+                        src.display(),
+                        library_db_path.display()
+                    );
+                    let marker = last_sync_marker_path(&library_db_path);
+                    match copy_with_progress(src, &library_db_path, |_c, _t, _p, _mbps| {}) {
+                        Ok(_) => {
+                            let _ = touch_last_sync(&marker);
+                            send(PrepMsg::Info(
+                                "Stage 2/4 – Plex library DB copy complete.".into(),
+                            ));
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Copying Plex library DB failed (continuing with existing copy if any): {err}"
+                            );
+                            send(PrepMsg::Info(format!(
+                                "Stage 2/4 – Copying Plex library DB failed: {err}"
+                            )));
+                        }
+                    }
+                }
+                Ok(false) => send(PrepMsg::Info(
+                    "Stage 2/4 – Plex library DB already fresh; skipping copy.".into(),
+                )),
+                Err(e) => send(PrepMsg::Info(format!(
+                    "Stage 2/4 – Plex library DB freshness check failed (continuing anyway): {e}"
+                ))),
+            }
+        } else {
+            send(PrepMsg::Info(
+                "Stage 2/4 – plex_library_db_source not set; skipping Plex library DB copy.".into(),
             ));
         }
 
@@ -574,6 +619,7 @@ impl crate::app::PexApp {
                                     owned_modified: None,
                                     owned_key,
                                     broadcast_hd,
+                                    scheduled: false,
                                 }
                             })
                             .collect();
@@ -616,6 +662,9 @@ impl crate::app::PexApp {
                                 }
                             }
                         }
+
+                        // Scheduled recordings (from Plex library DB)
+                        self.refresh_scheduled_index();
 
                         // Owned flags (if ready)
                         self.apply_owned_flags();

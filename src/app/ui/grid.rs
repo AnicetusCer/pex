@@ -9,9 +9,10 @@ fn draw_corner_badge(p: &eframe::egui::Painter, rect: eg::Rect, label: &str) {
         return;
     }
     let pad = 6.0;
-    let r = eg::Rect::from_min_size(
-        eg::pos2(rect.left() + pad, rect.top() + pad),
-        eg::vec2(48.0, 20.0),
+    let size = eg::vec2(48.0, 20.0);
+    let r = eg::Rect::from_min_max(
+        eg::pos2(rect.right() - pad - size.x, rect.top() + pad),
+        eg::pos2(rect.right() - pad, rect.top() + pad + size.y),
     );
 
     let visuals = p.ctx().style().visuals.clone();
@@ -117,6 +118,37 @@ impl crate::app::PexApp {
                                             );
                                         }
 
+                                        if row.scheduled {
+                                            let pad = 6.0;
+                                            let size = eg::vec2(56.0, 22.0);
+                                            let rec_rect = eg::Rect::from_min_size(
+                                                eg::pos2(
+                                                    poster_rect.left() + pad,
+                                                    poster_rect.top() + pad,
+                                                ),
+                                                size,
+                                            );
+                                            let fill = eg::Color32::from_rgb(200, 40, 40);
+                                            let stroke = eg::Color32::from_rgb(140, 16, 16);
+                                            ui.painter().rect_filled(
+                                                rec_rect,
+                                                eg::Rounding::same(6.0),
+                                                fill,
+                                            );
+                                            ui.painter().rect_stroke(
+                                                rec_rect,
+                                                eg::Rounding::same(6.0),
+                                                eg::Stroke::new(1.0, stroke),
+                                            );
+                                            ui.painter().text(
+                                                rec_rect.center(),
+                                                eg::Align2::CENTER_CENTER,
+                                                "REC",
+                                                eg::FontId::monospace(13.0),
+                                                eg::Color32::WHITE,
+                                            );
+                                        }
+
                                         // --- Compute statuses (needed for badges & dimming) ---
                                         let broadcast_hd = Self::row_broadcast_hd(row);
                                         let owned_is_hd = self.row_owned_is_hd(row);
@@ -181,8 +213,9 @@ impl crate::app::PexApp {
 
                                         // Selection stroke
                                         if self.selected_idx == Some(idx) {
+                                            let highlight = poster_rect.expand(2.0);
                                             ui.painter().rect_stroke(
-                                                rect.shrink(1.0),
+                                                highlight,
                                                 6.0,
                                                 eg::Stroke::new(2.0, eg::Color32::YELLOW),
                                             );

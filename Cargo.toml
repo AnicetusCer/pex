@@ -31,3 +31,7 @@ urlencoding = "2.1"
 [[bin]]
 name = "db_explorer"
 path = "epg_explorer_tool/db_explorer.rs"
+
+[[bin]]
+name = "library_db_explorer"
+path = "epg_explorer_tool/library_db_explorer.rs"

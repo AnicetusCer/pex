@@ -1,0 +1,146 @@
+version: 1
+updated: 2025-10-11
+
+human:
+  goals:
+    - Inspect Plex's library SQLite (`com.plexapp.plugins.library.db`) synced into `db/plex_library.db`.
+    - Confirm which tables/columns expose title, year, GUID, file paths, and media dimensions.
+    - Compare values with filesystem owned-scan output ahead of building a Plex-backed owned source.
+  ways_of_working:
+    - Treat the DB as read-only; never write or VACUUM from this helper.
+    - Keep sample queries light (LIMIT clauses) to avoid dumping huge tables.
+    - Favour clear SQL snippets that can be pasted into the new CLI or `sqlite3`.
+
+usage:
+  intro:
+    - Set `plex_library_db_source` in `config.json` and launch Pex once so it copies into `db/plex_library.db`.
+    - Run `cargo run --bin library_db_explorer -- --tables` to enumerate available tables.
+  commands:
+    - `cargo run --bin library_db_explorer -- --schema metadata_items`
+    - `cargo run --bin library_db_explorer metadata_items 10`
+    - `cargo run --bin library_db_explorer media_items 10`
+    - `cargo run --bin library_db_explorer media_parts 10`
+
+focus_tables:
+  metadata_items:
+    key_columns:
+      - `id`
+      - `guid` (e.g., `com.plexapp.agents.imdb://tt0123456`)
+      - `title`
+      - `year`
+      - `added_at`
+    notes:
+      - `metadata_type = 1` maps to movies (same as the EPG DB).
+      - `library_section_id` links to the owning Plex library.
+  media_items:
+    joins:
+      - `metadata_item_id` ↔ `metadata_items.id`
+    columns:
+      - `width` / `height` (useful for HD determination)
+      - `bitrate`, `container`, `video_codec`
+    tips:
+      - Use `LIMIT` and `ORDER BY metadata_item_id` to match against metadata entries.
+  media_parts:
+    joins:
+      - `media_item_id` ↔ `media_items.id`
+    columns:
+      - `file` (absolute path on the Plex server)
+      - `size`
+      - `hash`
+    usage:
+      - Provides the concrete filesystem location that owned detection can match.
+  library_sections:
+    key_columns:
+      - `id`
+      - `name`
+    usage:
+      - Join with `metadata_items.library_section_id` to label which Plex library each movie belongs to.
+  media_grabs:
+    columns:
+      - `status` (0=pending, 1=running, 2=done, 3=queued)
+      - `metadata_item_id`
+      - `extra_data` (JSON payload with `mt:title`, `mt:type`, `me:beginsAt`, `me:channelTitle`, etc.)
+    usage:
+      - Holds DVR scheduled recordings; filter by `me:beginsAt` to surface upcoming captures.
+  media_subscriptions:
+    columns:
+      - `extra_data` (JSON payload with `hi:*` metadata, `pv:airingChannels`, `pv:airingTimes`)
+    usage:
+      - One-shot movie timers and long-running subscriptions live here before they produce `media_grabs` rows. Decode the comma-separated `pv:airingTimes` to line up with EPG entries.
+  metadata_subscription_desired_items:
+    columns:
+      - `remote_id` (percent-encoded Plex GUID, e.g., `plex%3A%2F%2Fmovie%2F...`)
+    usage:
+      - Acts as the authoritative list of requested GUIDs; decode with `urlencoding::decode` before matching.
+
+workflows:
+  find_movie_by_guid: |
+    SELECT m.title, m.year, mi.width, mi.height, mp.file
+    FROM metadata_items m
+    JOIN media_items mi ON mi.metadata_item_id = m.id
+    JOIN media_parts mp ON mp.media_item_id = mi.id
+    WHERE m.guid = 'com.plexapp.agents.imdb://tt0083658'
+    LIMIT 5;
+  surface_all_movies: |
+    SELECT m.title, m.year, mp.file
+    FROM metadata_items m
+    JOIN media_items mi ON mi.metadata_item_id = m.id
+    JOIN media_parts mp ON mp.media_item_id = mi.id
+    WHERE m.metadata_type = 1
+    LIMIT 20;
+  hd_candidates: |
+    SELECT m.title, mi.width, mi.height, mp.file
+    FROM metadata_items m
+    JOIN media_items mi ON mi.metadata_item_id = m.id
+    JOIN media_parts mp ON mp.media_item_id = mi.id
+    WHERE m.metadata_type = 1
+      AND mi.width >= 1280
+      AND mi.height >= 720
+    LIMIT 20;
+  validate_library_roots: |
+    -- Replace the sample prefixes with your configured library_roots
+    SELECT DISTINCT mp.file
+    FROM metadata_items m
+    JOIN media_items mi ON mi.metadata_item_id = m.id
+    JOIN media_parts mp ON mp.media_item_id = mi.id
+    WHERE m.metadata_type = 1
+      AND (
+        mp.file LIKE 'D:/Libraries/Movies/%'
+        OR mp.file LIKE '\\\\nas\\Archive\\Films%'
+      )
+    LIMIT 20;
+  scheduled_recordings: |
+    SELECT
+      json_extract(extra_data, '$."mt:title"')        AS title,
+      json_extract(extra_data, '$."mt:type"')         AS kind,
+      datetime(json_extract(extra_data, '$."me:beginsAt"'),'unixepoch') AS starts_at,
+      json_extract(extra_data, '$."me:channelTitle"') AS channel,
+      status
+    FROM media_grabs
+    WHERE status IN (0,1,2,3)
+      AND json_extract(extra_data, '$."me:beginsAt"') IS NOT NULL
+    ORDER BY starts_at;
+  upcoming_from_subscriptions: |
+    SELECT
+      json_extract(extra_data, '$."hi:title"') AS title,
+      json_extract(extra_data, '$."hi:guid"')  AS guid,
+      json_extract(extra_data, '$."pv:airingChannels"') AS channels,
+      json_extract(extra_data, '$."pv:airingTimes"')    AS starts_raw
+    FROM media_subscriptions
+    WHERE extra_data LIKE '%hi:type":"1%' -- movies
+    LIMIT 20;
+  desired_guids: |
+    SELECT remote_id
+    FROM metadata_subscription_desired_items
+    LIMIT 20;
+    -- Decode the percent-encoded GUID with urlencoding::decode (see app::scheduled).
+
+export_notes:
+  - Use `--out` to collect query output in a text file for side-by-side comparison with filesystem scans.
+  - The helper always prints column metadata before the rows to make diffing easier.
+
+risks:
+  - Plex may store multiple `media_items` per `metadata_item`; ensure logic dedupes by GUID or best-quality row.
+  - UNC paths in `media_parts.file` may differ from configured `library_roots`; normalise path formats before comparing.
+  - If no `library_roots` match the Plex paths the helper (and Pex) returns every movie; double-check roots before trusting the owned list.
+  - DVR schedule rows live in `media_grabs` and `media_subscriptions`; keep the copied library DB fresh so queued recordings stay accurate.

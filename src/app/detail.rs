@@ -57,6 +57,7 @@ impl crate::app::PexApp {
                 let genres = row.genres.clone();
                 let summary = row.summary.clone();
                 let poster_key = row.key.clone();
+                let scheduled = row.scheduled;
 
                 // Poster preview (uses small texture if available)
                 ui.add_space(4.0);
@@ -135,6 +136,14 @@ impl crate::app::PexApp {
                         })
                         .unwrap_or_else(|| "— UTC".into());
                     ui.label(eg::RichText::new(format!("{ch}  •  {schedule}")).weak());
+                }
+
+                if scheduled {
+                    ui.label(
+                        eg::RichText::new("Scheduled to record")
+                            .color(eg::Color32::from_rgb(220, 80, 80))
+                            .strong(),
+                    );
                 }
 
                 if critic_rating.is_some() || audience_rating.is_some() {
