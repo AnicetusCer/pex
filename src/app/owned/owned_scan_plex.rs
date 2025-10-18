@@ -115,6 +115,7 @@ struct PlexOwnedEntry {
     metadata_id: i64,
     guid: Option<String>,
     title: String,
+    original_title: Option<String>,
     year: Option<i32>,
     width: Option<u32>,
     height: Option<u32>,
@@ -130,6 +131,7 @@ fn collect_plex_owned_entries(
             m.id            AS metadata_id,
             m.guid          AS guid,
             m.title         AS title,
+            m.original_title AS original_title,
             m.year          AS year,
             m.updated_at    AS meta_updated_at,
             m.added_at      AS meta_added_at,
@@ -170,6 +172,7 @@ fn collect_plex_owned_entries(
             let metadata_id: i64 = row.get("metadata_id")?;
             let guid: Option<String> = row.get("guid")?;
             let title: String = row.get("title")?;
+            let original_title: Option<String> = row.get("original_title")?;
             let year: Option<i32> = row.get("year")?;
             let width: Option<i64> = row.get("width")?;
             let height: Option<i64> = row.get("height")?;
@@ -184,6 +187,7 @@ fn collect_plex_owned_entries(
                 metadata_id,
                 guid,
                 title,
+                original_title,
                 year,
                 width,
                 height,
@@ -205,6 +209,7 @@ fn collect_plex_owned_entries(
             metadata_id,
             guid,
             title,
+            original_title,
             year,
             width,
             height,
@@ -241,6 +246,7 @@ fn collect_plex_owned_entries(
             metadata_id,
             guid,
             title,
+            original_title,
             year,
             width,
             height,
@@ -258,22 +264,31 @@ fn accumulate_owned_entry(
     owned_dates: &mut HashMap<String, Option<u64>>,
 ) {
     let hd = is_hd(entry.width, entry.height);
+    let mut inserted_keys: HashSet<String> = HashSet::new();
 
     let mut insert_key = |key: String| {
-        owned.insert(key.clone());
-        if hd {
-            hd_keys.insert(key.clone());
+        if inserted_keys.insert(key.clone()) {
+            owned.insert(key.clone());
+            if hd {
+                hd_keys.insert(key.clone());
+            }
+            owned_dates.insert(key, entry.updated_at);
         }
-        owned_dates.insert(key, entry.updated_at);
     };
 
-    let variants = PexApp::owned_key_variants(&entry.title, entry.year);
-    if variants.is_empty() {
-        insert_key(PexApp::make_owned_key(&entry.title, entry.year));
-    } else {
-        for key in variants {
+    let mut push_keys_for = |title: &str| {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        for key in PexApp::owned_key_variants(trimmed, entry.year) {
             insert_key(key);
         }
+    };
+
+    push_keys_for(&entry.title);
+    if let Some(original) = entry.original_title.as_deref() {
+        push_keys_for(original);
     }
 }
 

@@ -201,6 +201,32 @@ impl crate::app::PexApp {
             }
         }
 
+        // Handle possessive prefixes like "Lemony Snicket's A Series of ..."
+        // so we also match library entries that drop the leading proper name.
+        for needle in ["'s ", "’s "] {
+            if let Some(pos) = trimmed.find(needle) {
+                let before = &trimmed[..pos];
+                if !before.contains(' ') {
+                    continue;
+                }
+                let candidate = trimmed[pos + needle.len()..].trim_start();
+                if !candidate.is_empty() && candidate != trimmed {
+                    titles.push(candidate.to_string());
+                }
+            }
+        }
+
+        // Drop leading English articles so "The Return of Sabata" matches "Return of Sabata".
+        let lower = trimmed.to_ascii_lowercase();
+        for article in ["the ", "a ", "an "] {
+            if lower.starts_with(article) && trimmed.len() > article.len() {
+                let candidate = trimmed[article.len()..].trim_start();
+                if !candidate.is_empty() && candidate != trimmed {
+                    titles.push(candidate.to_string());
+                }
+            }
+        }
+
         titles
     }
 
