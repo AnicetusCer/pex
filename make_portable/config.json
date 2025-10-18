@@ -1,6 +1,7 @@
 {
-  "plex_db_source": "REPLACE_ME_WITH_PATH/plex_epg.db",
+  "plex_epg_db_source": "REPLACE_ME_WITH_PATH/plex_epg.db",
   "cache_dir": ".pex_cache",
+  "owned_source": "filesystem",
   "library_roots": [
     "REPLACE_ME_WITH_PATH/Movies"
   ],

@@ -1,25 +1,26 @@
-// src/app/owned.rs
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::thread;
 
-use eframe::egui as eg;
 use tracing::warn;
 
+use crate::app::cache;
 use crate::app::types::OwnedMsg;
-use crate::config::load_config;
+use crate::app::utils;
+use crate::app::PexApp;
 
-const OWNED_MANIFEST_VERSION: u32 = 1;
+const OWNED_MANIFEST_VERSION: u32 = 2;
 
 fn default_manifest_version() -> u32 {
     0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct OwnedManifest {
+pub(crate) struct OwnedManifest {
     #[serde(default = "default_manifest_version")]
     version: u32,
     dirs: HashMap<String, DirSnapshot>,
@@ -52,10 +53,12 @@ struct FileSnapshot {
     path: String,
     #[serde(default)]
     size: Option<u64>,
+    #[serde(default)]
+    year_hint: Option<i32>,
 }
 
 impl OwnedManifest {
-    fn load() -> Self {
+    pub(crate) fn load() -> Self {
         let path = Self::path();
         match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Self>(&bytes) {
@@ -87,7 +90,7 @@ impl OwnedManifest {
         }
     }
 
-    fn save(&self) -> io::Result<()> {
+    pub(crate) fn save(&self) -> io::Result<()> {
         let mut manifest = self.clone();
         manifest.version = OWNED_MANIFEST_VERSION;
         let path = Self::path();
@@ -101,15 +104,70 @@ impl OwnedManifest {
         fs::rename(tmp, path)
     }
 
-    fn save_if_changed(&self, previous: &Self) -> io::Result<bool> {
+    pub(crate) fn save_if_changed(&self, previous: &Self) -> io::Result<bool> {
         if self == previous {
             return Ok(false);
         }
         self.save()?;
         Ok(true)
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.dirs.is_empty()
+    }
+
+    pub(crate) fn rebuild_hd_flags(
+        &mut self,
+    ) -> Result<
+        (
+            HashSet<String>,
+            HashSet<String>,
+            HashMap<String, Option<u64>>,
+            bool,
+        ),
+        String,
+    > {
+        let mut owned: HashSet<String> = HashSet::new();
+        let mut hd_keys: HashSet<String> = HashSet::new();
+        let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
+        let mut changed = false;
+
+        for snapshot in self.dirs.values_mut() {
+            for file in snapshot.files.iter_mut() {
+                if file.path.trim().is_empty() {
+                    return Err(
+                        "Owned manifest is missing file paths; run 'Refresh owned scan' once to upgrade."
+                            .into(),
+                    );
+                }
+
+                let path = Path::new(&file.path);
+                let (modified, size) = utils::file_modified_and_size(path);
+                if file.modified != modified {
+                    file.modified = modified;
+                    changed = true;
+                }
+                if file.size != size {
+                    file.size = size;
+                    changed = true;
+                }
+
+                if let Some(result) = utils::is_path_hd(path) {
+                    if result != file.hd {
+                        file.hd = result;
+                        changed = true;
+                    }
+                }
+
+                accumulate_owned_entry(file, &mut owned, &mut hd_keys, &mut owned_dates);
+            }
+        }
+
+        Ok((owned, hd_keys, owned_dates, changed))
+    }
+
     fn path() -> PathBuf {
-        crate::app::cache::cache_dir().join("owned_manifest.json")
+        cache::cache_dir().join("owned_manifest.json")
     }
 
     fn insert_snapshot(&mut self, dir: String, snapshot: DirSnapshot) {
@@ -133,57 +191,72 @@ impl OwnedManifest {
         }
         false
     }
+}
 
-    fn rebuild_hd_flags(
-        &mut self,
-    ) -> Result<
-        (
-            HashSet<String>,
-            HashSet<String>,
-            HashMap<String, Option<u64>>,
-            bool,
-        ),
-        String,
-    > {
-        use std::path::Path;
+pub(crate) struct OwnedScanFs;
 
-        let mut owned: HashSet<String> = HashSet::new();
-        let mut hd_keys: HashSet<String> = HashSet::new();
-        let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
-        let mut changed = false;
+impl OwnedScanFs {
+    pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>, library_roots: Vec<PathBuf>) {
+        thread::spawn(move || {
+            use OwnedMsg::{Done, Info};
 
-        for snapshot in self.dirs.values_mut() {
-            for file in snapshot.files.iter_mut() {
-                if file.path.trim().is_empty() {
-                    return Err(
-                        "Owned manifest is missing file paths; run 'Refresh owned scan' once to upgrade."
-                            .into(),
-                    );
-                }
-
-                let path = Path::new(&file.path);
-                let (modified, size) = crate::app::utils::file_modified_and_size(path);
-                if file.modified != modified {
-                    file.modified = modified;
-                    changed = true;
-                }
-                if file.size != size {
-                    file.size = size;
-                    changed = true;
-                }
-
-                if let Some(result) = crate::app::utils::is_path_hd(path) {
-                    if result != file.hd {
-                        file.hd = result;
-                        changed = true;
-                    }
-                }
-
-                accumulate_owned_entry(file, &mut owned, &mut hd_keys, &mut owned_dates);
+            if library_roots.is_empty() {
+                let _ = tx.send(Info(
+                    "No library_roots in config.json; owned scan skipped.".into(),
+                ));
+                let _ = tx.send(Done {
+                    keys: HashSet::new(),
+                    modified: HashMap::new(),
+                });
+                return;
             }
-        }
 
-        Ok((owned, hd_keys, owned_dates, changed))
+            let manifest = OwnedManifest::load();
+            let mut new_manifest = OwnedManifest::default();
+            let mut owned: HashSet<String> = HashSet::new();
+            let mut hd_keys: HashSet<String> = HashSet::new();
+            let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
+
+            for root in &library_roots {
+                if !root.exists() {
+                    let _ = tx.send(Info(format!("Owned scan: missing root {}", root.display())));
+                    continue;
+                }
+
+                scan_directory(
+                    root,
+                    &manifest,
+                    &mut new_manifest,
+                    &mut owned,
+                    &mut hd_keys,
+                    &mut owned_dates,
+                    &tx,
+                );
+            }
+
+            let manifest_changed = match new_manifest.save_if_changed(&manifest) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    warn!("Failed to persist owned manifest: {err}");
+                    false
+                }
+            };
+
+            if manifest_changed {
+                let cache_dir = cache::cache_dir();
+                if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
+                    warn!("Failed to persist owned sidecar: {err}");
+                }
+                if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
+                    warn!("Failed to persist owned HD sidecar: {err}");
+                }
+            }
+
+            let _ = tx.send(Done {
+                keys: owned,
+                modified: owned_dates,
+            });
+        });
     }
 }
 
@@ -338,7 +411,7 @@ fn scan_directory(
             continue;
         }
 
-        let (modified, size) = crate::app::utils::file_modified_and_size(&path);
+        let (modified, size) = utils::file_modified_and_size(&path);
         entries.push(DirEntryInfo {
             path,
             modified,
@@ -407,8 +480,8 @@ fn scan_directory(
                     .unwrap_or_default();
                 let year = extract_year_from_filename(stem);
                 let title = clean_owned_title(stem, year);
-                let key = crate::app::PexApp::make_owned_key(&title, year);
-                let hd = crate::app::utils::is_path_hd(&path).unwrap_or(false);
+                let key = PexApp::make_owned_key(&title, year);
+                let hd = utils::is_path_hd(&path).unwrap_or(false);
                 let file_entry = FileSnapshot {
                     key,
                     hd,
@@ -416,6 +489,7 @@ fn scan_directory(
                     title_hint: Some(title.clone()),
                     path: path.to_string_lossy().into_owned(),
                     size,
+                    year_hint: year,
                 };
                 accumulate_owned_entry(&file_entry, owned, hd_keys, owned_dates);
                 snapshot.files.push(file_entry);
@@ -426,7 +500,6 @@ fn scan_directory(
     new_manifest.insert_snapshot(dir_str, snapshot);
 }
 
-// --------- small helpers (private to this module) ---------
 fn is_video_ext(p: &Path) -> bool {
     let ext = p
         .extension()
@@ -470,7 +543,7 @@ fn extract_year_from_filename(stem: &str) -> Option<i32> {
     if candidate.is_some() {
         candidate
     } else {
-        crate::app::utils::find_year_in_str(stem)
+        utils::find_year_in_str(stem)
     }
 }
 
@@ -551,22 +624,58 @@ fn accumulate_owned_entry(
     hd_keys: &mut HashSet<String>,
     owned_dates: &mut HashMap<String, Option<u64>>,
 ) {
-    owned.insert(file.key.clone());
-    if file.hd {
-        hd_keys.insert(file.key.clone());
-    }
-    owned_dates.insert(file.key.clone(), file.modified);
+    let mut insert_key = |key: String| {
+        owned.insert(key.clone());
+        if file.hd {
+            hd_keys.insert(key.clone());
+        }
+        owned_dates.insert(key, file.modified);
+    };
 
     if let Some(title) = &file.title_hint {
-        let alt_key = crate::app::PexApp::make_owned_key(title, None);
-        if alt_key != file.key {
-            owned.insert(alt_key.clone());
-            if file.hd {
-                hd_keys.insert(alt_key.clone());
-            }
-            owned_dates.insert(alt_key, file.modified);
+        let year_hint = file.year_hint.or_else(|| owned_year_from_key(&file.key));
+        for key in PexApp::owned_key_variants(title, year_hint) {
+            insert_key(key);
         }
+    } else {
+        insert_key(file.key.clone());
     }
+}
+
+pub(crate) fn persist_owned_keys_sidecar(
+    cache_dir: &Path,
+    owned_keys: &HashSet<String>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = cache_dir.join("owned_all.txt");
+    let mut f = std::fs::File::create(&path)?;
+    for k in owned_keys {
+        writeln!(f, "{k}")?;
+    }
+    Ok(())
+}
+
+fn owned_year_from_key(key: &str) -> Option<i32> {
+    let mut parts = key.split(':');
+    let _title = parts.next()?;
+    let year_part = parts.next()?;
+    match year_part.parse::<i32>() {
+        Ok(y) if y > 0 => Some(y),
+        _ => None,
+    }
+}
+
+pub(crate) fn persist_owned_hd_sidecar(
+    cache_dir: &Path,
+    hd_keys: &HashSet<String>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = cache_dir.join("owned_hd.txt");
+    let mut f = std::fs::File::create(&path)?;
+    for k in hd_keys {
+        writeln!(f, "{k}")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -616,239 +725,5 @@ mod tests {
         let key_file = PexApp::make_owned_key(&cleaned, year);
         let key_row = PexApp::make_owned_key("2012", Some(2009));
         assert_eq!(key_file, key_row);
-    }
-}
-
-fn persist_owned_keys_sidecar(
-    cache_dir: &Path,
-    owned_keys: &HashSet<String>,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let path = cache_dir.join("owned_all.txt");
-    let mut f = std::fs::File::create(&path)?;
-    for k in owned_keys {
-        writeln!(f, "{k}")?;
-    }
-    Ok(())
-}
-
-fn persist_owned_hd_sidecar(cache_dir: &Path, hd_keys: &HashSet<String>) -> std::io::Result<()> {
-    use std::io::Write;
-    let path = cache_dir.join("owned_hd.txt");
-    let mut f = std::fs::File::create(&path)?;
-    for k in hd_keys {
-        writeln!(f, "{k}")?;
-    }
-    Ok(())
-}
-
-impl crate::app::PexApp {
-    /// Kick off a non-blocking owned-file scan across library_roots.
-    pub(crate) fn start_owned_scan(&mut self) {
-        if self.owned_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
-        self.owned_rx = Some(rx);
-
-        // Resolve roots from config and launch the scanner thread.
-        let cfg = load_config();
-        let roots: Vec<PathBuf> = cfg.library_roots.into_iter().map(PathBuf::from).collect();
-        self.owned_scan_in_progress = true;
-        self.record_owned_message(format!(
-            "Stage 3/4 - Scanning owned library ({} root{}). Powers Owned badges and HD upgrade hints; large libraries may take a while.",
-            roots.len(),
-            if roots.len() == 1 { "" } else { "s" }
-        ));
-        self.set_status("Stage 3/4 - Scanning owned library (marks Owned titles and HD upgrades).");
-        Self::spawn_owned_scan(tx, roots);
-    }
-
-    pub(crate) fn start_owned_hd_refresh(&mut self) -> Result<(), String> {
-        if self.owned_scan_in_progress {
-            return Err("Another owned-library operation is already running; please wait.".into());
-        }
-
-        let manifest = OwnedManifest::load();
-        if manifest.dirs.is_empty() {
-            return Err(
-                "Owned manifest is empty. Run 'Refresh owned scan' once before refreshing HD flags."
-                    .into(),
-            );
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
-        self.owned_rx = Some(rx);
-        self.owned_scan_in_progress = true;
-        self.record_owned_message("Stage 3/4 - Refreshing HD flags using cached manifest.");
-        self.set_status("Stage 3/4 - Refreshing HD flags (re-running ffprobe on owned files).");
-
-        std::thread::spawn(move || {
-            use OwnedMsg::{Done, Error, Info};
-            let mut manifest = manifest;
-            let _ = tx.send(Info(
-                "Stage 3/4 - Refreshing HD flags using cached manifest.".into(),
-            ));
-
-            match manifest.rebuild_hd_flags() {
-                Err(err) => {
-                    let _ = tx.send(Error(err));
-                }
-                Ok((owned, hd_keys, owned_dates, changed)) => {
-                    if changed {
-                        if let Err(save_err) = manifest.save() {
-                            let _ = tx
-                                .send(Error(format!("Failed to save owned manifest: {save_err}")));
-                            return;
-                        }
-                    }
-
-                    let cache_dir = crate::app::cache::cache_dir();
-                    if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
-                        warn!("Failed to persist owned sidecar: {err}");
-                    }
-                    if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
-                        warn!("Failed to persist owned HD sidecar: {err}");
-                    }
-
-                    let _ = tx.send(Done {
-                        keys: owned,
-                        modified: owned_dates,
-                    });
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    /// Apply the owned flags using the computed key set (no-ops if not ready).
-    pub(crate) fn apply_owned_flags(&mut self) {
-        let Some(keys) = &self.owned_keys else {
-            return;
-        };
-        let modified = self.owned_modified.as_ref();
-        for row in &mut self.rows {
-            let key = row.owned_key.as_str();
-            row.owned = keys.contains(key);
-            row.owned_modified = modified.and_then(|m| m.get(key)).and_then(|v| *v);
-        }
-    }
-
-    pub(crate) fn spawn_owned_scan(tx: Sender<OwnedMsg>, library_roots: Vec<PathBuf>) {
-        use OwnedMsg::{Done, Info};
-
-        std::thread::spawn(move || {
-            if library_roots.is_empty() {
-                let _ = tx.send(Info(
-                    "No library_roots in config.json; owned scan skipped.".into(),
-                ));
-                let _ = tx.send(Done {
-                    keys: HashSet::new(),
-                    modified: HashMap::new(),
-                });
-                return;
-            }
-
-            let manifest = OwnedManifest::load();
-            let mut new_manifest = OwnedManifest::default();
-            let mut owned: HashSet<String> = HashSet::new();
-            let mut hd_keys: HashSet<String> = HashSet::new();
-            let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
-
-            for root in &library_roots {
-                if !root.exists() {
-                    let _ = tx.send(Info(format!("Owned scan: missing root {}", root.display())));
-                    continue;
-                }
-
-                scan_directory(
-                    root,
-                    &manifest,
-                    &mut new_manifest,
-                    &mut owned,
-                    &mut hd_keys,
-                    &mut owned_dates,
-                    &tx,
-                );
-            }
-
-            let manifest_changed = match new_manifest.save_if_changed(&manifest) {
-                Ok(changed) => changed,
-                Err(err) => {
-                    warn!("Failed to persist owned manifest: {err}");
-                    false
-                }
-            };
-
-            if manifest_changed {
-                let cache_dir = crate::app::cache::cache_dir();
-                if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
-                    warn!("Failed to persist owned sidecar: {err}");
-                }
-                if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
-                    warn!("Failed to persist owned HD sidecar: {err}");
-                }
-            }
-
-            let _ = tx.send(Done {
-                keys: owned,
-                modified: owned_dates,
-            });
-        });
-    }
-
-    /// Drain owned-scan messages without blocking the UI thread.
-    pub(crate) fn poll_owned_scan(&mut self, _ctx: &eg::Context) {
-        use crate::app::types::OwnedMsg::{Done, Error, Info};
-
-        loop {
-            let msg = {
-                let rx = match self.owned_rx.as_ref() {
-                    Some(r) => r,
-                    None => return,
-                };
-                match rx.try_recv() {
-                    Ok(m) => m,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        self.owned_scan_in_progress = false;
-                        break;
-                    }
-                }
-            };
-
-            match msg {
-                Info(s) => {
-                    self.record_owned_message(s.clone());
-                    self.owned_scan_in_progress = true;
-                    self.set_status(s);
-                }
-                Error(e) => {
-                    let msg = format!("Owned scan error: {e}");
-                    self.record_owned_message(msg.clone());
-                    self.owned_scan_in_progress = false;
-                    self.set_status(msg);
-                }
-                Done { keys, modified } => {
-                    let count = keys.len();
-                    self.owned_keys = Some(keys);
-                    self.owned_hd_keys = Self::load_owned_hd_sidecar();
-                    self.owned_modified = Some(modified);
-                    self.apply_owned_flags();
-                    self.mark_dirty();
-                    self.owned_scan_in_progress = false;
-                    self.record_owned_message(format!("Owned scan complete ({count} titles)."));
-                    if let Some(msg) = self.stage4_complete_message.clone() {
-                        self.set_status(msg);
-                    } else {
-                        self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
-                    }
-                    if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
-                        self.boot_phase = crate::app::BootPhase::Ready;
-                    }
-                }
-            }
-        }
     }
 }

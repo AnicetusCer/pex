@@ -30,6 +30,7 @@ demand, keeping the UI responsive even on large guides.
 and genre selectors, plus multiple sort orders.
 - 📚 **Owned library awareness** – incremental scans of your movie folders feed
 owned/HD badges and “recorded on” timestamps directly into the grid.
+- 🎯 **DVR awareness** – scheduled recordings show a red *REC* badge and detail call-out pulled from the Plex library database.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional IMDb ratings, and formatted descriptions.
 - 🧰 **Operator controls** – quick refresh/clear actions for poster, ffprobe,
@@ -37,6 +38,33 @@ and owned caches as well as worker tuning knobs.
 
 Pex runs on Windows, macOS, and Linux (including WSL) using
 [egui/eframe](https://github.com/emilk/egui) for the native UI.
+
+---
+
+## Repository Layout
+
+- `src/`
+  - `main.rs` / `lib.rs` – launch the egui app and wire tracing.
+  - `config.rs` – parses `config.json`, owns `OwnedSourceKind`, and exposes helper paths for the copied databases.
+  - `app/`
+    - `mod.rs` – central application state, message pump, advanced actions, and egui integration.
+    - `prep.rs` – copies the Plex databases (daily freshness), queries poster rows, and emits `PrepMsg`.
+    - `prefetch.rs` / `gfx.rs` – background workers + GPU upload helpers for poster textures.
+    - `cache.rs` / `prefs.rs` – cache directory helpers, poster/file pruning, persisted UI preferences.
+    - `owned/` – filesystem and Plex-library scanners that build `owned_manifest.json` and HD sidecars.
+    - `scheduled.rs` – loads scheduled DVR entries from `media_grabs`, `media_subscriptions`, and `metadata_subscription_desired_items`.
+    - `detail.rs`, `filters.rs`, `types.rs`, `utils.rs` – UI panels, filtering & sorting logic, shared structs, and formatting helpers.
+    - `ui/` – splash/grid/top bar egui widgets.
+  - `assets/` – embedded icon and other compile-time resources.
+  - `bin/` – optional CLI entry-points used during development.
+- `epg_explorer_tool/`
+  - `db_explorer.rs` – CLI for poking at the EPG SQLite.
+  - `library_db_explorer.rs` – companion CLI for the Plex library database (owned + DVR state).
+  - `*_ai_primer.yaml` – primers that document how the helpers should be extended.
+- `make_portable/` – scripts and template config for packaging a portable build.
+- `db/` – working copies of the Plex databases (populated on first run).
+- `.pex_cache/` – generated cache directory (posters, owned manifests, ffprobe cache, UI prefs).
+- `config.example.json` – starter configuration; copy to `config.json` for local runs.
 
 ---
 
@@ -49,9 +77,7 @@ the accompanying WAL/SHM files) exist on disk.
   - **Windows:** `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases`
   - **Linux (service install):** `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases`
   - **Docker:** bind the Plex config volume; copy the database out via the host.
-- Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or
-point `plex_db_source` at the live Plex database so Pex pulls in a fresh copy
-once per day.
+- Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or point `plex_epg_db_source` at the live Plex database so Pex pulls in a fresh copy once per day.
 
 ### Toolchain
 - Rust toolchain **1.74 or newer** (`rustup toolchain install stable`)
@@ -76,8 +102,15 @@ the heavy throttling on the public demo key when fetching IMDb ratings.
 
 2. **Populate the database folder**
    - Copy your Plex EPG SQLite file into `db/plex_epg.db`, *or*
-   - Set `plex_db_source` in `config.json` to the path of Plex’s live DB so Pex
+   - Set `plex_epg_db_source` in `config.json` to the path of Plex’s live DB so Pex
      can maintain `db/plex_epg.db` automatically.
+   - Optionally set `plex_library_db_source` to the path of Plex’s library
+     database so Pex keeps `db/plex_library.db` in sync for owned detection
+     experiments.
+   - Choose `owned_source`: keep the default and switch to `plex_library` for
+     the fastest start-up, or set it to `filesystem` to crawl your local folders.
+     The filesystem mode walks every movie directory and expects files named
+     `Title (Year).ext`, so large libraries can take quite a while on the first run.
 
 3. **Edit `config.json`** (see the [Configuration Reference](#configuration-reference)).
 
@@ -86,8 +119,10 @@ the heavy throttling on the public demo key when fetching IMDb ratings.
    cargo run --release
    ```
    The first launch will
-   - copy the Plex database if `plex_db_source` is set,
-   - scan your owned library roots,
+   - copy the Plex database if `plex_epg_db_source` is set,
+   - copy the Plex library database if `plex_library_db_source` is set,
+   - load owned titles using the configured `owned_source` (filesystem scans may
+     take a long time on first run),
    - warm the ffprobe cache, and
    - start poster prefetching.
 
@@ -103,7 +138,9 @@ otherwise stated; absent keys fall back to reasonable defaults.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `library_roots` | array of strings | `[]` | Absolute paths scanned for owned movie files. Multiple paths are supported. |
-| `plex_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
+| `owned_source` | string | `filesystem` | Choose how Pex determines owned titles: `plex_library` (recommended) reads from Plex's `com.plexapp.plugins.library.db`; `filesystem` crawls the folders in `library_roots`, which can take a long time on large collections and expects files named `Title (Year).ext`. |
+| `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
+| `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned-manifest data, UI prefs, and ffprobe cache. |
 | `ffprobe_cmd` | string or `null` | `ffprobe` | Override the ffprobe executable (useful on Windows/WSL when ffprobe is not on PATH). |
 | `omdb_api_key` | string or `null` | demo key | Personal OMDb API key for IMDb ratings. Leave blank to use the public key (heavy rate limiting). |
@@ -115,11 +152,11 @@ Example configuration:
 {
   "library_roots": [
     "D:/Libraries/Movies",
-    "\\\
-as\Archive\Films"
+    "\\\\nas\\Archive\\Films"
   ],
-  "plex_db_source": "\\\
-as\PlexConfig\Databases\\tv.plex.providers.epg.cloud.db",
+  "plex_epg_db_source": "\\\\nas\\PlexConfig\\Databases\\tv.plex.providers.epg.cloud.db",
+  "plex_library_db_source": "\\\\ds\\PlexMediaServer\\AppData\\Plex Media Server\\Plug-in Support\\Databases\\com.plexapp.plugins.library.db",
+  "owned_source": "filesystem",
   "cache_dir": ".pex_cache",
   "ffprobe_cmd": "C:/Tools/ffmpeg/bin/ffprobe.exe",
   "omdb_api_key": "YOUR-OMDB-KEY",
@@ -130,12 +167,61 @@ as\PlexConfig\Databases\\tv.plex.providers.epg.cloud.db",
 > Tip: on Linux paths use forward slashes; on Windows double any backslashes in
 JSON strings or switch to forward slashes.
 
+### Owned detection modes
+
+- `owned_source = "filesystem"` (default)  
+  Walks every directory listed in `library_roots`, normalises filenames such as
+  `Movie Title (2024).mkv`, and caches the mapping in `owned_manifest.json`.
+  The first run can take a long time on large NAS shares, but subsequent runs
+  only rescan folders whose timestamp changed.
+- `owned_source = "plex_library"`  
+  Reads owned titles from the Plex library database (`db/plex_library.db`)
+  instead of crawling the filesystem. This is the fastest option once
+  `plex_library_db_source` is configured.
+
+### Database copy settings
+
+- `plex_epg_db_source` – path to `tv.plex.providers.epg.cloud*.db` on the Plex
+  server. Pex copies it into `db/plex_epg.db` (refreshing at most once every 24 h).
+- `plex_library_db_source` – optional path to
+  `com.plexapp.plugins.library.db`. When present, Pex clones it into
+  `db/plex_library.db` and uses it for owned detection and DVR badges.
+
+You can locate these files by:
+
+| Platform | Default location |
+| --- | --- |
+| **Windows (desktop)** | `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases\` |
+| **Windows (service mode)** | `%PROGRAMDATA%\Plex Media Server\Plug-in Support\Databases\` |
+| **Linux** | `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
+| **Synology** | `/var/packages/Plex Media Server/target/Plex Media Server/Plug-in Support/Databases/` |
+| **Docker** | Whatever host path you bind to `/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
+
+Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Plex is stopped, or let Pex copy from the live path on each start.
+
+### Other useful keys
+
+- `library_roots` – one or more absolute paths containing your movie files. Use
+  forward slashes on every OS (e.g., `D:/Media/Movies`, `/mnt/nas/movies`).
+- `cache_dir` – move the poster/manifest/ffprobe cache elsewhere; relative paths are resolved relative to the repo root.
+- `ffprobe_cmd` – explicit path to `ffprobe` when it is not on `PATH`. Accepts either `"C:/Tools/ffmpeg/bin/ffprobe.exe"` or `/usr/bin/ffprobe`.
+- `omdb_api_key` – replace the bundled demo key (`thewdb`) with your personal OMDb key to avoid rate limits.
+- `log_level` – override the default tracing verbosity (`trace` → most verbose).
+
+### Environment variables
+
+- `PEX_DISABLE_PREFETCH=1` – skip poster downloads (useful when testing offline modes).
+- `RUST_LOG=info` (or `debug`) – surface prep/owned/scheduled traces in the terminal.
+
 ---
 
 ## Data & Cache Locations
 
 - `db/plex_epg.db` — working copy of the Plex EPG database (plus WAL/SHM files
   created on demand).
+- `db/plex_library.db` — optional working copy of Plex’s library database,
+  copied when `plex_library_db_source` is configured.
+- DVR metadata (`media_grabs`, `media_subscriptions`, `metadata_subscription_desired_items`) is read from `db/plex_library.db` to drive the *REC* badge and owned detection.
 - `.pex_cache/` — posters, channel icons, owned-manifest, ffprobe cache, and UI
   preference files. Poster images older than 14 days are pruned automatically
   on startup.
@@ -147,7 +233,7 @@ JSON strings or switch to forward slashes.
 ## Typical Workflows
 
 ### First run (cold start)
-1. Copy or configure access to the Plex DB.
+1. Copy or configure access to the Plex EPG DB (and optionally the library DB).
 2. Populate `config.json` with your library roots and ffprobe/OMDb settings.
 3. Launch with `cargo run --release`.
 4. Let the initial owned scan and poster prefetch finish (progress appears in
@@ -155,8 +241,9 @@ the status bar). Large libraries may take several minutes.
 
 ### Daily usage
 - Launch the app; the UI resumes where you left off.
-- If `plex_db_source` is set, Pex checks once per day whether the Plex DB needs
-  copying.
+- If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
+  day whether the respective database copy needs refreshing.
+- Scheduled recordings sync automatically after poster prep; queued movies show a red *REC* badge in the grid and detail panel.
 - Owned and HD badges stay up-to-date thanks to incremental scanning and the
   ffprobe cache.
 
@@ -181,11 +268,12 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 
 ## Troubleshooting & Diagnostics
 
-- **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_db_source` path
-  is reachable and that you have permission to read it.
+- **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
+  `plex_library_db_source` paths are reachable and readable.
 - **Owned scan never completes:** check the Advanced panel log for the last
   processed directory; ensure all library roots are accessible and contain only
   media files you expect.
+- **REC badge missing:** confirm `plex_library_db_source` is configured, the copied `db/plex_library.db` contains up-to-date `media_subscriptions` rows, and you restarted after scheduling the recording.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days
   automatically, so re-open the app after a while to fetch fresh artwork.
@@ -202,7 +290,9 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 - Run tests with `cargo test`.
 - Optional: `cargo clippy --all-targets -- -D warnings` (requires the Clippy
   component).
-- DB inspection helper: `cargo run --bin db_explorer metadata_items 10`.
+- DB inspection helpers:
+  - `cargo run --bin db_explorer metadata_items 10`
+  - `cargo run --bin library_db_explorer -- --tables`
 
 ---
 
