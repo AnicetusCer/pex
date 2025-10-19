@@ -1,9 +1,18 @@
-# Pex – Plex EPG Explorer
+﻿# Pex – Plex EPG Explorer
 
 Pex is a desktop viewer for the Plex Electronic Program Guide (EPG). It reads
 Plex’s DVR SQLite database, assembles a poster wall of upcoming airings,
 highlights the titles you already own, and layers on rich metadata such as
 channel badges, HD/SD hints, and on-demand IMDb ratings.
+
+---
+
+### Why I built it
+
+- This started as a personal project: each week I sift through upcoming TV movies to decide what to record.
+- The stock Plex web UI felt too barebones for that workflow, so I wanted a richer experience for anyone in the Plex community who still enjoys browsing broadcast schedules.
+- While the app concentrates on TV films, the bundled SQLite explorer tools make it easy for others to tweak or extend it for different Plex data.
+- Developed primarily on Windows 11 with WSL Fedora 42; both environments are exercised regularly. macOS hasn't been tested first-hand, but the Rust/egui stack produces native binaries for both x86_64 and ARM64, so it should run wherever those architectures are supported (Intel/AMD PCs or Apple Silicon).
 
 ---
 
@@ -28,8 +37,7 @@ Highlights:
 demand, keeping the UI responsive even on large guides.
 - 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
 and genre selectors, plus multiple sort orders.
-- 📚 **Owned library awareness** – incremental scans of your movie folders feed
-owned/HD badges and “recorded on” timestamps directly into the grid.
+- ?? **Owned library awareness** - mirrored Plex library data (with optional filesystem scanning) feeds owned/HD badges and "recorded on" timestamps directly into the grid.
 - 🎯 **DVR awareness** – scheduled recordings show a red *REC* badge and detail call-out pulled from the Plex library database.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional IMDb ratings, and formatted descriptions.

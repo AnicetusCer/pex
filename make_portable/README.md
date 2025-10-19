@@ -1,6 +1,13 @@
-# Welcome to Pex Portable
+﻿# Welcome to Pex Portable
 
 This folder contains a ready-to-run copy of **Pex – Plex EPG Explorer**. It was created mainly so i could browse plex tv guide but show me which movies I already have in my libraries. It is written in a modular way, so it should be fairly easy to modify for your own needs. 
+
+### Why this exists
+
+- Personal project: each week I comb the broadcast guide for TV movies to schedule recordings.
+- The stock Plex interface felt too limited for that workflow, so this build gives fellow Plex users a richer guide view.
+- Verified on Windows 11 and WSL Fedora 42; macOS isn't tested yet, but the Rust/egui stack targets both x86_64 and ARM64, so it should run on Intel/AMD PCs or Apple Silicon.
+
 
 This is the distributable, you do **not** need the Rust toolchain to run this; but you will if you want to mod it and run it directly from the source with `cargo run` command follow the steps below to get going, there is a more extensive readme in the root of the project.
 
