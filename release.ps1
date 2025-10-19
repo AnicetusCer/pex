@@ -233,13 +233,13 @@ if ($ghPath) {
 
         $distDir = "make_portable/dist"
         $assets = @()
-        if (-not $portableZipPath -and Test-Path (Join-Path $distDir $portableZipName)) {
+        if (-not $portableZipPath -and (Test-Path -Path (Join-Path $distDir $portableZipName))) {
             $portableZipPath = Join-Path $distDir $portableZipName
         }
-        if ($portableZipPath -and (Test-Path $portableZipPath)) {
+        if ($portableZipPath -and (Test-Path -Path $portableZipPath)) {
             $assets += Get-Item $portableZipPath
         }
-        elseif (Test-Path $distDir) {
+        elseif (Test-Path -Path $distDir) {
             Write-Host "Warning: Portable zip not found; falling back to raw dist files." -ForegroundColor Yellow
             $assets = Get-ChildItem $distDir -File
         }
