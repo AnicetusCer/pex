@@ -1,4 +1,4 @@
-mod owned_scan_fs;
+pub(crate) mod owned_scan_fs;
 pub(crate) mod owned_scan_plex;
 
 use std::collections::HashSet;

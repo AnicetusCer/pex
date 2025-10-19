@@ -6,7 +6,7 @@ use eframe::egui as eg;
 
 impl crate::app::PexApp {
     // Keep splash here; it's tiny and used early.
-    pub(crate) fn ui_render_splash(&mut self, ui: &mut eg::Ui) {
+    pub(crate) fn ui_render_splash(&self, ui: &mut eg::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(28.0);
             ui.heading("Initialising Plex EPG Explorer");

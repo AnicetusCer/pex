@@ -15,12 +15,12 @@ use crate::app::PexApp;
 
 const OWNED_MANIFEST_VERSION: u32 = 2;
 
-fn default_manifest_version() -> u32 {
+const fn default_manifest_version() -> u32 {
     0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct OwnedManifest {
+pub struct OwnedManifest {
     #[serde(default = "default_manifest_version")]
     version: u32,
     dirs: HashMap<String, DirSnapshot>,
@@ -56,6 +56,13 @@ struct FileSnapshot {
     #[serde(default)]
     year_hint: Option<i32>,
 }
+
+type RebuildOutput = (
+    HashSet<String>,
+    HashSet<String>,
+    HashMap<String, Option<u64>>,
+    bool,
+);
 
 impl OwnedManifest {
     pub(crate) fn load() -> Self {
@@ -98,8 +105,7 @@ impl OwnedManifest {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(&manifest)
-            .map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        let data = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, path)
     }
@@ -116,17 +122,7 @@ impl OwnedManifest {
         self.dirs.is_empty()
     }
 
-    pub(crate) fn rebuild_hd_flags(
-        &mut self,
-    ) -> Result<
-        (
-            HashSet<String>,
-            HashSet<String>,
-            HashMap<String, Option<u64>>,
-            bool,
-        ),
-        String,
-    > {
+    pub(crate) fn rebuild_hd_flags(&mut self) -> Result<RebuildOutput, String> {
         let mut owned: HashSet<String> = HashSet::new();
         let mut hd_keys: HashSet<String> = HashSet::new();
         let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
@@ -193,7 +189,7 @@ impl OwnedManifest {
     }
 }
 
-pub(crate) struct OwnedScanFs;
+pub struct OwnedScanFs;
 
 impl OwnedScanFs {
     pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>, library_roots: Vec<PathBuf>) {
@@ -642,7 +638,7 @@ fn accumulate_owned_entry(
     }
 }
 
-pub(crate) fn persist_owned_keys_sidecar(
+pub fn persist_owned_keys_sidecar(
     cache_dir: &Path,
     owned_keys: &HashSet<String>,
 ) -> std::io::Result<()> {
@@ -665,7 +661,7 @@ fn owned_year_from_key(key: &str) -> Option<i32> {
     }
 }
 
-pub(crate) fn persist_owned_hd_sidecar(
+pub fn persist_owned_hd_sidecar(
     cache_dir: &Path,
     hd_keys: &HashSet<String>,
 ) -> std::io::Result<()> {

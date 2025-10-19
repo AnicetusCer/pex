@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, str::FromStr};
 
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -13,23 +13,25 @@ pub enum OwnedSourceKind {
     PlexLibrary,
 }
 
-impl OwnedSourceKind {
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "filesystem" => Some(Self::Filesystem),
-            "plex_library" | "plex" | "plexlibrary" => Some(Self::PlexLibrary),
-            _ => None,
-        }
-    }
-}
-
 impl Default for OwnedSourceKind {
     fn default() -> Self {
         Self::Filesystem
     }
 }
 
-#[derive(Clone, Debug)]
+impl FromStr for OwnedSourceKind {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "filesystem" => Ok(Self::Filesystem),
+            "plex_library" | "plex" | "plexlibrary" => Ok(Self::PlexLibrary),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct AppConfig {
     pub cache_dir: Option<String>,
     pub plex_epg_db_source: Option<String>,
@@ -38,20 +40,6 @@ pub struct AppConfig {
     pub omdb_api_key: Option<String>,
     pub library_roots: Vec<String>,
     pub owned_source: OwnedSourceKind,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            cache_dir: None,
-            plex_epg_db_source: None,
-            plex_library_db_source: None,
-            ffprobe_cmd: None,
-            omdb_api_key: None,
-            library_roots: Vec::new(),
-            owned_source: OwnedSourceKind::default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,9 +85,9 @@ pub fn load_config() -> AppConfig {
                     cfg.library_roots = list;
                 }
                 if let Some(mode) = parsed.owned_source {
-                    match OwnedSourceKind::from_str(&mode) {
-                        Some(kind) => cfg.owned_source = kind,
-                        None => warn!(
+                    match mode.parse::<OwnedSourceKind>() {
+                        Ok(kind) => cfg.owned_source = kind,
+                        Err(_) => warn!(
                             "Unknown owned_source `{mode}` in config.json; falling back to filesystem."
                         ),
                     }

@@ -87,7 +87,7 @@ fn list_tables(conn: &Connection) -> Result<()> {
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
     let rows = stmt
-        .query_map([], |row| Ok(row.get::<_, String>(0)?))?
+        .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
     println!("Tables ({}):", rows.len());

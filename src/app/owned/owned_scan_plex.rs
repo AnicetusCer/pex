@@ -13,7 +13,7 @@ use crate::app::types::OwnedMsg;
 use crate::app::PexApp;
 use crate::config::local_library_db_path;
 
-pub(crate) struct OwnedScanPlex;
+pub struct OwnedScanPlex;
 
 impl OwnedScanPlex {
     pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>, library_roots: Vec<PathBuf>) {

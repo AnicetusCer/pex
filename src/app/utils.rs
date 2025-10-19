@@ -312,8 +312,7 @@ impl ProbeCache {
             fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("tmp");
-        let data =
-            serde_json::to_vec_pretty(self).map_err(|err| io::Error::new(ErrorKind::Other, err))?;
+        let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         fs::write(&tmp, data)?;
         fs::rename(tmp, path)?;
         Ok(())
@@ -363,18 +362,15 @@ impl ProbeCache {
 }
 
 pub fn file_modified_and_size(path: &Path) -> (Option<u64>, Option<u64>) {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|dur| dur.as_secs());
-            let size = Some(meta.len());
-            (modified, size)
-        }
-        Err(_) => (None, None),
-    }
+    fs::metadata(path).map_or((None, None), |meta| {
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|dur| dur.as_secs());
+        let size = Some(meta.len());
+        (modified, size)
+    })
 }
 
 fn ffprobe_cmd() -> OsString {
@@ -438,11 +434,11 @@ fn ffprobe_cached_resolution(path: &Path) -> Option<(u32, u32)> {
     let (mtime, size) = file_modified_and_size(path);
 
     if let Some(ref key) = cache_key {
-        if let Some(hit) = FFPROBE_CACHE
+        let lookup_result = FFPROBE_CACHE
             .lock()
             .expect("ffprobe cache mutex poisoned")
-            .lookup(key, mtime, size)
-        {
+            .lookup(key, mtime, size);
+        if let Some(hit) = lookup_result {
             debug!("ffprobe cache hit for {key}");
             return Some((hit.width, hit.height));
         }
