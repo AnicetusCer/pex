@@ -92,7 +92,7 @@ fn parse_channel_meta(extra: &str) -> ChannelMeta {
     let thumb = find_val(extra, "at:channelThumb");
 
     ChannelMeta {
-        call_sign: call_sign.clone(),
+        call_sign,
         title,
         thumb,
     }
@@ -563,11 +563,12 @@ impl crate::app::PexApp {
                                     .as_ref()
                                     .map(|s| crate::app::utils::humanize_channel(s));
 
-                                let channel_display = normalized_title.clone().or_else(|| {
-                                    channel_raw
-                                        .as_ref()
-                                        .map(|c| crate::app::utils::humanize_channel(c))
-                                });
+                                let channel_display =
+                                    normalized_title.as_ref().cloned().or_else(|| {
+                                        channel_raw
+                                            .as_ref()
+                                            .map(|c| crate::app::utils::humanize_channel(c))
+                                    });
 
                                 let small_k = Self::small_key(&item.key);
                                 let path = crate::app::cache::find_any_by_key(&small_k);
@@ -586,8 +587,7 @@ impl crate::app::PexApp {
                                     tags_joined.as_deref(),
                                     channel_display.as_deref(),
                                 );
-                                let owned_key =
-                                    crate::app::PexApp::make_owned_key(&item.title, item.year);
+                                let owned_key = Self::make_owned_key(&item.title, item.year);
                                 let summary = item.summary.and_then(|s| {
                                     let trimmed = s.trim();
                                     if trimmed.is_empty() {

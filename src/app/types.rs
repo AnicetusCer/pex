@@ -2,6 +2,7 @@
 use eframe::egui::TextureHandle;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::SystemTime;
 
 // ---- cross-thread messages / data ----
@@ -85,24 +86,29 @@ impl DayRange {
             Self::Fourteen => "14",
         }
     }
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "2" => Some(Self::Two),
-            "4" => Some(Self::Four),
-            "5" => Some(Self::Five),
-            "7" => Some(Self::Seven),
-            "14" => Some(Self::Fourteen),
-            _ => None,
-        }
-    }
 
-    pub fn max_bucket(self, now_bucket: i64) -> Option<i64> {
+    pub const fn max_bucket(self, now_bucket: i64) -> Option<i64> {
         match self {
             Self::Two => Some(now_bucket + 2),
             Self::Four => Some(now_bucket + 4),
             Self::Five => Some(now_bucket + 5),
             Self::Seven => Some(now_bucket + 7),
             Self::Fourteen => Some(now_bucket + 14),
+        }
+    }
+}
+
+impl FromStr for DayRange {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "2" => Ok(Self::Two),
+            "4" => Ok(Self::Four),
+            "5" => Ok(Self::Five),
+            "7" => Ok(Self::Seven),
+            "14" => Ok(Self::Fourteen),
+            _ => Err(()),
         }
     }
 }
@@ -124,13 +130,18 @@ impl SortKey {
             Self::Genre => "genre",
         }
     }
-    pub fn from_str(s: &str) -> Option<Self> {
+}
+
+impl FromStr for SortKey {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "time" => Some(Self::Time),
-            "title" => Some(Self::Title),
-            "channel" => Some(Self::Channel),
-            "genre" => Some(Self::Genre),
-            _ => None,
+            "time" => Ok(Self::Time),
+            "title" => Ok(Self::Title),
+            "channel" => Ok(Self::Channel),
+            "genre" => Ok(Self::Genre),
+            _ => Err(()),
         }
     }
 }

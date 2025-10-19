@@ -10,18 +10,10 @@ use crate::app::utils;
 use crate::config::local_library_db_path;
 
 /// Snapshot of Plex DVR scheduled recordings pulled from media_grabs.
+#[derive(Default)]
 pub(crate) struct ScheduledIndex {
     guids: HashSet<String>,
     title_slots: HashMap<String, HashSet<i64>>,
-}
-
-impl Default for ScheduledIndex {
-    fn default() -> Self {
-        Self {
-            guids: HashSet::new(),
-            title_slots: HashMap::new(),
-        }
-    }
 }
 
 impl ScheduledIndex {

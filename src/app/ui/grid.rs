@@ -37,7 +37,7 @@ impl crate::app::PexApp {
 
         let card_w: f32 = self.poster_width_ui;
         let text_h: f32 = 56.0;
-        let card_h: f32 = card_w * 1.5 + text_h;
+        let card_h: f32 = card_w.mul_add(1.5, text_h);
 
         let mut uploads_left = super::super::MAX_UPLOADS_PER_FRAME;
 
@@ -56,7 +56,8 @@ impl crate::app::PexApp {
                         .floor()
                         .max(1.0) as usize;
 
-                    let used = cols as f32 * card_w + (cols.saturating_sub(1)) as f32 * H_SPACING;
+                    let used =
+                        (cols as f32).mul_add(card_w, (cols.saturating_sub(1)) as f32 * H_SPACING);
                     let left_pad = ((avail - used) * 0.5).max(0.0);
                     if left_pad > 0.0 {
                         ui.add_space(left_pad);
@@ -91,7 +92,10 @@ impl crate::app::PexApp {
                                     // rects
                                     let poster_rect = eg::Rect::from_min_max(
                                         rect.min,
-                                        eg::pos2(rect.min.x + card_w, rect.min.y + card_w * 1.5),
+                                        eg::pos2(
+                                            rect.min.x + card_w,
+                                            card_w.mul_add(1.5, rect.min.y),
+                                        ),
                                     );
                                     let text_rect = eg::Rect::from_min_max(
                                         eg::pos2(rect.min.x, poster_rect.max.y),
@@ -177,10 +181,10 @@ impl crate::app::PexApp {
                                         }
 
                                         // Label
-                                        let title_line = match row.year {
-                                            Some(y) => format!("{} ({})", row.title, y),
-                                            None => row.title.clone(),
-                                        };
+                                        let title_line = row.year.map_or_else(
+                                            || row.title.clone(),
+                                            |y| format!("{} ({})", row.title, y),
+                                        );
                                         let ch = row
                                             .channel
                                             .as_deref()

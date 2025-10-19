@@ -207,6 +207,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
     }
 }
 /// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
+///
 /// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
 /// This writes `<poster_cache_dir>/<key>.jpg`.
 pub fn download_and_store_resized(
@@ -309,7 +310,7 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
             .and_then(|e| e.to_str())
             .map(|s| s.to_ascii_lowercase());
 
-        let should_remove = if let Some(ext) = &ext {
+        let should_remove = ext.as_ref().is_none_or(|ext| {
             if ext == "part" {
                 true
             } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
@@ -319,9 +320,7 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
             } else {
                 true
             }
-        } else {
-            true
-        };
+        });
 
         if should_remove {
             fs::remove_file(&path)?;

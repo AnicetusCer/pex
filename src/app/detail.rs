@@ -83,10 +83,8 @@ impl crate::app::PexApp {
                 ui.add_space(8.0);
 
                 // Title (YYYY)
-                let title_display = match year {
-                    Some(y) => format!("{} ({})", title_text, y),
-                    None => title_text.clone(),
-                };
+                let title_display =
+                    year.map_or_else(|| title_text.clone(), |y| format!("{} ({})", title_text, y));
                 let channel_icon = channel_thumb
                     .as_deref()
                     .and_then(|thumb| self.channel_icon_texture(ctx, thumb));
@@ -118,7 +116,8 @@ impl crate::app::PexApp {
                 // Channel + time line (humanized)
                 if channel_display.is_some() || airing.is_some() {
                     let ch = channel_display
-                        .clone()
+                        .as_ref()
+                        .cloned()
                         .or_else(|| {
                             channel_raw
                                 .as_ref()

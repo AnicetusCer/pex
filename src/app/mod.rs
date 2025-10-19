@@ -242,18 +242,19 @@ impl PexApp {
     pub(crate) fn make_owned_key(title: &str, year: Option<i32>) -> String {
         let normalized = utils::normalize_title(title);
         let year = year.or_else(|| utils::find_year_in_str(title));
-        if let Some(year) = year {
-            format!("{normalized}:{year}")
-        } else {
-            let digest = md5::compute(normalized.as_bytes());
-            let short = format!("{:x}", digest);
-            let short = &short[..short.len().min(8)];
-            format!("{normalized}:0:{short}")
-        }
+        year.map_or_else(
+            || {
+                let digest = md5::compute(normalized.as_bytes());
+                let short = format!("{:x}", digest);
+                let short = &short[..short.len().min(8)];
+                format!("{normalized}:0:{short}")
+            },
+            |year| format!("{normalized}:{year}"),
+        )
     }
 
     /// Determine whether the airing metadata implies an HD broadcast.
-    pub(crate) fn row_broadcast_hd(row: &PosterRow) -> bool {
+    pub(crate) const fn row_broadcast_hd(row: &PosterRow) -> bool {
         row.broadcast_hd
     }
 
@@ -405,7 +406,7 @@ impl PexApp {
             if cfg
                 .plex_epg_db_source
                 .as_deref()
-                .map_or(false, |s| !s.trim().is_empty())
+                .is_some_and(|s| !s.trim().is_empty())
             {
                 self.setup_warnings.push(format!(
                     "Local Plex EPG database not found at {}; it will be copied from plex_epg_db_source on startup.",
@@ -448,8 +449,7 @@ impl PexApp {
         let omdb_missing = cfg
             .omdb_api_key
             .as_ref()
-            .map(|k| k.trim().is_empty())
-            .unwrap_or(true);
+            .is_none_or(|k| k.trim().is_empty());
         if omdb_missing {
             self.setup_warnings
                 .push("omdb_api_key not set; using the public demo key (rate limited).".into());
@@ -572,7 +572,7 @@ impl PexApp {
     fn ensure_rating_channel(&mut self) -> Sender<RatingMsg> {
         if self.rating_tx.is_none() {
             let (tx, rx) = std::sync::mpsc::channel::<RatingMsg>();
-            self.rating_tx = Some(tx.clone());
+            self.rating_tx = Some(tx);
             self.rating_rx = Some(rx);
         }
         self.rating_tx.as_ref().unwrap().clone()
@@ -782,7 +782,7 @@ impl PexApp {
         Ok(removed)
     }
 
-    fn refresh_poster_cache_light(&mut self) -> Result<usize, String> {
+    fn refresh_poster_cache_light(&self) -> Result<usize, String> {
         crate::app::cache::refresh_poster_cache_light().map_err(|e| e.to_string())
     }
 
@@ -850,19 +850,20 @@ fn fetch_rating_from_omdb(
         Err(err) => return RatingState::Error(format!("client: {err}")),
     };
 
-    let url = if let Some(id) = imdb_id {
-        format!("https://www.omdbapi.com/?i={}&apikey={}", id, api_key)
-    } else {
-        let mut url = format!(
-            "https://www.omdbapi.com/?t={}&apikey={}",
-            encode(title.trim()),
-            api_key
-        );
-        if let Some(y) = year {
-            url.push_str(&format!("&y={}", y));
-        }
-        url
-    };
+    let url = imdb_id.map_or_else(
+        || {
+            let mut url = format!(
+                "https://www.omdbapi.com/?t={}&apikey={}",
+                encode(title.trim()),
+                api_key
+            );
+            if let Some(y) = year {
+                url.push_str(&format!("&y={}", y));
+            }
+            url
+        },
+        |id| format!("https://www.omdbapi.com/?i={id}&apikey={api_key}"),
+    );
 
     let resp = match client.get(&url).send() {
         Ok(r) => r,
@@ -882,17 +883,19 @@ fn fetch_rating_from_omdb(
     };
 
     if parsed.response.eq_ignore_ascii_case("true") {
-        if let Some(r) = parsed.imdb_rating {
-            if r.trim().is_empty() || r.trim().eq_ignore_ascii_case("N/A") {
-                RatingState::NotFound
-            } else if let Ok(val) = r.trim().parse::<f32>() {
-                RatingState::Success(format!("IMDb {:.1}/10", val))
-            } else {
-                RatingState::Success(format!("IMDb {}", r.trim()))
-            }
-        } else {
-            RatingState::NotFound
-        }
+        parsed
+            .imdb_rating
+            .as_ref()
+            .map_or(RatingState::NotFound, |r| {
+                let trimmed = r.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("N/A") {
+                    RatingState::NotFound
+                } else if let Ok(val) = trimmed.parse::<f32>() {
+                    RatingState::Success(format!("IMDb {:.1}/10", val))
+                } else {
+                    RatingState::Success(format!("IMDb {trimmed}"))
+                }
+            })
     } else if let Some(err) = parsed.error {
         if err.to_ascii_lowercase().contains("not found") {
             RatingState::NotFound

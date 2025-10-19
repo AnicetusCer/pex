@@ -46,13 +46,13 @@ impl crate::app::PexApp {
 
             match k {
                 "day_range" => {
-                    if let Some(dr) = super::DayRange::from_str(v) {
+                    if let Ok(dr) = v.parse::<super::DayRange>() {
                         self.current_range = dr;
                     }
                 }
                 "search" => self.search_query = v.to_string(),
                 "sort_key" => {
-                    if let Some(sk) = super::SortKey::from_str(v) {
+                    if let Ok(sk) = v.parse::<super::SortKey>() {
                         self.sort_key = sk;
                     }
                 }
