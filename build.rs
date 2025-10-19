@@ -5,8 +5,7 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("src/assets/PEX.ico");
-        res
-            .compile()
+        res.compile()
             .expect("Failed to embed Windows resources (icon)");
     }
 }
