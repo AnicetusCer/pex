@@ -66,8 +66,36 @@ else {
 }
 
 if (Ask-YesNo "Create git tag $tag?" "Y") {
-    git tag $tag || throw "Failed to create tag $tag"
-    Write-Host "Tag $tag created." -ForegroundColor Green
+    git rev-parse -q --verify "refs/tags/$tag" *>$null
+    $tagExists = $LASTEXITCODE -eq 0
+
+    if ($tagExists) {
+        Write-Host "Tag $tag already exists." -ForegroundColor Yellow
+        if (Ask-YesNo "Reuse existing tag $tag?" "Y") {
+            Write-Host "Reusing existing tag $tag." -ForegroundColor Green
+        }
+        elseif (Ask-YesNo "Delete and recreate tag $tag?" "N") {
+            git tag -d $tag
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to delete existing tag $tag"
+            }
+            git tag $tag
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to recreate tag $tag"
+            }
+            Write-Host "Tag $tag recreated." -ForegroundColor Green
+        }
+        else {
+            throw "Tag $tag already exists and user chose not to reuse it."
+        }
+    }
+    else {
+        git tag $tag
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create tag $tag"
+        }
+        Write-Host "Tag $tag created." -ForegroundColor Green
+    }
 }
 else {
     Write-Host "Skipping tag creation." -ForegroundColor Yellow
@@ -76,7 +104,8 @@ else {
 if (Ask-YesNo "Push branch & tags to origin?" "Y") {
     Write-Host "`n--> git push origin main" -ForegroundColor Cyan
     git push origin main || throw "git push origin main failed"
-    if (git show-ref --tags $tag > $null) {
+    git rev-parse -q --verify "refs/tags/$tag" *>$null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "`n--> git push origin $tag" -ForegroundColor Cyan
         git push origin $tag || throw "git push origin $tag failed"
     }
