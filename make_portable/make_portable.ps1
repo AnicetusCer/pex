@@ -1,7 +1,8 @@
 param (
     [string]$BinaryPath,
     [string]$OutputDir = "dist",
-    [switch]$Zip
+    [switch]$Zip,
+    [string]$ZipName = "pex-portable.zip"
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,12 +63,36 @@ if (-not (Test-Path $BinaryPath)) {
 Copy-Item $BinaryPath (Join-Path $distPath (Split-Path $BinaryPath -Leaf))
 
 if ($Zip.IsPresent) {
-    $zipPath = Join-Path $scriptDir "pex-portable.zip"
-    if (Test-Path $zipPath) {
-        Remove-Item $zipPath
+    if (-not $ZipName.EndsWith(".zip")) {
+        $ZipName = "$ZipName.zip"
     }
-    Compress-Archive -Path (Join-Path $distPath "*") -DestinationPath $zipPath
-    Write-Host "Created $zipPath"
-} else {
+
+    $zipOutputPath = if ([System.IO.Path]::IsPathRooted($ZipName)) {
+        $ZipName
+    }
+    else {
+        Join-Path $scriptDir $ZipName
+    }
+
+    if (Test-Path $zipOutputPath) {
+        Remove-Item $zipOutputPath
+    }
+
+    Compress-Archive -Path (Join-Path $distPath "*") -DestinationPath $zipOutputPath
+
+    if (-not [System.IO.Path]::IsPathRooted($ZipName)) {
+        $finalZipPath = Join-Path $distPath $ZipName
+        if (Test-Path $finalZipPath) {
+            Remove-Item $finalZipPath
+        }
+        Move-Item -Path $zipOutputPath -Destination $finalZipPath
+    }
+    else {
+        $finalZipPath = $zipOutputPath
+    }
+
+    Write-Host "Created $finalZipPath"
+}
+else {
     Write-Host "Portable bundle staged in $distPath"
 }
