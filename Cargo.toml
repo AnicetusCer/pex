@@ -3,6 +3,7 @@ name = "pex"
 version = "0.1.0"
 edition = "2021"
 default-run = "pex"
+build = "build.rs"
 
 [dependencies]
 # GUI
@@ -27,6 +28,9 @@ itertools = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
 urlencoding = "2.1"
+
+[build-dependencies]
+winresource = "0.1"
 
 [[bin]]
 name = "db_explorer"
