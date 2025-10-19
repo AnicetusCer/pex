@@ -1,4 +1,4 @@
-﻿# Pex – Plex EPG Explorer
+# Pex – Plex EPG Explorer
 
 Pex is a desktop viewer for the Plex Electronic Program Guide (EPG). It reads
 Plex’s DVR SQLite database, assembles a poster wall of upcoming airings,
@@ -16,7 +16,17 @@ channel badges, HD/SD hints, and on-demand IMDb ratings.
 
 ---
 
+## Downloads & Releases
+
+- Releases live on the [GitHub Releases page](https://github.com/AnicetusCer/pex/releases); each tagged version includes portable bundles.
+- Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
+- The interactive helper `pwsh ./release.ps1 -Version 1.2.3` walks through build, tagging, pushing, and optional `gh release create` steps.
+- Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
+
+---
+
 ## Table of Contents
+- [Downloads & Releases](#downloads--releases)
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
@@ -314,3 +324,5 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 - Plex is a registered trademark of Plex, Inc. This project is an independent
   client that reads the Plex DVR database.
 - Additional third-party notices are listed in [`NOTICE`](./NOTICE).
+
+
