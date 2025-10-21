@@ -114,6 +114,60 @@ function Update-DownloadsPage {
     Write-Host "Updated docs/index.html with download link to $ZipName" -ForegroundColor Green
 }
 
+function Invoke-PortablePackaging {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipName
+    )
+
+    $scriptsRoot = "make_portable"
+    $distDir = Join-Path $scriptsRoot "dist"
+
+    if ($IsWindows) {
+        $portableScript = Join-Path $scriptsRoot "make_portable.ps1"
+        if (-not (Test-Path -Path $portableScript)) {
+            Write-Host "`n(make_portable/make_portable.ps1 not found; skipping portable packaging)" -ForegroundColor Yellow
+            return $null
+        }
+
+        Write-Host "`n--> Running portable packaging script ($portableScript)" -ForegroundColor Cyan
+        try {
+            & $portableScript -Zip:$true -ZipName $ZipName
+        }
+        catch {
+            throw "Portable packaging script failed: $($_.Exception.Message)"
+        }
+    }
+    elseif ($IsLinux) {
+        $portableScript = Join-Path $scriptsRoot "make_portable.sh"
+        if (-not (Test-Path -Path $portableScript)) {
+            Write-Host "`n(make_portable/make_portable.sh not found; skipping portable packaging)" -ForegroundColor Yellow
+            return $null
+        }
+
+        $bashPath = (Get-Command bash -ErrorAction SilentlyContinue).Path
+        if (-not $bashPath) {
+            throw "bash not found on PATH; cannot run Linux packaging script."
+        }
+
+        Write-Host "`n--> Running portable packaging script ($portableScript via $bashPath)" -ForegroundColor Cyan
+        & $bashPath $portableScript -z --zip-name $ZipName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Portable packaging script failed"
+        }
+    }
+    else {
+        Write-Host "`n(Current platform not supported for portable packaging automation.)" -ForegroundColor Yellow
+        return $null
+    }
+
+    $zipPath = Join-Path $distDir $ZipName
+    if (-not (Test-Path -Path $zipPath)) {
+        throw "Expected portable archive missing at $zipPath"
+    }
+
+    return $zipPath
+}
+
 Write-Host "=== Pex Release Helper ===" -ForegroundColor Cyan
 Write-Host "Target version: $Version"
 
@@ -136,17 +190,11 @@ if (Ask-YesNo "Run build & packaging pipeline?" "Y") {
     Write-Host "`n--> Release build (cargo build --release)" -ForegroundColor Cyan
     cargo build --release || throw "cargo build --release failed"
 
-    $portableScript = Join-Path -Path "make_portable" -ChildPath "make_portable.ps1"
-    if (Test-Path $portableScript) {
-        Write-Host "`n--> Running portable packaging script ($portableScript)" -ForegroundColor Cyan
-        pwsh -File $portableScript -Zip -ZipName $portableZipName || throw "Portable packaging script failed"
-        $portableZipPath = Join-Path (Join-Path "make_portable" "dist") $portableZipName
-        if (-not (Test-Path $portableZipPath)) {
-            throw "Expected portable archive missing at $portableZipPath"
-        }
+    try {
+        $portableZipPath = Invoke-PortablePackaging -ZipName $portableZipName
     }
-    else {
-        Write-Host "`n(make_portable/make_portable.ps1 not found; skipping portable packaging)" -ForegroundColor Yellow
+    catch {
+        throw $_
     }
 }
 else {
