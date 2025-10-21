@@ -21,6 +21,7 @@ Options:
   -b, --binary-path PATH   Path to the compiled pex binary (defaults to target/release/pex)
   -o, --output-dir NAME    Output directory name relative to the script (default: dist)
   -z, --zip                Produce pex-portable.zip alongside the dist folder
+  -n, --zip-name NAME      Custom name for the zip asset (default: pex-portable.zip)
   -h, --help               Show this help message and exit
 EOF
 }
@@ -28,6 +29,7 @@ EOF
 BINARY_PATH=""
 OUTPUT_DIR="dist"
 ZIP_REQUESTED=0
+ZIP_NAME="pex-portable.zip"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,6 +46,11 @@ while [[ $# -gt 0 ]]; do
         -z|--zip)
             ZIP_REQUESTED=1
             shift
+            ;;
+        -n|--zip-name)
+            [[ $# -ge 2 ]] || { echo "Option $1 requires a name argument." >&2; exit 1; }
+            ZIP_NAME="$2"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -107,13 +114,29 @@ cp "$BINARY_PATH" "$DIST_PATH/$(basename "$BINARY_PATH")"
 
 if (( ZIP_REQUESTED )); then
     command -v zip >/dev/null 2>&1 || { echo "'zip' utility not found; install it or omit --zip." >&2; exit 1; }
-    ZIP_PATH="$SCRIPT_DIR/pex-portable.zip"
-    rm -f "$ZIP_PATH"
+
+    [[ "$ZIP_NAME" == *.zip ]] || ZIP_NAME="${ZIP_NAME}.zip"
+
+    if [[ "$ZIP_NAME" = /* ]]; then
+        ZIP_OUTPUT="$ZIP_NAME"
+        FINAL_ZIP_PATH="$ZIP_OUTPUT"
+    else
+        ZIP_OUTPUT="$SCRIPT_DIR/$ZIP_NAME"
+        FINAL_ZIP_PATH="$DIST_PATH/$ZIP_NAME"
+    fi
+
+    rm -f "$ZIP_OUTPUT"
     (
         cd "$DIST_PATH"
-        zip -r "$ZIP_PATH" . >/dev/null
+        zip -r "$ZIP_OUTPUT" . >/dev/null
     )
-    echo "Created $ZIP_PATH"
+
+    if [[ "$ZIP_OUTPUT" != "$FINAL_ZIP_PATH" ]]; then
+        rm -f "$FINAL_ZIP_PATH"
+        mv "$ZIP_OUTPUT" "$FINAL_ZIP_PATH"
+    fi
+
+    echo "Created $FINAL_ZIP_PATH"
 else
     echo "Portable bundle staged in $DIST_PATH"
 fi
