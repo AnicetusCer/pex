@@ -1,9 +1,21 @@
 # Pex – Plex EPG Explorer
 
-Pex is a desktop viewer for the Plex Electronic Program Guide (EPG). It reads
-Plex’s DVR SQLite database, assembles a poster wall of upcoming airings,
-highlights the titles you already own, and layers on rich metadata such as
-channel badges, HD/SD hints, and on-demand IMDb ratings.
+![Film discovery grid](src/assets/PEXFilmEPG.png)
+
+If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this project is for you. Pex is as my personal way to dig through two weeks of Plex DVR listings, decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
+
+Pex helps you:
+- Browse up to 14 days of film listings in the Plex EPG with a poster-forward layout.
+- Choose to visually dim movies you already own or hide them from the grid entirely.
+- Spot HD airings, including HD upgrades for titles you currently only have in SD.
+- See at a glance which films are already scheduled to record in Plex.
+- Bring channel art, genre groupings, and on-demand IMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
+
+To get rolling, copy `config.example.json` (or the platform-specific samples in `make_portable/`) to `config.json` and fill in your paths. The only real prerequisite is that you're using Plex DVR with its standard EPG. When `owned_source` is set to `"plex_library"`, the mirrored Plex database already knows what you own, so `library_roots` can stay empty—add paths only if you want to scope things to a subset of libraries or document where your files live.
+
+There’s still a filesystem scan mode you can enable, but it’s strictly optional now. It’s useful if you can’t copy Plex’s library database, yet it’s slower on big collections, which is why I default to the Plex DB mirror.
+
+Because the app is written in Rust, it runs on Windows, Linux, and macOS (if you are one of those people), and it's easy to tweak. Grab the code, point your favourite AI at the included primer, and you'll have a head start on customising things for your own setup—especially if your filenames don't follow the `Title (Year)` pattern the app expects today.
 
 ---
 
@@ -12,7 +24,7 @@ channel badges, HD/SD hints, and on-demand IMDb ratings.
 - This started as a personal project: each week I sift through upcoming TV movies to decide what to record.
 - The stock Plex web UI felt too barebones for that workflow, so I wanted a richer experience for anyone in the Plex community who still enjoys browsing broadcast schedules.
 - While the app concentrates on TV films, the bundled SQLite explorer tools make it easy for others to tweak or extend it for different Plex data.
-- Developed primarily on Windows 11 with WSL Fedora 42; both environments are exercised regularly. macOS hasn't been tested first-hand, but the Rust/egui stack produces native binaries for both x86_64 and ARM64, so it should run wherever those architectures are supported (Intel/AMD PCs or Apple Silicon).
+- Developed primarily on Windows 11 with WSL Fedora 42; both environments are exercised regularly. macOS hasn't been tested first-hand, but the Rust/egui stack produces native binaries for both x86_64 and ARM64, so it should run wherever those architectures are supported (Intel/AMD).
 
 ---
 
