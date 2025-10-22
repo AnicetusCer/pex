@@ -1,15 +1,23 @@
-﻿# Welcome to Pex Portable
+﻿# Pex (Plex EPG Explorer)
 
-This folder contains a ready-to-run copy of **Pex – Plex EPG Explorer**. It was created mainly so i could browse plex tv guide but show me which movies I already have in my libraries. It is written in a modular way, so it should be fairly easy to modify for your own needs. 
+![Film discovery grid](../src/assets/PEXFilmEPG.png)
 
-### Why this exists
+If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this app is for you. Pex is my personal way to dig through two weeks of Plex DVR listings and decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
 
-- Personal project: each week I comb the broadcast guide for TV movies to schedule recordings.
-- The stock Plex interface felt too limited for that workflow, so this build gives fellow Plex users a richer guide view.
-- Verified on Windows 11 and WSL Fedora 42; macOS isn't tested yet, but the Rust/egui stack targets both x86_64 and ARM64, so it should run on Intel/AMD PCs or Apple Silicon.
+Pex helps you browse upcoming film broacasts in a more advanced way:
+- Browse up to 14 days of film listings in the Plex EPG with a poster-forward layout.
+- Choose to visually dim movies you already own or hide them from the grid entirely.
+- Spot HD airings, including HD upgrades for titles you currently only have in SD.
+- See at a glance which films are already scheduled to record in Plex (does not support schedualling, i want to keep the app focused on browsing)
+- Bring channel art, genre groupings, and on-demand IMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
+If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. The only real prerequisite is that you’re a Plex TV user relying on the standard EPG. When you use `owned_source = "plex_library"`, the mirrored Plex database brings back everything you own, so the `library_roots` array is optional—only add folders if you want to narrow things down or document where your media lives.
 
-This is the distributable, you do **not** need the Rust toolchain to run this; but you will if you want to mod it and run it directly from the source with `cargo run` command follow the steps below to get going, there is a more extensive readme in the root of the project.
+There’s still a filesystem scan mode you can enable in the config, but it’s strictly optional now. It’s handy if you can’t copy Plex’s library database, yet it’s slower on big collections, which is why I default to the Plex DB mirror.
+
+Because the app is written in Rust, the portable build runs on Windows, Linux, and macOS. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likley change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
+
+Need a head start on the paths? See `config_example.windows` and `config_example.linux` in this folder for realistic sample values covering common Plex installations and multi-library layouts.
 
 ---
 
@@ -47,11 +55,12 @@ This is the distributable, you do **not** need the Rust toolchain to run this; b
    - Windows: double-click `pex.exe` or run it from PowerShell.
    - Linux/macOS: `chmod +x ./pex` (if needed) then run `./pex`.
 
-The first start can take a long time (30 minutes or more for ~6,000 movies on a nas):
+Pex will make local copies of your plex DB's just to avoid any chance of disruption. it will make new copies each time it is opened. The first start can take a few mins to download the movie posters, but once initial data is cached it is quick to start, it will also remember your preferences when set.
+General workflow:
 - Pex copies the Plex database from `plex_epg_db_source`.
 - It copies Plex’s library database if `plex_library_db_source` is set.
-- It scans your `library_roots` to tag owned titles.
-- It warms up poster and ffprobe caches.
+- If you're using the Plex library-owned mode, it tags owned titles straight from that mirrored DB; only when you enable filesystem mode does it walk through `library_roots`.
+- It warms up posters into the grid.
 
 Subsequent launches load almost immediately.
 
