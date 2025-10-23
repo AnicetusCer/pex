@@ -1,22 +1,14 @@
-pub(crate) mod owned_scan_fs;
 pub(crate) mod owned_scan_plex;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use eframe::egui as eg;
-use tracing::warn;
 
-use crate::app::types::OwnedMsg;
-use crate::config::{load_config, OwnedSourceKind};
-
-use self::owned_scan_fs::{
-    persist_owned_hd_sidecar, persist_owned_keys_sidecar, OwnedManifest, OwnedScanFs,
-};
 use self::owned_scan_plex::OwnedScanPlex;
+use crate::app::types::OwnedMsg;
 
 impl crate::app::PexApp {
-    /// Kick off a non-blocking owned-file scan across library_roots.
+    /// Kick off a non-blocking owned scan against the Plex library database.
     pub(crate) fn start_owned_scan(&mut self) {
         if self.owned_rx.is_some() {
             return;
@@ -24,97 +16,15 @@ impl crate::app::PexApp {
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
         self.owned_rx = Some(rx);
 
-        // Resolve config and launch the appropriate scanner thread.
-        let cfg = load_config();
-        let roots: Vec<PathBuf> = cfg.library_roots.into_iter().map(PathBuf::from).collect();
         self.owned_scan_in_progress = true;
 
-        match cfg.owned_source {
-            OwnedSourceKind::Filesystem => {
-                self.record_owned_message(format!(
-                    "Stage 3/4 - Scanning owned library ({} root{}). Powers Owned badges and HD upgrade hints; large libraries may take a while.",
-                    roots.len(),
-                    if roots.len() == 1 { "" } else { "s" }
-                ));
-                self.set_status(
-                    "Stage 3/4 - Scanning owned library (marks Owned titles and HD upgrades).",
-                );
-                OwnedScanFs::spawn_scan(tx, roots);
-            }
-            OwnedSourceKind::PlexLibrary => {
-                self.record_owned_message(
-                    "Stage 3/4 - Loading owned titles from the Plex library database.",
-                );
-                self.set_status("Stage 3/4 - Loading owned titles from Plex (marks Owned titles and HD upgrades).");
-                OwnedScanPlex::spawn_scan(tx, roots);
-            }
-        }
-    }
-
-    pub(crate) fn start_owned_hd_refresh(&mut self) -> Result<(), String> {
-        if self.owned_scan_in_progress {
-            return Err("Another owned-library operation is already running; please wait.".into());
-        }
-
-        let cfg = load_config();
-        if cfg.owned_source == OwnedSourceKind::PlexLibrary {
-            return Err(
-                "HD flags are sourced directly from the Plex library database; rerun the owned scan instead."
-                    .into(),
-            );
-        }
-
-        let manifest = OwnedManifest::load();
-        if manifest.is_empty() {
-            return Err(
-                "Owned manifest is empty. Run 'Refresh owned scan' once before refreshing HD flags."
-                    .into(),
-            );
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
-        self.owned_rx = Some(rx);
-        self.owned_scan_in_progress = true;
-        self.record_owned_message("Stage 3/4 - Refreshing HD flags using cached manifest.");
-        self.set_status("Stage 3/4 - Refreshing HD flags (re-running ffprobe on owned files).");
-
-        std::thread::spawn(move || {
-            use OwnedMsg::{Done, Error, Info};
-            let mut manifest = manifest;
-            let _ = tx.send(Info(
-                "Stage 3/4 - Refreshing HD flags using cached manifest.".into(),
-            ));
-
-            match manifest.rebuild_hd_flags() {
-                Err(err) => {
-                    let _ = tx.send(Error(err));
-                }
-                Ok((owned, hd_keys, owned_dates, changed)) => {
-                    if changed {
-                        if let Err(save_err) = manifest.save() {
-                            let _ = tx
-                                .send(Error(format!("Failed to save owned manifest: {save_err}")));
-                            return;
-                        }
-                    }
-
-                    let cache_dir = crate::app::cache::cache_dir();
-                    if let Err(err) = persist_owned_keys_sidecar(&cache_dir, &owned) {
-                        warn!("Failed to persist owned sidecar: {err}");
-                    }
-                    if let Err(err) = persist_owned_hd_sidecar(&cache_dir, &hd_keys) {
-                        warn!("Failed to persist owned HD sidecar: {err}");
-                    }
-
-                    let _ = tx.send(Done {
-                        keys: owned,
-                        modified: owned_dates,
-                    });
-                }
-            }
-        });
-
-        Ok(())
+        self.record_owned_message(
+            "Stage 3/4 - Loading owned titles from the Plex library database.",
+        );
+        self.set_status(
+            "Stage 3/4 - Loading owned titles from Plex (marks Owned titles and HD upgrades).",
+        );
+        OwnedScanPlex::spawn_scan(tx);
     }
 
     /// Apply the owned flags using the computed key set (no-ops if not ready).
