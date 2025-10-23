@@ -97,18 +97,6 @@ workflows:
       AND mi.width >= 1280
       AND mi.height >= 720
     LIMIT 20;
-  validate_library_roots: |
-    -- Replace the sample prefixes with your configured library_roots
-    SELECT DISTINCT mp.file
-    FROM metadata_items m
-    JOIN media_items mi ON mi.metadata_item_id = m.id
-    JOIN media_parts mp ON mp.media_item_id = mi.id
-    WHERE m.metadata_type = 1
-      AND (
-        mp.file LIKE 'D:/Libraries/Movies/%'
-        OR mp.file LIKE '\\\\nas\\Archive\\Films%'
-      )
-    LIMIT 20;
   scheduled_recordings: |
     SELECT
       json_extract(extra_data, '$."mt:title"')        AS title,
@@ -136,11 +124,9 @@ workflows:
     -- Decode the percent-encoded GUID with urlencoding::decode (see app::scheduled).
 
 export_notes:
-  - Use `--out` to collect query output in a text file for side-by-side comparison with filesystem scans.
+  - Use `--out` to collect query output in a text file for easy diffing.
   - The helper always prints column metadata before the rows to make diffing easier.
 
 risks:
   - Plex may store multiple `media_items` per `metadata_item`; ensure logic dedupes by GUID or best-quality row.
-  - UNC paths in `media_parts.file` may differ from configured `library_roots`; normalise path formats before comparing.
-  - If no `library_roots` match the Plex paths the helper (and Pex) returns every movie; double-check roots before trusting the owned list.
   - DVR schedule rows live in `media_grabs` and `media_subscriptions`; keep the copied library DB fresh so queued recordings stay accurate.
