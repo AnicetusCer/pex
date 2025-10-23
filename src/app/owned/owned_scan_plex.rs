@@ -1,13 +1,12 @@
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::fs;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-use super::owned_scan_fs::{persist_owned_hd_sidecar, persist_owned_keys_sidecar};
 use crate::app::cache;
 use crate::app::types::OwnedMsg;
 use crate::app::PexApp;
@@ -16,7 +15,7 @@ use crate::config::local_library_db_path;
 pub struct OwnedScanPlex;
 
 impl OwnedScanPlex {
-    pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>, library_roots: Vec<PathBuf>) {
+    pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>) {
         thread::spawn(move || {
             use OwnedMsg::{Done, Error, Info};
 
@@ -68,14 +67,8 @@ impl OwnedScanPlex {
                 std::thread::sleep(Duration::from_millis(300));
             };
 
-            match collect_plex_owned_entries(&conn, &library_roots) {
-                Ok((entries, any_root_match)) => {
-                    if !library_roots.is_empty() && !any_root_match {
-                        let _ = tx.send(Info(
-                            "Configured library_roots did not match any Plex library files; returning all movies.".into(),
-                        ));
-                    }
-
+            match collect_plex_owned_entries(&conn) {
+                Ok(entries) => {
                     let mut owned: HashSet<String> = HashSet::new();
                     let mut hd_keys: HashSet<String> = HashSet::new();
                     let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
@@ -122,10 +115,7 @@ struct PlexOwnedEntry {
     updated_at: Option<u64>,
 }
 
-fn collect_plex_owned_entries(
-    conn: &Connection,
-    library_roots: &[PathBuf],
-) -> Result<(Vec<PlexOwnedEntry>, bool), String> {
+fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, String> {
     let sql = r#"
         SELECT
             m.id            AS metadata_id,
@@ -161,11 +151,6 @@ fn collect_plex_owned_entries(
         .map_err(|err| format!("Failed to prepare Plex library query: {err}"))?;
 
     let mut seen_ids: HashSet<i64> = HashSet::new();
-    let normalized_roots: Vec<PathBuf> = library_roots
-        .iter()
-        .filter(|root| !root.as_os_str().is_empty())
-        .cloned()
-        .collect();
 
     let rows = stmt
         .query_map([], |row| {
@@ -180,8 +165,8 @@ fn collect_plex_owned_entries(
             let media_updated_at: Option<i64> = row.get("media_updated_at")?;
             let meta_updated_at: Option<i64> = row.get("meta_updated_at")?;
             let meta_added_at: Option<i64> = row.get("meta_added_at")?;
-            let file: String = row.get("file_path")?;
-            let size: Option<i64> = row.get("file_size")?;
+            let _file: String = row.get("file_path")?;
+            let _size: Option<i64> = row.get("file_size")?;
 
             Ok((
                 metadata_id,
@@ -195,14 +180,11 @@ fn collect_plex_owned_entries(
                 media_updated_at,
                 meta_updated_at,
                 meta_added_at,
-                file,
-                size,
             ))
         })
         .map_err(|err| format!("Failed to iterate Plex library rows: {err}"))?;
 
     let mut results: Vec<PlexOwnedEntry> = Vec::new();
-    let mut any_root_match = false;
 
     for row in rows {
         let (
@@ -217,8 +199,6 @@ fn collect_plex_owned_entries(
             media_updated_at,
             meta_updated_at,
             meta_added_at,
-            file,
-            _size,
         ) = row.map_err(|err| format!("Failed to read Plex library row: {err}"))?;
 
         if !seen_ids.insert(metadata_id) {
@@ -227,11 +207,6 @@ fn collect_plex_owned_entries(
 
         if title.trim().is_empty() {
             continue;
-        }
-
-        let path = PathBuf::from(file);
-        if !normalized_roots.is_empty() && path_matches_any_root(&path, &normalized_roots) {
-            any_root_match = true;
         }
 
         let width = width.map(|v| v.max(0) as u32);
@@ -254,7 +229,7 @@ fn collect_plex_owned_entries(
         });
     }
 
-    Ok((results, any_root_match))
+    Ok(results)
 }
 
 fn accumulate_owned_entry(
@@ -292,10 +267,33 @@ fn accumulate_owned_entry(
     }
 }
 
-fn path_matches_any_root(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
 fn is_hd(width: Option<u32>, height: Option<u32>) -> bool {
     width.map(|w| w >= 1280).unwrap_or(false) || height.map(|h| h >= 720).unwrap_or(false)
+}
+
+fn persist_owned_keys_sidecar(
+    cache_dir: &std::path::Path,
+    owned_keys: &HashSet<String>,
+) -> Result<(), String> {
+    let path = cache_dir.join("owned_all.txt");
+    fs::write(
+        &path,
+        owned_keys
+            .iter()
+            .map(|k| format!("{k}\n"))
+            .collect::<String>(),
+    )
+    .map_err(|err| format!("Failed to write {}: {err}", path.display()))
+}
+
+fn persist_owned_hd_sidecar(
+    cache_dir: &std::path::Path,
+    hd_keys: &HashSet<String>,
+) -> Result<(), String> {
+    let path = cache_dir.join("owned_hd.txt");
+    fs::write(
+        &path,
+        hd_keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
+    )
+    .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
