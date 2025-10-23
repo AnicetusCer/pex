@@ -2,13 +2,6 @@
   "plex_epg_db_source": "C:/Users/Example/AppData/Local/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
   "plex_library_db_source": "C:/Users/Example/AppData/Local/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
   "cache_dir": "C:/PexCache",
-  "owned_source": "plex_library",
-  "library_roots": [
-    "D:/Media/Movies",
-    "E:/Media/4K Movies",
-    "C:/Users/Example/Videos/Recorded Movies"
-  ],
-  "ffprobe_cmd": "C:/Program Files/FFmpeg/bin/ffprobe.exe",
   "omdb_api_key": "YOUR_OMDB_KEY",
   "log_level": "info"
 }
