@@ -1,5 +1,20 @@
 // src/app/ui/topbar.rs
 use super::super::{DayRange, SortKey};
+use crate::config::AppConfig;
+
+struct DbSummary<'a> {
+    epg_source: &'a str,
+    epg_source_exists: bool,
+    epg_local: &'a Path,
+    epg_local_exists: bool,
+    library_source: &'a str,
+    library_source_exists: bool,
+    library_local: &'a Path,
+    library_local_exists: bool,
+    cache_dir: &'a Path,
+    cache_exists: bool,
+    using_demo_omdb: bool,
+}
 use eframe::egui as eg;
 use std::path::Path;
 impl crate::app::PexApp {
@@ -261,9 +276,17 @@ impl crate::app::PexApp {
         }
 
         let mut open = self.show_advanced_popup;
+        let cfg = crate::config::load_config();
         let db_path = crate::config::local_db_path();
         let db_exists = db_path.exists();
-        let using_demo_omdb = crate::config::load_config().omdb_api_key.is_none();
+        let library_db_path = crate::config::local_library_db_path();
+        let library_db_exists = library_db_path.exists();
+        let cache_dir = crate::app::cache::cache_dir();
+        let cache_exists = cache_dir.exists();
+        let using_demo_omdb = cfg
+            .omdb_api_key
+            .as_ref()
+            .is_none_or(|k| k.trim().is_empty());
 
         eg::Window::new("Advanced controls")
             .collapsible(false)
@@ -272,15 +295,40 @@ impl crate::app::PexApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    self.advanced_db_summary(ui, &db_path, db_exists, using_demo_omdb);
+                    self.advanced_db_summary(
+                        ui,
+                        &cfg,
+                        DbSummary {
+                            epg_source: cfg.plex_epg_db_source.as_deref().unwrap_or("<not set>"),
+                            epg_source_exists: cfg
+                                .plex_epg_db_source
+                                .as_deref()
+                                .map(|p| Path::new(p).exists())
+                                .unwrap_or(false),
+                            epg_local: &db_path,
+                            epg_local_exists: db_exists,
+                            library_source: cfg
+                                .plex_library_db_source
+                                .as_deref()
+                                .unwrap_or("<not set>"),
+                            library_source_exists: cfg
+                                .plex_library_db_source
+                                .as_deref()
+                                .map(|p| Path::new(p).exists())
+                                .unwrap_or(false),
+                            library_local: &library_db_path,
+                            library_local_exists: library_db_exists,
+                            cache_dir: &cache_dir,
+                            cache_exists,
+                            using_demo_omdb,
+                        },
+                    );
                     ui.separator();
                     self.advanced_prefetch_controls(ui);
                     ui.separator();
                     self.advanced_poster_controls(ui, ctx);
                     ui.separator();
                     self.advanced_owned_controls(ui);
-                    ui.separator();
-                    self.advanced_ffprobe_controls(ui);
                     ui.separator();
                     self.advanced_prefs_controls(ui);
                     self.advanced_feedback_section(ui);
@@ -290,27 +338,51 @@ impl crate::app::PexApp {
         self.show_advanced_popup = open;
     }
 
-    fn advanced_db_summary(
-        &self,
-        ui: &mut eg::Ui,
-        db_path: &Path,
-        db_exists: bool,
-        using_demo_omdb: bool,
-    ) {
+    fn advanced_db_summary(&self, ui: &mut eg::Ui, _cfg: &AppConfig, summary: DbSummary<'_>) {
+        let good = eg::Color32::LIGHT_GREEN;
+        let warn = eg::Color32::LIGHT_RED;
+
         ui.label(
-            eg::RichText::new(format!("Plex DB: {}", db_path.display())).color(if db_exists {
-                eg::Color32::LIGHT_GREEN
+            eg::RichText::new(format!("EPG source: {}", summary.epg_source)).color(
+                if summary.epg_source_exists {
+                    good
+                } else {
+                    warn
+                },
+            ),
+        );
+        ui.label(
+            eg::RichText::new(format!("EPG mirror: {}", summary.epg_local.display()))
+                .color(if summary.epg_local_exists { good } else { warn }),
+        );
+
+        ui.label(
+            eg::RichText::new(format!("Library source: {}", summary.library_source)).color(
+                if summary.library_source_exists {
+                    good
+                } else {
+                    warn
+                },
+            ),
+        );
+        ui.label(
+            eg::RichText::new(format!(
+                "Library mirror: {}",
+                summary.library_local.display()
+            ))
+            .color(if summary.library_local_exists {
+                good
             } else {
-                eg::Color32::LIGHT_RED
+                warn
             }),
         );
-        if !db_exists {
-            ui.label(
-                eg::RichText::new("Database file missing at the configured path.")
-                    .color(eg::Color32::LIGHT_RED),
-            );
-        }
-        if using_demo_omdb {
+
+        ui.label(
+            eg::RichText::new(format!("Cache root: {}", summary.cache_dir.display()))
+                .color(if summary.cache_exists { good } else { warn }),
+        );
+
+        if summary.using_demo_omdb {
             ui.label(
                 eg::RichText::new("Using demo OMDb key (config omdb_api_key not set).").weak(),
             );
@@ -335,12 +407,12 @@ impl crate::app::PexApp {
                 .weak(),
         );
         let ctx_clone = ctx.clone();
-        if ui.button("Clear poster cache").clicked() {
+        if ui.button("Clear & rebuild poster cache").clicked() {
             match self.clear_poster_cache_files() {
                 Ok(removed) => {
                     self.restart_poster_pipeline(&ctx_clone);
                     self.advanced_feedback = Some(format!(
-                        "Poster cache cleared (removed {removed} files). Prefetch restarting."
+                        "Poster cache cleared (removed {removed} files) and prefetch restarting."
                     ));
                     self.set_status("Poster cache cleared; restarting prefetch.");
                 }
@@ -350,39 +422,6 @@ impl crate::app::PexApp {
                     self.set_status(msg);
                 }
             }
-        }
-        if ui.button("Prune old posters now").clicked() {
-            match crate::app::cache::prune_poster_cache_now() {
-                Ok(removed) => {
-                    self.advanced_feedback = Some(format!(
-                        "Removed {removed} poster file(s) older than 14 days."
-                    ));
-                }
-                Err(err) => {
-                    let msg = format!("Poster prune failed: {err}");
-                    self.advanced_feedback = Some(msg.clone());
-                    self.set_status(msg);
-                }
-            }
-        }
-        if ui.button("Refresh poster cache").clicked() {
-            match self.refresh_poster_cache_light() {
-                Ok(removed) => {
-                    self.advanced_feedback = Some(format!(
-                        "Poster cache refresh removed {removed} stale file(s)."
-                    ));
-                    self.set_status("Poster cache refreshed.");
-                }
-                Err(err) => {
-                    self.advanced_feedback = Some(format!("Poster cache refresh failed: {err}"));
-                    self.set_status("Poster cache refresh failed.");
-                }
-            }
-        }
-        if ui.button("Restart poster prep").clicked() {
-            self.restart_poster_pipeline(&ctx_clone);
-            self.advanced_feedback = Some("Poster prep restarted without clearing cache.".into());
-            self.set_status("Poster prep restarting.");
         }
     }
 
@@ -434,48 +473,6 @@ impl crate::app::PexApp {
                 eg::RichText::new(msg).weak()
             };
             ui.label(text);
-        }
-    }
-
-    fn advanced_ffprobe_controls(&mut self, ui: &mut eg::Ui) {
-        ui.label(eg::RichText::new("ffprobe cache").strong());
-        if ui.button("Refresh ffprobe cache").clicked() {
-            match self.refresh_ffprobe_cache() {
-                Ok(removed) => {
-                    self.advanced_feedback = Some(format!(
-                        "ffprobe cache refresh removed {removed} stale entry(s). Rebuilding HD flags in the background..."
-                    ));
-                    self.set_status("Stage 3/4 - Refreshing HD flags (ffprobe cache refresh).");
-                }
-                Err(err) => {
-                    self.advanced_feedback = Some(format!("ffprobe cache refresh failed: {err}"));
-                    self.set_status("ffprobe cache refresh failed.");
-                }
-            }
-        }
-        if ui.button("Clear ffprobe cache").clicked() {
-            match self.clear_ffprobe_cache() {
-                Ok(removed) => {
-                    if removed {
-                        self.advanced_feedback = Some(
-                            "ffprobe cache cleared. Rebuilding HD flags in the background..."
-                                .into(),
-                        );
-                    } else {
-                        self.advanced_feedback = Some(
-                            "ffprobe cache already clear. Re-running HD flag refresh...".into(),
-                        );
-                    }
-                    self.set_status(
-                        "Stage 3/4 - Refreshing HD flags after clearing ffprobe cache.",
-                    );
-                }
-                Err(err) => {
-                    let msg = format!("ffprobe cache clear failed: {err}");
-                    self.advanced_feedback = Some(msg.clone());
-                    self.set_status(msg);
-                }
-            }
         }
     }
 
