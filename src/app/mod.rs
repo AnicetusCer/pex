@@ -420,32 +420,6 @@ impl PexApp {
             }
         }
 
-        if cfg.library_roots.is_empty() {
-            self.setup_warnings.push(
-                "config.json: library_roots is empty; owned titles will not be marked.".into(),
-            );
-        } else {
-            for root in &cfg.library_roots {
-                if root.contains("REPLACE_ME") {
-                    self.setup_errors.push(
-                        "config.json: library_roots contains a REPLACE_ME placeholder; replace it with your library path."
-                            .into(),
-                    );
-                    continue;
-                }
-                if !Path::new(root).exists() {
-                    self.setup_warnings
-                        .push(format!("config.json: library root not found: {root}"));
-                }
-            }
-        }
-
-        if !crate::app::utils::ffprobe_available() {
-            self.setup_warnings.push(
-                "ffprobe not found on PATH; HD detection falls back to filename heuristics.".into(),
-            );
-        }
-
         let omdb_missing = cfg
             .omdb_api_key
             .as_ref()
@@ -739,7 +713,7 @@ impl PexApp {
     fn clear_owned_cache_files(&self) -> Result<usize, String> {
         let dir = crate::app::cache::cache_dir();
         let mut removed = 0usize;
-        for name in ["owned_all.txt", "owned_hd.txt", "owned_manifest.json"] {
+        for name in ["owned_all.txt", "owned_hd.txt"] {
             let path = dir.join(name);
             match fs::remove_file(&path) {
                 Ok(_) => removed += 1,
@@ -749,41 +723,13 @@ impl PexApp {
                 }
             }
         }
-        let _ = fs::remove_file(dir.join("owned_manifest.json.tmp"));
         Ok(removed)
-    }
-
-    fn clear_ffprobe_cache_file(&self) -> Result<bool, String> {
-        let path = crate::app::cache::cache_dir().join("ffprobe_cache.json");
-        match fs::remove_file(&path) {
-            Ok(_) => Ok(true),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(false),
-            Err(err) => Err(format!("Failed to remove {}: {err}", path.display())),
-        }
     }
 
     fn clear_owned_cache(&mut self) -> Result<usize, String> {
         let removed = self.clear_owned_cache_files()?;
         self.refresh_owned_scan();
         Ok(removed)
-    }
-
-    fn clear_ffprobe_cache(&mut self) -> Result<bool, String> {
-        let removed = self.clear_ffprobe_cache_file()?;
-        crate::app::utils::reset_ffprobe_runtime_state();
-        self.stage4_complete_message = None;
-        self.start_owned_hd_refresh()?;
-        Ok(removed)
-    }
-
-    fn refresh_ffprobe_cache(&mut self) -> Result<usize, String> {
-        let removed = crate::app::utils::refresh_ffprobe_cache().map_err(|e| e.to_string())?;
-        self.start_owned_hd_refresh()?;
-        Ok(removed)
-    }
-
-    fn refresh_poster_cache_light(&self) -> Result<usize, String> {
-        crate::app::cache::refresh_poster_cache_light().map_err(|e| e.to_string())
     }
 
     fn refresh_owned_scan(&mut self) {
