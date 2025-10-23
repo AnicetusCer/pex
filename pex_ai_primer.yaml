@@ -22,10 +22,10 @@ project:
     aggressive background prep/prefetch stages.
   feature_highlights:
     - "Splash -> poster prep -> grid transition designed to keep first paint under ~1s on warm cache."
-    - "Multi-stage caching: poster resize/store, channel icon prefetch, owned manifest with HD sidecar."
+    - "Multi-stage caching: poster resize/store, channel icon prefetch, owned sidecars mirrored from Plex."
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
-    - "Advanced menu: clear/prune caches, refresh owned scan, manage ffprobe cache, backup/restore UI prefs."
+    - "Advanced menu: clear/prune caches, refresh owned scan, backup/restore UI prefs."
     - "DVR awareness: scheduled recordings highlighted with a REC badge sourced from Plex's library database."
   binaries:
     - pex (GUI)
@@ -35,7 +35,7 @@ project:
     src/
       app/
         mod.rs         # app state + orchestration + egui App impl
-        cache.rs       # cache dir helpers, poster/icon download, ffprobe cache
+        cache.rs       # cache dir helpers, poster/icon download, owned sidecars
         prep.rs        # read-only DB scan -> Vec<PrepItem>, optional daily copy
         prefs.rs       # load/save UI prefs & hotset manifest
         utils.rs       # date/time formatting, normalization helpers, channel inference
@@ -44,7 +44,6 @@ project:
         types.rs       # shared structs/enums for app messages and rows
         owned/
           mod.rs           # orchestrates owned scan workers
-          owned_scan_fs.rs # filesystem crawl for owned detection
           owned_scan_plex.rs # Plex library DB owned detection + sidecar persistence
         scheduled.rs    # loads DVR scheduled recordings from media_grabs/media_subscriptions
         prefetch.rs    # worker pool to fetch/resize posters
@@ -97,7 +96,7 @@ runtime_model:
   threads_channels:
     - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation on UI only).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: DFS over library_roots; skips unchanged dirs via owned_manifest.json; writes owned_all / owned_hd sidecars and file modified timestamps.
+    - Owned-scan thread: reads Plex library metadata, hydrates owned_all / owned_hd sidecars, and records modified timestamps.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
     - Scheduled loader: synchronous read of Plex library DB (`app::scheduled::load_scheduled_index`) triggered after prep and when refreshing owned caches.
   messages:
@@ -130,7 +129,7 @@ flow:
   first_frame:
     - load_prefs() from "<cache_dir>/ui_prefs.txt"
     - Load owned sidecars (owned_all/owned_hd) and modified timestamps if present
-    - start_owned_scan() (updates manifest + sidecars when roots change)
+    - start_owned_scan() (mirrors the Plex library DB and refreshes owned sidecars)
     - start_poster_prep()
     - Show splash with status heartbeat
   prep_done_in_ui:
@@ -155,10 +154,7 @@ config:
   keys:
     - plex_epg_db_source: "Optional source DB copied into db/plex_epg.db once per day"
     - plex_library_db_source: "Optional library DB copied into db/plex_library.db for owned + DVR state"
-    - owned_source: "filesystem | plex_library (select owned detection mode; filesystem by default)"
-    - cache_dir: "Poster/prefs cache root"
-    - library_roots: "Dirs to scan for 'owned' titles"
-    - ffprobe_cmd: "Optional over-ride for ffprobe location"
+    - cache_dir: "Poster/owned/UI cache root"
     - omdb_api_key: "Optional OMDb key for IMDb ratings"
     - log_level: "Set tracing verbosity (trace|debug|info|warn|error)"
   persistence:
@@ -181,7 +177,7 @@ config:
     hotset_line: "<cache_key>\t<abs_path>"
     owned_hd_sidecar: "<cache_dir>/owned_hd.txt"
     owned_all_sidecar: "<cache_dir>/owned_all.txt"
-    owned_modified: "stored inside owned_manifest.json"
+    owned_modified: "in-memory map keyed by owned key (timestamp from Plex library)"
   env_flags:
     - PEX_DISABLE_PREFETCH=1
     - RUST_LOG=info
@@ -190,7 +186,6 @@ database:
     - plex_epg.db: "Primary SQLite the app reads (metadata_items, media_items, assets, etc.)"
     - plex_epg.db-shm / -wal: "SQLite WAL files; safe to leave in place during read-only access"
     - plex_library.db: "Mirrored Plex library database used for owned detection + DVR schedule (media_grabs, media_subscriptions, metadata_subscription_desired_items)"
-    - owned_manifest.json: "Cached snapshot of library_roots → owned titles"
   schema_entry_points:
     - "app::prep::SQL_POSTERS_USER_THUMB (metadata_items + media_items join) for poster rows"
     - "app::prep::parse_channel_meta(extra_data) extracts `at:channelCallSign/title/thumb` from JSON-ish blob"
@@ -285,7 +280,6 @@ ratings:
 advanced_controls:
   - Poster cache: clear, prune to limit, or light refresh for stale files
   - Owned cache: refresh (incremental) or clear (full reset)
-  - ffprobe cache: refresh stale entries or clear entirely
   - UI prefs: backup / restore latest snapshot
   - Status readouts: Plex DB path existence, OMDb key state
 
