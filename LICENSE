@@ -29,7 +29,7 @@ active hyperlink where technically feasible:
 4. Third-Party Notices. When redistributing the Software (in source or binary
    form), you must also include all required third-party notices corresponding
    to components you ship with the Software (for example FFmpeg’s notice when
-   bundling ffprobe).
+   bundling FFmpeg libraries).
 
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
