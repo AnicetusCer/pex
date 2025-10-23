@@ -11,11 +11,9 @@ Pex helps you browse upcoming film broacasts in a more advanced way:
 - See at a glance which films are already scheduled to record in Plex (does not support schedualling, i want to keep the app focused on browsing)
 - Bring channel art, genre groupings, and on-demand IMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
-If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. The only real prerequisite is that you’re a Plex TV user relying on the standard EPG. When you use `owned_source = "plex_library"`, the mirrored Plex database brings back everything you own, so the `library_roots` array is optional—only add folders if you want to narrow things down or document where your media lives.
+If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. Point the entries at your Plex EPG and library databases and you’re done—Pex mirrors Plex’s own data to decide what you already own, so there’s no filesystem crawl to configure.
 
-There’s still a filesystem scan mode you can enable in the config, but it’s strictly optional now. It’s handy if you can’t copy Plex’s library database, yet it’s slower on big collections, which is why I default to the Plex DB mirror.
-
-Because the app is written in Rust, the portable build runs on Windows, Linux, and macOS. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likley change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
+Because the app is written in Rust, the portable build runs on Windows, Linux, and macOS. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likely change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
 
 Need a head start on the paths? See `config_example.windows` and `config_example.linux` in this folder for realistic sample values covering common Plex installations and multi-library layouts.
 
@@ -27,7 +25,7 @@ Need a head start on the paths? See `config_example.windows` and `config_example
 - `config.json` – edit this to match your Plex setup and movie library.
 - `README.md` – this guide.
 - `db/` (created on first run) – Pex will copy your Plex EPG database here.
-- `.pex_cache/` (created on first run) – stores posters, owned manifest, and ffprobe cache.
+- `.pex_cache/` (created on first run) – stores posters, owned sidecars, and UI preferences.
 
 ---
 
@@ -38,28 +36,22 @@ Need a head start on the paths? See `config_example.windows` and `config_example
 
 2. **Install prerequisites**
    - Ensure Plex DVR/EPG is enabled so its SQLite database exists.
-   - Install FFmpeg (or just `ffprobe`) **only if** you plan to use the
-     filesystem-owned scan (`"owned_source": "filesystem"`). Plex-library mode
-     does not require FFmpeg; when needed you can point `ffprobe_cmd` at the
-     executable.
    - No extra SQLite packages are required on Windows: the portable binary ships
      with SQLite via `rusqlite`'s bundled driver. On Linux the portable build
      also links SQLite statically; just make sure you're on a glibc-based
      distro.
 
-3. **Edit `config.json`** – update the paths and options so they match the
-   machine you will run Pex on. Each key is described in detail in
-   [Configuration keys](#configuration-keys) below.
+3. **Edit `config.json`** – update the Plex database paths and optional settings so they match the machine you will run Pex on. Each key is described in detail in [Configuration keys](#configuration-keys) below.
 
 4. **Launch the app**
    - Windows: double-click `pex.exe` or run it from PowerShell.
    - Linux/macOS: `chmod +x ./pex` (if needed) then run `./pex`.
 
-Pex will make local copies of your plex DB's just to avoid any chance of disruption. it will make new copies each time it is opened. The first start can take a few mins to download the movie posters, but once initial data is cached it is quick to start, it will also remember your preferences when set.
+Pex will make local copies of your Plex databases to avoid any chance of disruption. The first start can take a few minutes while posters download and owned sidecars are generated, but subsequent launches reuse the cache and start quickly.
 General workflow:
 - Pex copies the Plex database from `plex_epg_db_source`.
 - It copies Plex’s library database if `plex_library_db_source` is set.
-- If you're using the Plex library-owned mode, it tags owned titles straight from that mirrored DB; only when you enable filesystem mode does it walk through `library_roots`.
+- Owned titles are tagged straight from the mirrored library database.
 - It warms up posters into the grid.
 
 Subsequent launches load almost immediately.
@@ -71,12 +63,9 @@ Subsequent launches load almost immediately.
 | Key | Required? | Description | Where to find the value |
 | --- | --- | --- | --- |
 | `plex_epg_db_source` | ✅ | Absolute path to Plex's EPG database (`tv.plex.providers.epg.cloud*.db`). Pex copies it into `db/plex_epg.db` the first time you launch and refreshes the copy roughly once per day. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
-| `plex_library_db_source` | Recommended | Path to `com.plexapp.plugins.library.db`. Enables fast owned detection and the DVR *REC* badge by mirroring Plex's library database into `db/plex_library.db`. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
-| `library_roots` | ✅ | Array of folders containing your movie files. Use forward slashes on every OS (`"D:/Media/Movies"` or `"/mnt/media/movies"`). Files should follow the Plex naming pattern `Title (Year).ext` so scans match the guide. | Use platform file explorer or the NAS share path mounted on this machine. |
-| `owned_source` | ✅ | `"plex_library"` (recommended) reads owned titles from the copied Plex library DB; `"filesystem"` crawls `library_roots`. Filesystem mode can take a long time on large libraries but works without the library DB. | Choose based on whether you can copy `com.plexapp.plugins.library.db`. |
-| `ffprobe_cmd` | Optional | Override path to `ffprobe` if it isn’t on `PATH`. | `where ffprobe` (Windows) or `which ffprobe` (Linux/macOS). Leave `null` to use the system default. |
+| `plex_library_db_source` | ✅ | Path to `com.plexapp.plugins.library.db`. Mirroring this database enables owned detection and the DVR *REC* badge. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
+| `cache_dir` | Optional | Relocates `.pex_cache/` (posters, owned sidecars, UI prefs). Relative paths are resolved next to the executable. | Pick a writable folder with enough free space. |
 | `omdb_api_key` | Optional | API key for IMDb ratings. The demo key `thewdb` (the official OMDb sample) is included but heavily rate limited. | Sign up at <https://www.omdbapi.com/apikey.aspx>. |
-| `cache_dir` | Optional | Relocates `.pex_cache/` (posters, manifests, ffprobe cache, UI prefs). Relative paths are resolved next to the executable. | Pick a writable folder with enough free space. |
 | `log_level` | Optional | Adjusts runtime logging (`trace`, `debug`, `info`, `warn`, `error`). | Set only if you need more verbose console output. |
 
 ### Collecting Plex paths
@@ -97,9 +86,7 @@ Look in that directory for:
 - `com.plexapp.plugins.library.db`
 
 Copy the full paths into `config.json`. Pex pulls in any companion journal data
-for you, so you only need the main `.db` path. If you cannot copy
-the library DB, leave `plex_library_db_source` unset and use
-`owned_source = "filesystem"` instead.
+for you, so you only need the main `.db` path.
 
 ---
 
@@ -108,8 +95,8 @@ the library DB, leave `plex_library_db_source` unset and use
 | Location | Purpose |
 | --- | --- |
 | `db/plex_epg.db` | Working copy of Plex's EPG database. |
-| `db/plex_library.db` | Optional working copy of Plex's library database (if configured). |
-| `.pex_cache/` | Posters, owned-manifest, ffprobe cache, and UI preferences. Poster images older than 14 days are removed automatically. |
+| `db/plex_library.db` | Working copy of Plex's library database (refreshed when configured). |
+| `.pex_cache/` | Posters, owned sidecars, and UI preferences. Poster images older than 14 days are removed automatically. |
 | `config.json` | Runtime configuration – edit before launching. |
 
 You can delete `.pex_cache/` if you want to reclaim space; Pex rebuilds it on
@@ -121,9 +108,6 @@ the next run (expect another long initial scan while it repopulates).
 
 - **Paths** – stick to forward slashes in `config.json`. Windows backslashes
   must be escaped (`"D:\\\\Media"`), so forward slashes are easier.
-- **ffprobe location** – on Windows, FFmpeg installers typically place
-  `ffprobe.exe` under `C:/Program Files/FFmpeg/bin`. On Linux it’s usually in
-  `/usr/bin/ffprobe`.
 - **Executable name** – Windows builds end with `.exe`; Linux/macOS builds are
   just `pex`. The rest of the bundle layout is identical.
 
@@ -133,12 +117,10 @@ the next run (expect another long initial scan while it repopulates).
 
 - **“Could not open Plex DB”** – check `plex_epg_db_source` or ensure
   `db/plex_epg.db` exists and is readable.
-- **Owned scan never finishes** – confirm each `library_root` path exists and
-  that the drive/share is mounted.
+- **Owned scan never finishes** – ensure `plex_library_db_source` points at a readable Plex library database and that the mirrored `db/plex_library.db` is up to date.
 - **No posters or very slow start** – verify the machine has internet access and
   that `.pex_cache/` is writable.
-- **HD badge seems wrong** – run the app, open **Advanced** ▸ **Refresh ffprobe
-  cache**, and make sure `ffprobe_cmd` points to a modern FFmpeg build.
+- **HD badge seems wrong** – run the app, open **Advanced ▸ Refresh owned scan**, and let Pex rebuild the owned sidecars from the Plex library database.
 
 If you need a deeper reference, open the repository’s main guide:
 <https://github.com/AnicetusCer/pex#readme>.
