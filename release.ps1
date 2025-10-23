@@ -50,6 +50,36 @@ function Get-GitHubSlug {
     return $null
 }
 
+function Normalize-PortablePath {
+    param(
+        [Parameter()][object]$PathValue
+    )
+
+    if ($null -eq $PathValue) {
+        return $null
+    }
+
+    if ($PathValue -is [System.Array]) {
+        $PathValue = $PathValue | Where-Object { $_ } | Select-Object -Last 1
+    }
+
+    if ($PathValue -is [System.IO.FileSystemInfo]) {
+        return $PathValue.FullName
+    }
+
+    $stringValue = $PathValue -as [string]
+    if ([string]::IsNullOrWhiteSpace($stringValue)) {
+        return $null
+    }
+
+    $stringValue = $stringValue.Trim()
+    if ($stringValue -match '^Created\s+(?<full>.+)$') {
+        $stringValue = $Matches['full'].Trim()
+    }
+
+    return $stringValue
+}
+
 function Update-DownloadsPage {
     param(
         [Parameter(Mandatory = $true)][string]$Tag,
@@ -191,7 +221,7 @@ if (Ask-YesNo "Run build & packaging pipeline?" "Y") {
     cargo build --release || throw "cargo build --release failed"
 
     try {
-        $portableZipPath = Invoke-PortablePackaging -ZipName $portableZipName
+        $portableZipPath = Normalize-PortablePath (Invoke-PortablePackaging -ZipName $portableZipName)
     }
     catch {
         throw $_
@@ -204,9 +234,11 @@ else {
 if (-not $portableZipPath) {
     $candidateZip = Join-Path (Join-Path "make_portable" "dist") $portableZipName
     if (Test-Path $candidateZip) {
-        $portableZipPath = $candidateZip
+        $portableZipPath = Normalize-PortablePath $candidateZip
     }
 }
+
+$portableZipPath = Normalize-PortablePath $portableZipPath
 
 $repoSlug = Get-GitHubSlug
 if ($portableZipPath -and $repoSlug) {
@@ -284,6 +316,7 @@ if ($ghPath) {
         if (-not $portableZipPath -and (Test-Path -Path (Join-Path $distDir $portableZipName))) {
             $portableZipPath = Join-Path $distDir $portableZipName
         }
+        $portableZipPath = Normalize-PortablePath $portableZipPath
         if ($portableZipPath -and (Test-Path -Path $portableZipPath)) {
             $assets += Get-Item $portableZipPath
         }
