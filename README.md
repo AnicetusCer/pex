@@ -30,7 +30,8 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 
 - Releases live on the [GitHub Releases page](https://github.com/AnicetusCer/pex/releases); each tagged version includes portable bundles.
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
-- The interactive helper `pwsh ./release.ps1 -Version 1.2.3` walks through build, tagging, pushing, and optional `gh release create` steps.
+- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.3` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
+- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.3` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
 
 ---

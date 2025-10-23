@@ -12,6 +12,8 @@
     .card { margin-top: 1.5rem; border: 1px solid rgba(0,0,0,0.1); border-radius: 12px; padding: 1.75rem; background: rgba(255,255,255,0.85); box-shadow: 0 0.5rem 1.5rem rgba(15,23,42,0.08); }
     a.button { display: inline-block; margin-top: 1rem; background: #1f6feb; color: #fff; padding: 0.75rem 1.5rem; border-radius: 999px; font-weight: 600; text-decoration: none; }
     a.button:hover { background: #1158c7; }
+    .button-grid { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+    .button-grid .button { flex: 1 1 220px; text-align: center; }
     footer { margin-top: 2rem; font-size: 0.875rem; color: #666; }
     @media (prefers-color-scheme: dark) {
       body { background-color: #0d1117; color: #e6edf3; }
@@ -31,11 +33,14 @@
   <main>
     <section class="card">
       <h2>Latest release: v1.1.0</h2>
-      <p>The bundle includes the compiled binary, default configuration, and supporting documentation. Unzip it into a writable folder and launch <code>pex.exe</code>.</p>
-      <a class="button" href="https://github.com/AnicetusCer/pex/releases/download/v1.1.0/pex-portable-v1.1.0.zip">Download portable bundle</a>
-      <p style="margin-top: 1rem;">Need other platforms or older builds? Visit the <a href="https://github.com/AnicetusCer/pex/releases/tag/v1.1.0">full release history on GitHub</a>.</p>
+      <p class="lead">Portable bundles include the compiled binary, default configuration, and supporting documentation.</p>
+      <p>Pick your platform:</p>
+      <div class="button-grid">
+      <a class="button" href="https://github.com/AnicetusCer/pex/releases/download/v1.1.0/pex-portable-v1.1.0.zip">Download for pex-portable-v1.1.0.zip</a>
+      </div>
+      <p style="margin-top: 1.5rem;">Need other platforms or older builds? Visit the <a href="https://github.com/AnicetusCer/pex/releases/tag/v1.1.0">full release history on GitHub</a>.</p>
     </section>
   </main>
-  <footer>Last updated 2025-10-23 19:23:52 UTC</footer>
+  <footer>Last updated 2025-10-23 20:39:57 UTC</footer>
 </body>
 </html>
