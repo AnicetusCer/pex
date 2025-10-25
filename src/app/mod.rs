@@ -1013,6 +1013,17 @@ impl eframe::App for PexApp {
             }
         }
 
+        if !self.owned_scan_in_progress
+            && self.owned_keys.as_ref().is_some_and(|keys| keys.is_empty())
+            && !self.owned_auto_retry_attempted
+        {
+            self.owned_auto_retry_attempted = true;
+            self.record_owned_message(
+                "Owned scan produced no entries; retrying after library copy…",
+            );
+            self.refresh_owned_scan_internal(true, false);
+        }
+
         // Soft heartbeat ticker for subtle activity (optional)
         if (self.rows.is_empty() || (self.prefetch_started && self.loading_progress < 1.0))
             && self.heartbeat_last.elapsed() >= Duration::from_millis(250)
