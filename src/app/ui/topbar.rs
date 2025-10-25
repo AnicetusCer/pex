@@ -13,7 +13,7 @@ struct DbSummary<'a> {
     library_local_exists: bool,
     cache_dir: &'a Path,
     cache_exists: bool,
-    using_demo_omdb: bool,
+    tmdb_key_present: bool,
 }
 use eframe::egui as eg;
 use std::path::Path;
@@ -283,10 +283,10 @@ impl crate::app::PexApp {
         let library_db_exists = library_db_path.exists();
         let cache_dir = crate::app::cache::cache_dir();
         let cache_exists = cache_dir.exists();
-        let using_demo_omdb = cfg
-            .omdb_api_key
+        let tmdb_key_present = cfg
+            .tmdb_api_key
             .as_ref()
-            .is_none_or(|k| k.trim().is_empty());
+            .is_some_and(|k| !k.trim().is_empty());
 
         eg::Window::new("Advanced controls")
             .collapsible(false)
@@ -320,7 +320,7 @@ impl crate::app::PexApp {
                             library_local_exists: library_db_exists,
                             cache_dir: &cache_dir,
                             cache_exists,
-                            using_demo_omdb,
+                            tmdb_key_present,
                         },
                     );
                     ui.separator();
@@ -382,9 +382,9 @@ impl crate::app::PexApp {
                 .color(if summary.cache_exists { good } else { warn }),
         );
 
-        if summary.using_demo_omdb {
+        if !summary.tmdb_key_present {
             ui.label(
-                eg::RichText::new("Using demo OMDb key (config omdb_api_key not set).").weak(),
+                eg::RichText::new("TMDb ratings disabled (config tmdb_api_key not set).").weak(),
             );
         }
     }
