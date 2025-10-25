@@ -12,7 +12,7 @@ pub struct AppConfig {
     pub cache_dir: Option<String>,
     pub plex_epg_db_source: Option<String>,
     pub plex_library_db_source: Option<String>,
-    pub omdb_api_key: Option<String>,
+    pub tmdb_api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,7 +21,9 @@ struct RawConfig {
     #[serde(alias = "plex_db_source")]
     plex_epg_db_source: Option<String>,
     plex_library_db_source: Option<String>,
-    omdb_api_key: Option<String>,
+    #[serde(alias = "omdb_api_key")]
+    #[serde(alias = "the_movie_db_api_key")]
+    tmdb_api_key: Option<String>,
 }
 
 pub fn load_config() -> AppConfig {
@@ -30,7 +32,7 @@ pub fn load_config() -> AppConfig {
 
     match fs::read_to_string(&cfg_path) {
         Ok(raw) => match serde_json::from_str::<RawConfig>(&raw) {
-            Ok(parsed) => {
+            Ok(mut parsed) => {
                 if parsed.cache_dir.is_some() {
                     cfg.cache_dir = parsed.cache_dir;
                 }
@@ -45,8 +47,18 @@ pub fn load_config() -> AppConfig {
                 if parsed.plex_library_db_source.is_some() {
                     cfg.plex_library_db_source = parsed.plex_library_db_source;
                 }
-                if parsed.omdb_api_key.is_some() {
-                    cfg.omdb_api_key = parsed.omdb_api_key;
+                if let Some(api_key) = parsed.tmdb_api_key.take() {
+                    cfg.tmdb_api_key = Some(api_key);
+                    if raw.contains("\"omdb_api_key\"") {
+                        warn!(
+                            "`omdb_api_key` is deprecated; rename it to `tmdb_api_key` in config.json."
+                        );
+                    }
+                    if raw.contains("\"the_movie_db_api_key\"") {
+                        warn!(
+                            "`the_movie_db_api_key` is deprecated; rename it to `tmdb_api_key` in config.json."
+                        );
+                    }
                 }
                 info!("Loaded config from {}", cfg_path.display());
             }
