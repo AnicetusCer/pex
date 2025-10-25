@@ -3,11 +3,7 @@ Third-Party Notices
 
 This project relies on the following external services and tools:
 
-- FFmpeg / ffprobe — if you redistribute binaries that bundle ffprobe,
-  include the FFmpeg license files and attribution statement required by the
-  FFmpeg project (see https://ffmpeg.org/legal.html).
-- OMDb API — follow the OMDb usage terms and retain attribution such as
-  “Data provided by OMDb”.
+- TMDb API — Rating data sourced from The Movie Database (TMDb). “This product uses the TMDb API but is not endorsed or certified by TMDb.”
 - Plex — Plex and related marks are trademarks of Plex, Inc. This project is
   an independent client that uses the personal Plex DVR database of each individual client user.
 
