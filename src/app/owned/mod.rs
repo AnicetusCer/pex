@@ -251,7 +251,25 @@ impl crate::app::PexApp {
                     }
                 }
                 Done { keys, modified } => {
+                    if keys.is_empty()
+                        && !self.owned_auto_retry_attempted
+                        && crate::config::load_config()
+                            .plex_library_db_source
+                            .as_ref()
+                            .is_some()
+                    {
+                        self.owned_auto_retry_attempted = true;
+                        self.record_owned_message(
+                            "Owned scan returned no entries; forcing Plex library resync...",
+                        );
+                        self.refresh_owned_scan_internal(true, false);
+                        continue;
+                    }
+
                     let count = keys.len();
+                    if count > 0 {
+                        self.owned_auto_retry_attempted = false;
+                    }
                     self.owned_keys = Some(keys);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
                     self.owned_modified = Some(modified);
