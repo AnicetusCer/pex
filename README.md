@@ -9,7 +9,7 @@ Pex helps you:
 - Choose to visually dim movies you already own or hide them from the grid entirely.
 - Spot HD airings, including HD upgrades for titles you currently only have in SD.
 - See at a glance which films are already scheduled to record in Plex.
-- Bring channel art, genre groupings, and on-demand IMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
+- Bring channel art, genre groupings, and on-demand TMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
 To get rolling, copy `config.example.json` (or the platform-specific samples in `make_portable/`) to `config.json` and fill in your Plex database paths. The only real prerequisite is that you're using Plex DVR with its standard EPG—Pex mirrors Plex's own library database to figure out what you already own, so there's no filesystem scraping or directory configuration to babysit.
 
@@ -61,7 +61,7 @@ and genre selectors, plus multiple sort orders.
 - ?? **Owned library awareness** - mirrored Plex library data feeds owned/HD badges and "recorded on" timestamps directly into the grid.
 - 🎯 **DVR awareness** – scheduled recordings show a red *REC* badge and detail call-out pulled from the Plex library database.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
-badges, optional IMDb ratings, and formatted descriptions.
+badges, optional TMDb ratings, and formatted descriptions.
 - 🧰 **Operator controls** – quick refresh/clear actions for poster and owned caches as well as worker tuning knobs.
 
 Pex runs on Windows, macOS, and Linux (including WSL) using
@@ -113,8 +113,7 @@ the accompanying WAL/SHM files) exist on disk.
 - Git (to clone the repository)
 
 ### External services
-- **OMDb API key** (optional, but recommended). Supplying a personal key avoids
-the heavy throttling on the public demo key when fetching IMDb ratings.
+- **TMDb API key** (optional, but recommended). Add your personal TMDb V3 key if you want to fetch TMDb vote-average ratings from the detail pane.
 
 ---
 
@@ -158,7 +157,7 @@ otherwise stated; absent keys fall back to reasonable defaults.
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
 | `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
-| `omdb_api_key` | string or `null` | demo key | Personal OMDb API key for IMDb ratings. Leave blank to use the public key (heavy rate limiting). |
+| `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
 | `log_level` | string | `info` | Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
 
 Example configuration:
@@ -168,7 +167,7 @@ Example configuration:
   "plex_epg_db_source": "\\\\nas\\PlexConfig\\Databases\\tv.plex.providers.epg.cloud.db",
   "plex_library_db_source": "\\\\ds\\PlexMediaServer\\AppData\\Plex Media Server\\Plug-in Support\\Databases\\com.plexapp.plugins.library.db",
   "cache_dir": ".pex_cache",
-  "omdb_api_key": "YOUR-OMDB-KEY",
+  "tmdb_api_key": "YOUR-TMDB-KEY",
   "log_level": "info"
 }
 ```
@@ -199,7 +198,7 @@ Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Ple
 ### Other useful keys
 
 - `cache_dir` – move the poster/owned/UI cache elsewhere; relative paths are resolved relative to the repo root.
-- `omdb_api_key` – replace the bundled demo key (`thewdb`) with your personal OMDb key to avoid rate limits.
+- `tmdb_api_key` – add your TMDb V3 API key to enable the on-demand rating button.
 - `log_level` – override the default tracing verbosity (`trace` → most verbose).
 
 ### Environment variables
@@ -284,7 +283,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 ## Legal
 
 - Licensed under the [PEX Attribution License (PAL)](./LICENSE).
-- IMDb ratings are fetched via the OMDb API; please respect their usage terms
+- TMDb ratings are fetched via the TMDb API; please respect their usage terms
   and attribution requirements.
 - Plex is a registered trademark of Plex, Inc. This project is an independent
   client that reads the Plex DVR database.
