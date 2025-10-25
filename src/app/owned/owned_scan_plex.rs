@@ -1,6 +1,7 @@
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -113,6 +114,7 @@ struct PlexOwnedEntry {
     width: Option<u32>,
     height: Option<u32>,
     updated_at: Option<u64>,
+    file_path: String,
 }
 
 fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, String> {
@@ -165,7 +167,7 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             let media_updated_at: Option<i64> = row.get("media_updated_at")?;
             let meta_updated_at: Option<i64> = row.get("meta_updated_at")?;
             let meta_added_at: Option<i64> = row.get("meta_added_at")?;
-            let _file: String = row.get("file_path")?;
+            let file_path: String = row.get("file_path")?;
             let _size: Option<i64> = row.get("file_size")?;
 
             Ok((
@@ -180,6 +182,7 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
                 media_updated_at,
                 meta_updated_at,
                 meta_added_at,
+                file_path,
             ))
         })
         .map_err(|err| format!("Failed to iterate Plex library rows: {err}"))?;
@@ -199,6 +202,7 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             media_updated_at,
             meta_updated_at,
             meta_added_at,
+            file_path,
         ) = row.map_err(|err| format!("Failed to read Plex library row: {err}"))?;
 
         if !seen_ids.insert(metadata_id) {
@@ -226,6 +230,7 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             width,
             height,
             updated_at,
+            file_path,
         });
     }
 
@@ -264,6 +269,16 @@ fn accumulate_owned_entry(
     push_keys_for(&entry.title);
     if let Some(original) = entry.original_title.as_deref() {
         push_keys_for(original);
+    }
+
+    if !entry.file_path.trim().is_empty() {
+        let path = Path::new(&entry.file_path);
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            push_keys_for(stem);
+        }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            push_keys_for(name);
+        }
     }
 }
 
