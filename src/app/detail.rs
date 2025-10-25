@@ -88,12 +88,15 @@ impl crate::app::PexApp {
                 let channel_icon = channel_thumb
                     .as_deref()
                     .and_then(|thumb| self.channel_icon_texture(ctx, thumb));
-
                 ui.horizontal(|ui| {
                     if let Some(tex) = channel_icon {
-                        let size = eg::vec2(64.0, 64.0);
-                        ui.image((tex.id(), size));
-                        ui.add_space(6.0);
+                        let tex_size = tex.size();
+                        let native_w = tex_size[0].max(1) as f32;
+                        let native_h = tex_size[1].max(1) as f32;
+                        let target_h = 64.0;
+                        let target_w = (native_w / native_h * target_h).clamp(48.0, 120.0);
+                        ui.image((tex.id(), eg::vec2(target_w, target_h)));
+                        ui.add_space(8.0);
                     }
 
                     let scroll_width = (ui.available_width() - 40.0).max(100.0);
