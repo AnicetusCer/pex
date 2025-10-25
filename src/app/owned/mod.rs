@@ -247,6 +247,28 @@ impl crate::app::PexApp {
                     self.record_owned_message(msg.clone());
                     self.owned_scan_in_progress = false;
                     self.set_status(msg);
+                    let should_retry =
+                        if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
+                            let lowered = e.to_ascii_lowercase();
+                            lowered.contains("unable to open database")
+                                || lowered.contains("database is locked")
+                                || lowered.contains("busy")
+                        } else {
+                            false
+                        };
+
+                    if should_retry {
+                        self.owned_retry_attempts = self.owned_retry_attempts.saturating_add(1);
+                        let attempt = self.owned_retry_attempts;
+                        self.owned_retry_next = Some(Instant::now() + Duration::from_secs(3));
+                        self.record_owned_message(format!(
+                            "Owned scan error; retry {attempt}/{} scheduled…",
+                            crate::app::OWNED_AUTO_RETRY_MAX
+                        ));
+                    } else {
+                        self.owned_retry_next = None;
+                    }
+
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }
