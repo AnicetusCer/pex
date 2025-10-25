@@ -132,21 +132,25 @@ function Get-ReleaseAssets {
     $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
     if (-not $ghCmd) {
         Write-Host "GitHub CLI (gh) not found; skipping release asset lookup." -ForegroundColor Yellow
-        return @()
+        return [pscustomobject]@{
+            Assets      = @()
+            PublishedAt = $null
+        }
     }
 
-    $json = gh release view $Tag --json assets 2>$null
+    $json = gh release view $Tag --json assets,publishedAt 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
-        return @()
+        return [pscustomobject]@{
+            Assets      = @()
+            PublishedAt = $null
+        }
     }
 
     $parsed = $json | ConvertFrom-Json
-    if (-not $parsed -or -not $parsed.assets) {
-        return @()
-    }
+    $assetsRaw = if ($parsed) { $parsed.assets } else { $null }
 
     $assets = @()
-    foreach ($asset in $parsed.assets) {
+    foreach ($asset in $assetsRaw) {
         $meta = Get-AssetMetadata -Name $asset.name
         $downloadUrl = if ($asset.url) { $asset.url }
             elseif ($asset.browserDownloadUrl) { $asset.browserDownloadUrl }
@@ -161,7 +165,10 @@ function Get-ReleaseAssets {
         }
     }
 
-    return $assets | Sort-Object -Property Name
+    return [pscustomobject]@{
+        Assets      = ($assets | Sort-Object -Property Name)
+        PublishedAt = $parsed.publishedAt
+    }
 }
 
 function Test-ReleaseExists {
@@ -207,7 +214,8 @@ function Update-DownloadsPage {
     param(
         [Parameter(Mandatory = $true)][string]$Tag,
         [Parameter(Mandatory = $true)][string]$RepoSlug,
-        [Parameter()][array]$Assets
+        [Parameter()][array]$Assets,
+        [Parameter()][string]$PublishedAt
     )
 
     $docsDir = "docs"
@@ -216,7 +224,17 @@ function Update-DownloadsPage {
     }
 
     $releaseUrl = "https://github.com/$RepoSlug/releases/tag/$Tag"
-    $updatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
+    if ([string]::IsNullOrWhiteSpace($PublishedAt)) {
+        $updatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
+    }
+    else {
+        try {
+            $updatedAt = (Get-Date $PublishedAt).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
+        }
+        catch {
+            $updatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
+        }
+    }
     $downloadSection = Build-DownloadSection -Tag $Tag -ReleaseUrl $releaseUrl -Assets $Assets
 
     $html = @"
