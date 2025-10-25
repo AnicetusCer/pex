@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 // ---- Crates ----
 use eframe::egui as eg;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use tracing::warn;
 use urlencoding::encode;
 
@@ -420,21 +420,22 @@ impl PexApp {
             }
         }
 
-        let omdb_missing = cfg
-            .omdb_api_key
+        let tmdb_missing = cfg
+            .tmdb_api_key
             .as_ref()
             .is_none_or(|k| k.trim().is_empty());
-        if omdb_missing {
+        if tmdb_missing {
             self.setup_warnings
-                .push("omdb_api_key not set; using the public demo key (rate limited).".into());
+                .push("tmdb_api_key not set; ratings button will be disabled.".into());
         } else if cfg
-            .omdb_api_key
+            .tmdb_api_key
             .as_ref()
-            .is_some_and(|k| k.contains("REPLACE_ME"))
+            .is_some_and(|k| k.contains("REPLACE_ME") || k.contains("YOUR"))
         {
-            self.setup_warnings
-                .push("omdb_api_key still uses the REPLACE_ME placeholder; add your own key for reliable ratings."
-                    .into());
+            self.setup_warnings.push(
+                "tmdb_api_key still uses the placeholder value; replace it with your TMDB V3 API key."
+                    .into(),
+            );
         }
 
         if !self.setup_errors.is_empty() {
@@ -562,14 +563,14 @@ impl PexApp {
         }
 
         let cfg = load_config();
-        let api_key = cfg
-            .omdb_api_key
+        let Some(api_key) = cfg
+            .tmdb_api_key
             .filter(|k| !k.trim().is_empty())
-            .unwrap_or_else(|| "4a3b711b".to_string());
-        if api_key.trim().is_empty() {
+            .map(|k| k.trim().to_string())
+        else {
             self.rating_states.insert(key, RatingState::MissingApiKey);
             return;
-        }
+        };
 
         let imdb_id = row.guid.as_deref().and_then(imdb_id_from_guid);
         let title = row.title.clone();
@@ -579,7 +580,7 @@ impl PexApp {
         self.rating_states.insert(key.clone(), RatingState::Pending);
 
         std::thread::spawn(move || {
-            let state = fetch_rating_from_omdb(api_key, imdb_id, title, year);
+            let state = fetch_rating_from_tmdb(api_key, imdb_id, title, year);
             let _ = sender.send(RatingMsg { key, state });
         });
     }
@@ -768,16 +769,28 @@ fn imdb_id_from_guid(guid: &str) -> Option<String> {
 }
 
 #[derive(Deserialize)]
-struct OmdbResponse {
-    #[serde(rename = "Response")]
-    response: String,
-    #[serde(rename = "imdbRating")]
-    imdb_rating: Option<String>,
-    #[serde(rename = "Error")]
-    error: Option<String>,
+struct TmdbFindResponse {
+    #[serde(default)]
+    movie_results: Vec<TmdbMovie>,
 }
 
-fn fetch_rating_from_omdb(
+#[derive(Deserialize)]
+struct TmdbSearchResponse {
+    #[serde(default)]
+    results: Vec<TmdbMovie>,
+}
+
+#[derive(Deserialize)]
+struct TmdbMovie {
+    #[serde(default)]
+    vote_average: f32,
+    #[serde(default)]
+    vote_count: u32,
+    #[serde(default)]
+    release_date: Option<String>,
+}
+
+fn fetch_rating_from_tmdb(
     api_key: String,
     imdb_id: Option<String>,
     title: String,
@@ -796,61 +809,119 @@ fn fetch_rating_from_omdb(
         Err(err) => return RatingState::Error(format!("client: {err}")),
     };
 
-    let url = imdb_id.map_or_else(
-        || {
-            let mut url = format!(
-                "https://www.omdbapi.com/?t={}&apikey={}",
-                encode(title.trim()),
-                api_key
-            );
-            if let Some(y) = year {
-                url.push_str(&format!("&y={}", y));
-            }
-            url
-        },
-        |id| format!("https://www.omdbapi.com/?i={id}&apikey={api_key}"),
-    );
-
-    let resp = match client.get(&url).send() {
-        Ok(r) => r,
-        Err(err) => return RatingState::Error(format!("network: {err}")),
-    };
-    if !resp.status().is_success() {
-        return RatingState::Error(format!("HTTP {}", resp.status()));
-    }
-    let text = match resp.text() {
-        Ok(t) => t,
-        Err(err) => return RatingState::Error(format!("read: {err}")),
-    };
-
-    let parsed: OmdbResponse = match serde_json::from_str(&text) {
-        Ok(p) => p,
-        Err(err) => return RatingState::Error(format!("parse: {err}")),
-    };
-
-    if parsed.response.eq_ignore_ascii_case("true") {
-        parsed
-            .imdb_rating
-            .as_ref()
-            .map_or(RatingState::NotFound, |r| {
-                let trimmed = r.trim();
-                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("N/A") {
-                    RatingState::NotFound
-                } else if let Ok(val) = trimmed.parse::<f32>() {
-                    RatingState::Success(format!("IMDb {:.1}/10", val))
-                } else {
-                    RatingState::Success(format!("IMDb {trimmed}"))
-                }
-            })
-    } else if let Some(err) = parsed.error {
-        if err.to_ascii_lowercase().contains("not found") {
-            RatingState::NotFound
-        } else {
-            RatingState::Error(err)
+    if let Some(id) = imdb_id {
+        match tmdb_find_by_imdb(&client, &api_key, &id, year) {
+            Ok(Some(state)) => return state,
+            Ok(None) => {}
+            Err(err) => return err,
         }
-    } else {
-        RatingState::NotFound
     }
+
+    let title = title.trim();
+    if title.is_empty() {
+        return RatingState::NotFound;
+    }
+
+    match tmdb_search_by_title(&client, &api_key, title, year) {
+        Ok(Some(state)) => state,
+        Ok(None) => RatingState::NotFound,
+        Err(err) => err,
+    }
+}
+
+fn tmdb_find_by_imdb(
+    client: &reqwest::blocking::Client,
+    api_key: &str,
+    imdb_id: &str,
+    year: Option<i32>,
+) -> Result<Option<RatingState>, RatingState> {
+    let url = format!(
+        "https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&language=en-US&external_source=imdb_id"
+    );
+    let body = tmdb_get(client, &url)?;
+    let parsed: TmdbFindResponse = parse_tmdb_body(&body)?;
+    Ok(extract_tmdb_rating(parsed.movie_results, year))
+}
+
+fn tmdb_search_by_title(
+    client: &reqwest::blocking::Client,
+    api_key: &str,
+    title: &str,
+    year: Option<i32>,
+) -> Result<Option<RatingState>, RatingState> {
+    let mut url = format!(
+        "https://api.themoviedb.org/3/search/movie?api_key={api_key}&language=en-US&include_adult=false&query={}",
+        encode(title)
+    );
+    if let Some(y) = year {
+        url.push_str(&format!("&year={y}"));
+    }
+    let body = tmdb_get(client, &url)?;
+    let parsed: TmdbSearchResponse = parse_tmdb_body(&body)?;
+    Ok(extract_tmdb_rating(parsed.results, year))
+}
+
+fn tmdb_get(client: &reqwest::blocking::Client, url: &str) -> Result<String, RatingState> {
+    let resp = client
+        .get(url)
+        .send()
+        .map_err(|err| RatingState::Error(format!("network: {err}")))?;
+    if !resp.status().is_success() {
+        return Err(RatingState::Error(format!("HTTP {}", resp.status())));
+    }
+    resp.text()
+        .map_err(|err| RatingState::Error(format!("read: {err}")))
+}
+
+fn parse_tmdb_body<T: DeserializeOwned>(body: &str) -> Result<T, RatingState> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|err| RatingState::Error(format!("parse: {err}")))?;
+    if let Some(status) = value.get("status_code") {
+        let code = status.as_i64().unwrap_or_default();
+        let message = value
+            .get("status_message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("TMDb request failed");
+        return Err(RatingState::Error(format!("TMDb error {code}: {message}")));
+    }
+    serde_json::from_value(value).map_err(|err| RatingState::Error(format!("parse: {err}")))
+}
+
+fn extract_tmdb_rating(movies: Vec<TmdbMovie>, target_year: Option<i32>) -> Option<RatingState> {
+    let mut fallback: Option<(f32, u32)> = None;
+
+    for movie in movies {
+        if movie.vote_average <= 0.0 || movie.vote_count == 0 {
+            continue;
+        }
+
+        if let Some(target) = target_year {
+            if tmdb_release_year(&movie.release_date) == Some(target) {
+                return Some(format_tmdb_rating(movie.vote_average, movie.vote_count));
+            }
+        }
+
+        if fallback.is_none() {
+            fallback = Some((movie.vote_average, movie.vote_count));
+        }
+    }
+
+    fallback.map(|(avg, count)| format_tmdb_rating(avg, count))
+}
+
+fn tmdb_release_year(date: &Option<String>) -> Option<i32> {
+    let value = date.as_ref()?;
+    let year = value.split('-').next()?;
+    year.parse().ok()
+}
+
+fn format_tmdb_rating(avg: f32, count: u32) -> RatingState {
+    let votes = match count {
+        0 => "0 votes".to_string(),
+        1 => "1 vote".to_string(),
+        _ => format!("{count} votes"),
+    };
+    RatingState::Success(format!("TMDb {:.1}/10 ({})", avg, votes))
 }
 
 impl eframe::App for PexApp {
