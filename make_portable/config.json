@@ -1,6 +1,6 @@
 {
-  "plex_epg_db_source": "REPLACE_ME_WITH_PATH/plex_epg.db",
-  "plex_library_db_source": "REPLACE_ME_WITH_PATH/plex_library.db",
+  "plex_epg_db_source": "REPLACE_ME_WITH_PATH/tv.plex.providers.epg.cloud-11111111-1111-1111-1111-111111111111.db",
+  "plex_library_db_source": "REPLACE_ME_WITH_PATH/com.plexapp.plugins.library.db",
   "cache_dir": ".pex_cache",
-  "omdb_api_key": "thewdb"
+  "tmdb_api_key": "<  Your Own TMDB API Key Here  >"
 }
