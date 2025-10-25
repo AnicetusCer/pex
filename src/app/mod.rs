@@ -109,6 +109,7 @@ pub struct PexApp {
     rating_states: HashMap<String, RatingState>,
 
     scheduled_index: Option<ScheduledIndex>,
+    owned_auto_retry_attempted: bool,
 
     // search/filter/sort controls
     search_query: String,
@@ -212,6 +213,7 @@ impl Default for PexApp {
             channel_icon_textures: HashMap::new(),
             channel_icon_pending: HashSet::new(),
 
+            owned_auto_retry_attempted: false,
             sort_key: SortKey::Time,
             sort_desc: false,
 
@@ -734,6 +736,13 @@ impl PexApp {
     }
 
     fn refresh_owned_scan(&mut self) {
+        self.refresh_owned_scan_internal(true, true);
+    }
+
+    fn refresh_owned_scan_internal(&mut self, force_copy: bool, reset_auto_retry: bool) {
+        if reset_auto_retry {
+            self.owned_auto_retry_attempted = false;
+        }
         self.owned_rx = None;
         self.owned_keys = None;
         self.owned_hd_keys = None;
@@ -746,7 +755,7 @@ impl PexApp {
         self.owned_scan_in_progress = false;
         self.record_owned_message("Refreshing owned scan…");
 
-        match crate::app::prep::sync_library_db_from_source(true) {
+        match crate::app::prep::sync_library_db_from_source(force_copy) {
             Ok(true) => {
                 self.record_owned_message("Copied Plex library DB from plex_library_db_source.")
             }
