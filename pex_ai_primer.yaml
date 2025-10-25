@@ -17,7 +17,7 @@ project:
   purpose: >
     Desktop viewer and triage tool for the Plex EPG SQLite database. Pex boots quickly into an egui desktop UI,
     streams programme rows into a poster-first grid, highlights owned titles (with HD-upgrade hints),
-    pulls channel badges/icons, and exposes a detail pane with synopsis, airing schedule, and on-demand IMDb ratings.
+    pulls channel badges/icons, and exposes a detail pane with synopsis, airing schedule, and on-demand TMDb ratings.
     Posters are cached & resized locally, owned status is derived from library scans, and the UX stays snappy through
     aggressive background prep/prefetch stages.
   feature_highlights:
@@ -155,7 +155,7 @@ config:
     - plex_epg_db_source: "Optional source DB copied into db/plex_epg.db once per day"
     - plex_library_db_source: "Optional library DB copied into db/plex_library.db for owned + DVR state"
     - cache_dir: "Poster/owned/UI cache root"
-    - omdb_api_key: "Optional OMDb key for IMDb ratings"
+    - tmdb_api_key: "Optional TMDb V3 key for vote-average ratings"
     - log_level: "Set tracing verbosity (trace|debug|info|warn|error)"
   persistence:
     prefs_path: "<cache_dir>/ui_prefs.txt"
@@ -252,7 +252,7 @@ ui:
       content:
         - poster preview (cached or placeholder)
         - channel icon (64px), long-title scroller, copy button
-        - airing line and optional IMDb rating button
+        - airing line and optional TMDb rating button
         - owned chips with recorded date
         - description and genres
 
@@ -274,7 +274,7 @@ icons:
 
 ratings:
   - OMDb fetch triggered by detail panel button
-  - Uses demo key unless `omdb_api_key` set in config
+  - Rating button hidden unless `tmdb_api_key` is set in config
   - Results cached in-memory per poster key for the session
 
 advanced_controls:
