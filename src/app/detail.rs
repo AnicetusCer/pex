@@ -169,7 +169,7 @@ impl crate::app::PexApp {
                     let fetch_enabled = !matches!(rating_state, RatingState::Pending);
                     if ui
                         .add_enabled(fetch_enabled, eg::Button::new("⭐ Rating"))
-                        .on_hover_text("Fetch IMDb rating on demand")
+                        .on_hover_text("Fetch TMDb rating on demand")
                         .clicked()
                     {
                         trigger_rating_request = Some(sel);
@@ -178,13 +178,13 @@ impl crate::app::PexApp {
                     match rating_state {
                         RatingState::Pending => {
                             ui.add(eg::Spinner::new().size(14.0));
-                            ui.label("Fetching IMDb rating…");
+                            ui.label("Fetching TMDb rating…");
                         }
                         RatingState::Success(ref txt) => {
                             ui.label(eg::RichText::new(txt).strong());
                         }
                         RatingState::NotFound => {
-                            ui.label(eg::RichText::new("IMDb rating not found.").weak());
+                            ui.label(eg::RichText::new("TMDb rating not found.").weak());
                         }
                         RatingState::Error(ref err) => {
                             ui.label(
@@ -195,7 +195,7 @@ impl crate::app::PexApp {
                         RatingState::MissingApiKey => {
                             ui.label(
                                 eg::RichText::new(
-                                    "Set omdb_api_key in config.json to enable ratings.",
+                                    "Set tmdb_api_key in config.json to enable ratings.",
                                 )
                                 .weak(),
                             );
