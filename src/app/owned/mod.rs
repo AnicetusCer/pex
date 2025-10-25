@@ -201,10 +201,11 @@ impl crate::app::PexApp {
             if let Some(open) = trimmed.rfind('(') {
                 let candidate = trimmed[..open].trim_end();
                 let year_part = &trimmed[open + 1..trimmed.len() - 1];
-                if year_part.len() == 4 && year_part.chars().all(|c| c.is_ascii_digit()) {
-                    if !candidate.is_empty() {
-                        return Some(candidate.to_string());
-                    }
+                if year_part.len() == 4
+                    && year_part.chars().all(|c| c.is_ascii_digit())
+                    && !candidate.is_empty()
+                {
+                    return Some(candidate.to_string());
                 }
             }
         }
