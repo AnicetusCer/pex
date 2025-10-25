@@ -745,6 +745,17 @@ impl PexApp {
         self.mark_dirty();
         self.owned_scan_in_progress = false;
         self.record_owned_message("Refreshing owned scan…");
+
+        match crate::app::prep::sync_library_db_from_source(true) {
+            Ok(true) => {
+                self.record_owned_message("Copied Plex library DB from plex_library_db_source.")
+            }
+            Ok(false) => {}
+            Err(err) => {
+                self.record_owned_message(format!("Plex library DB refresh skipped: {err}"))
+            }
+        }
+
         self.refresh_scheduled_index();
         self.start_owned_scan();
     }
