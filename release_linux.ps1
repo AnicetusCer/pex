@@ -1,7 +1,8 @@
 #!/usr/bin/env pwsh
 
 Param(
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    [switch]$UpdateDocs = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,7 +123,19 @@ if ($repoSlug) {
         $releaseInfo = Get-ReleaseAssets -Tag $tag
         $releaseAssets = $releaseInfo.Assets
         $publishedAt = $releaseInfo.PublishedAt
-        Update-DownloadsPage -Tag $tag -RepoSlug $repoSlug -Assets $releaseAssets -PublishedAt $publishedAt
+        $autoDocs = Should-UpdateDocs -Assets $releaseAssets -CurrentPlatformId $platformId
+
+        if ($UpdateDocs -or $autoDocs) {
+            if (-not $releaseAssets -or $releaseAssets.Count -eq 0) {
+                Write-Host "Docs update skipped: release has no portable assets yet." -ForegroundColor Yellow
+            }
+            else {
+                Update-DownloadsPage -Tag $tag -RepoSlug $repoSlug -Assets $releaseAssets -PublishedAt $publishedAt
+            }
+        }
+        else {
+            Write-Host "Docs update skipped (run again with both platform bundles uploaded or pass -UpdateDocs)." -ForegroundColor Yellow
+        }
     }
     catch {
         Write-Host "Failed to refresh docs/index.html: $_" -ForegroundColor Yellow
