@@ -137,7 +137,78 @@ impl crate::app::PexApp {
             }
         }
 
+        let mut extra: Vec<String> = Vec::new();
+        for existing in &titles {
+            if let Some(candidate) = Self::variant_drop_g_suffix(existing) {
+                extra.push(candidate);
+            }
+            if let Some(candidate) = Self::variant_strip_trailing_year(existing) {
+                extra.push(candidate);
+            }
+            if let Some(candidate) = Self::variant_swap_word(existing, "thru", "through") {
+                extra.push(candidate);
+            }
+            if let Some(candidate) = Self::variant_swap_word(existing, "through", "thru") {
+                extra.push(candidate);
+            }
+        }
+        titles.extend(extra);
+        titles.sort();
+        titles.dedup();
         titles
+    }
+
+    fn variant_drop_g_suffix(input: &str) -> Option<String> {
+        let mut changed = false;
+        let mut words: Vec<String> = Vec::new();
+        for token in input.split_whitespace() {
+            let mut replaced = false;
+            if let Some(last) = token.chars().last() {
+                if last == '\'' || last == '’' {
+                    let base = &token[..token.len() - last.len_utf8()];
+                    let lower = base.to_ascii_lowercase();
+                    if lower.ends_with("in") && !lower.ends_with("ing") {
+                        words.push(format!("{base}g"));
+                        changed = true;
+                        replaced = true;
+                    }
+                }
+            }
+            if !replaced {
+                words.push(token.to_string());
+            }
+        }
+        changed.then(|| words.join(" "))
+    }
+
+    fn variant_swap_word(input: &str, needle: &str, replacement: &str) -> Option<String> {
+        let mut changed = false;
+        let mut words: Vec<String> = Vec::new();
+        for token in input.split_whitespace() {
+            if token.eq_ignore_ascii_case(needle) {
+                words.push(replacement.to_string());
+                changed = true;
+            } else {
+                words.push(token.to_string());
+            }
+        }
+        changed.then(|| words.join(" "))
+    }
+
+    fn variant_strip_trailing_year(input: &str) -> Option<String> {
+        let trimmed = input.trim();
+        if trimmed.ends_with(')') {
+            if let Some(open) = trimmed.rfind('(') {
+                let candidate = trimmed[..open].trim_end();
+                let year_part = &trimmed[open + 1..trimmed.len() - 1];
+                if year_part.len() == 4 && year_part.chars().all(|c| c.is_ascii_digit()) {
+                    if !candidate.is_empty() {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Drain owned-scan messages without blocking the UI thread.
