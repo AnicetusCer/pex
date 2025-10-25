@@ -1,6 +1,7 @@
 pub(crate) mod owned_scan_plex;
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use eframe::egui as eg;
 
@@ -251,25 +252,54 @@ impl crate::app::PexApp {
                     }
                 }
                 Done { keys, modified } => {
-                    if keys.is_empty()
-                        && !self.owned_auto_retry_attempted
-                        && crate::config::load_config()
+                    if keys.is_empty() {
+                        self.owned_scan_in_progress = false;
+                        let has_source = crate::config::load_config()
                             .plex_library_db_source
                             .as_ref()
-                            .is_some()
-                    {
-                        self.owned_auto_retry_attempted = true;
-                        self.record_owned_message(
-                            "Owned scan returned no entries; forcing Plex library resync...",
-                        );
-                        self.refresh_owned_scan_internal(true, false);
+                            .is_some_and(|s| !s.trim().is_empty());
+
+                        if has_source {
+                            if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
+                                self.owned_retry_attempts =
+                                    self.owned_retry_attempts.saturating_add(1);
+                                let attempt = self.owned_retry_attempts;
+                                self.owned_retry_next =
+                                    Some(Instant::now() + Duration::from_secs(3));
+                                self.record_owned_message(format!(
+                                    "Owned scan returned no entries (attempt {attempt}/{}) – retrying after copying Plex library…",
+                                    crate::app::OWNED_AUTO_RETRY_MAX
+                                ));
+                                self.set_status("Owned scan retry scheduled…");
+                            } else {
+                                self.record_owned_message(
+                                    "Owned scan returned no entries after automatic retries.",
+                                );
+                                self.set_status(
+                                    "Owned scan completed with no matches. Verify plex_library_db_source in config.json.",
+                                );
+                                self.owned_keys = Some(HashSet::new());
+                                self.owned_retry_next = None;
+                            }
+                        } else {
+                            self.record_owned_message(
+                                "Owned scan returned no entries (plex_library_db_source not configured).",
+                            );
+                            self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
+                            self.owned_keys = Some(HashSet::new());
+                            self.owned_retry_next = None;
+                        }
+
+                        if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
+                            self.boot_phase = crate::app::BootPhase::Ready;
+                        }
                         continue;
                     }
 
+                    self.owned_retry_attempts = 0;
+                    self.owned_retry_next = None;
+
                     let count = keys.len();
-                    if count > 0 {
-                        self.owned_auto_retry_attempted = false;
-                    }
                     self.owned_keys = Some(keys);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
                     self.owned_modified = Some(modified);
