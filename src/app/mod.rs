@@ -49,6 +49,7 @@ const STATUS_EMIT_EVERY_MS: u64 = 120;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
+const OWNED_AUTO_RETRY_MAX: u8 = 2;
 pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str =
     "Stage 3/4 - Owned scan complete (Owned and HD badges ready). Finishing artwork cache...";
 
@@ -104,12 +105,13 @@ pub struct PexApp {
     owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
+    owned_retry_attempts: u8,
+    owned_retry_next: Option<Instant>,
     rating_tx: Option<Sender<RatingMsg>>,
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
 
     scheduled_index: Option<ScheduledIndex>,
-    owned_auto_retry_attempted: bool,
 
     // search/filter/sort controls
     search_query: String,
@@ -192,6 +194,8 @@ impl Default for PexApp {
             owned_modified: None,
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
+            owned_retry_attempts: 0,
+            owned_retry_next: None,
             rating_tx: None,
             rating_rx: None,
             rating_states: HashMap::new(),
@@ -212,8 +216,6 @@ impl Default for PexApp {
             stage4_complete_message: None,
             channel_icon_textures: HashMap::new(),
             channel_icon_pending: HashSet::new(),
-
-            owned_auto_retry_attempted: false,
             sort_key: SortKey::Time,
             sort_desc: false,
 
@@ -741,7 +743,8 @@ impl PexApp {
 
     fn refresh_owned_scan_internal(&mut self, force_copy: bool, reset_auto_retry: bool) {
         if reset_auto_retry {
-            self.owned_auto_retry_attempted = false;
+            self.owned_retry_attempts = 0;
+            self.owned_retry_next = None;
         }
         self.owned_rx = None;
         self.owned_keys = None;
@@ -1013,15 +1016,18 @@ impl eframe::App for PexApp {
             }
         }
 
-        if !self.owned_scan_in_progress
-            && self.owned_keys.as_ref().is_some_and(|keys| keys.is_empty())
-            && !self.owned_auto_retry_attempted
-        {
-            self.owned_auto_retry_attempted = true;
-            self.record_owned_message(
-                "Owned scan produced no entries; retrying after library copy…",
-            );
-            self.refresh_owned_scan_internal(true, false);
+        if !self.owned_scan_in_progress {
+            if let Some(next) = self.owned_retry_next {
+                if Instant::now() >= next && self.owned_retry_attempts > 0 {
+                    let attempt = self.owned_retry_attempts;
+                    self.set_status(format!(
+                        "Retrying owned scan ({attempt}/{})…",
+                        OWNED_AUTO_RETRY_MAX
+                    ));
+                    self.refresh_owned_scan_internal(true, false);
+                    self.owned_retry_next = None;
+                }
+            }
         }
 
         // Soft heartbeat ticker for subtle activity (optional)
