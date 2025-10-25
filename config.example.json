@@ -4,14 +4,14 @@
     "plex_epg_db_source": "%LOCALAPPDATA%/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
     "plex_library_db_source": "%LOCALAPPDATA%/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
     "cache_dir": ".pex_cache",
-    "omdb_api_key": "Your-OMDb-Key-Here",
+    "tmdb_api_key": "Your-TMDb-Key-Here",
     "log_level": "info"
   },
   "linux_example": {
     "plex_epg_db_source": "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
     "plex_library_db_source": "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
     "cache_dir": ".pex_cache",
-    "omdb_api_key": "Your-OMDb-Key-Here",
+    "tmdb_api_key": "Your-TMDb-Key-Here",
     "log_level": "info"
   }
 }
