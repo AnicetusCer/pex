@@ -293,3 +293,28 @@ $downloadSection
         Write-Host "Updated docs/index.html (release has no portable assets yet)." -ForegroundColor Yellow
     }
 }
+
+function Should-UpdateDocs {
+    param(
+        [Parameter(Mandatory = $true)][array]$Assets,
+        [Parameter(Mandatory = $true)][string]$CurrentPlatformId
+    )
+
+    if (-not $Assets -or $Assets.Count -eq 0) {
+        return $false
+    }
+
+    $platforms = $Assets
+        | Where-Object { $_.PlatformId }
+        | ForEach-Object { $_.PlatformId.ToLowerInvariant() }
+        | Sort-Object -Unique
+
+    $hasLinux = $platforms -contains "linux-x86_64"
+    $hasWindows = $platforms -contains "windows-x86_64"
+
+    if ($hasLinux -and $hasWindows) {
+        return $true
+    }
+
+    return $false
+}
