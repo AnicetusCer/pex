@@ -118,8 +118,10 @@ else {
 $repoSlug = Get-RepoSlug
 if ($repoSlug) {
     try {
-        $releaseAssets = Get-ReleaseAssets -Tag $tag
-        Update-DownloadsPage -Tag $tag -RepoSlug $repoSlug -Assets $releaseAssets
+        $releaseInfo = Get-ReleaseAssets -Tag $tag
+        $releaseAssets = $releaseInfo.Assets
+        $publishedAt = $releaseInfo.PublishedAt
+        Update-DownloadsPage -Tag $tag -RepoSlug $repoSlug -Assets $releaseAssets -PublishedAt $publishedAt
     }
     catch {
         Write-Host "Failed to refresh docs/index.html: $_" -ForegroundColor Yellow
