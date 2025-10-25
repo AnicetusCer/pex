@@ -2,6 +2,6 @@
   "plex_epg_db_source": "C:/Users/Example/AppData/Local/Plex Media Server/Plug-in Support/Databases/tv.plex.providers.epg.cloud.db",
   "plex_library_db_source": "C:/Users/Example/AppData/Local/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
   "cache_dir": "C:/PexCache",
-  "omdb_api_key": "YOUR_OMDB_KEY",
+  "tmdb_api_key": "YOUR_TMDB_KEY",
   "log_level": "info"
 }
