@@ -1,4 +1,5 @@
 // src/app/prep.rs
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -187,6 +188,95 @@ where
     Ok(())
 }
 
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut os: OsString = path.as_os_str().to_os_string();
+    os.push(format!("-{suffix}"));
+    PathBuf::from(os)
+}
+
+fn copy_sqlite_sidecar(src: &Path, dst: &Path, suffix: &str) -> io::Result<()> {
+    let src_side = sqlite_sidecar_path(src, suffix);
+    let dst_side = sqlite_sidecar_path(dst, suffix);
+
+    if src_side.exists() {
+        if let Some(parent) = dst_side.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&src_side, &dst_side)?;
+    } else if dst_side.exists() {
+        let _ = fs::remove_file(&dst_side);
+    }
+    Ok(())
+}
+
+fn copy_sqlite_db_with_sidecars<F>(src: &Path, dst: &Path, on_prog: F) -> io::Result<()>
+where
+    F: FnMut(u64, u64, f32, f64),
+{
+    copy_with_progress(src, dst, on_prog)?;
+    copy_sqlite_sidecar(src, dst, "wal")?;
+    copy_sqlite_sidecar(src, dst, "shm")?;
+    Ok(())
+}
+
+/// Copy the Plex library database from `plex_library_db_source` into the local cache directory.
+/// When `force` is true the copy happens even if the daily freshness window has not elapsed.
+pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
+    let cfg = load_config();
+    let Some(src_path) = cfg
+        .plex_library_db_source
+        .as_deref()
+        .and_then(|p| (!p.trim().is_empty()).then_some(p))
+    else {
+        return Ok(false);
+    };
+
+    let src = Path::new(src_path);
+    if !src.exists() {
+        return Err(format!(
+            "plex_library_db_source does not exist at {}",
+            src.display()
+        ));
+    }
+
+    let dst = local_library_db_path();
+
+    let should_copy = if force {
+        true
+    } else {
+        match needs_db_update_daily(src, &dst) {
+            Ok(needed) => needed,
+            Err(err) => return Err(format!("Plex library DB freshness check failed: {err}")),
+        }
+    };
+
+    if !should_copy {
+        return Ok(false);
+    }
+
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create Plex library DB directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    info!(
+        "Refreshing Plex library DB copy from {} to {} (force={force})",
+        src.display(),
+        dst.display()
+    );
+
+    copy_sqlite_db_with_sidecars(src, &dst, |_c, _t, _p, _mbps| {})
+        .map_err(|err| format!("Copying Plex library DB failed: {err}"))?;
+    let marker = last_sync_marker_path(&dst);
+    let _ = touch_last_sync(&marker);
+
+    Ok(true)
+}
+
 // Set to true if you want to synthesize a tiny fake list for debugging.
 const DIAG_FAKE_STARTUP: bool = false;
 
@@ -280,7 +370,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                 Ok(true) => {
                     send(PrepMsg::Info("Stage 2/4 – Copying Plex DB from source (enables offline start-ups). First run may take a while.".into()));
                     let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_with_progress(src, &db_path, |_c, _t, _p, _mbps| {});
+                    let _ = copy_sqlite_db_with_sidecars(src, &db_path, |_c, _t, _p, _mbps| {});
                     let _ = touch_last_sync(&marker);
                 }
                 Ok(false) => send(PrepMsg::Info(
@@ -311,7 +401,11 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                         library_db_path.display()
                     );
                     let marker = last_sync_marker_path(&library_db_path);
-                    match copy_with_progress(src, &library_db_path, |_c, _t, _p, _mbps| {}) {
+                    match copy_sqlite_db_with_sidecars(
+                        src,
+                        &library_db_path,
+                        |_c, _t, _p, _mbps| {},
+                    ) {
                         Ok(_) => {
                             let _ = touch_last_sync(&marker);
                             send(PrepMsg::Info(
