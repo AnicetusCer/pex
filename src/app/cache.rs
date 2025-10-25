@@ -372,9 +372,15 @@ pub fn ensure_channel_icon(url: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("download icon: {e}"))?;
 
     let img = image::load_from_memory(&bytes).map_err(|e| format!("decode icon: {e}"))?;
+    let resized = if img.width() > 256 || img.height() > 256 {
+        img.resize(256, 256, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
 
     let mut png_bytes: Vec<u8> = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+    resized
+        .write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
         .map_err(|e| format!("encode icon png: {e}"))?;
 
     if let Some(parent) = dest.parent() {
