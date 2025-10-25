@@ -9,7 +9,7 @@ Pex helps you browse upcoming film broacasts in a more advanced way:
 - Choose to visually dim movies you already own or hide them from the grid entirely.
 - Spot HD airings, including HD upgrades for titles you currently only have in SD.
 - See at a glance which films are already scheduled to record in Plex (does not support schedualling, i want to keep the app focused on browsing)
-- Bring channel art, genre groupings, and on-demand IMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
+- Bring channel art, genre groupings, and on-demand TMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
 If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. Point the entries at your Plex EPG and library databases and you’re done—Pex mirrors Plex’s own data to decide what you already own, so there’s no filesystem crawl to configure.
 
@@ -65,7 +65,7 @@ Subsequent launches load almost immediately.
 | `plex_epg_db_source` | ✅ | Absolute path to Plex's EPG database (`tv.plex.providers.epg.cloud*.db`). Pex copies it into `db/plex_epg.db` the first time you launch and refreshes the copy roughly once per day. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
 | `plex_library_db_source` | ✅ | Path to `com.plexapp.plugins.library.db`. Mirroring this database enables owned detection and the DVR *REC* badge. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
 | `cache_dir` | Optional | Relocates `.pex_cache/` (posters, owned sidecars, UI prefs). Relative paths are resolved next to the executable. | Pick a writable folder with enough free space. |
-| `omdb_api_key` | Optional | API key for IMDb ratings. The demo key `thewdb` (the official OMDb sample) is included but heavily rate limited. | Sign up at <https://www.omdbapi.com/apikey.aspx>. |
+| `tmdb_api_key` | Optional | TMDb V3 API key for vote-average ratings. | Generate your key at <https://www.themoviedb.org/settings/api>. |
 | `log_level` | Optional | Adjusts runtime logging (`trace`, `debug`, `info`, `warn`, `error`). | Set only if you need more verbose console output. |
 
 ### Collecting Plex paths
