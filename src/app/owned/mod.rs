@@ -227,6 +227,9 @@ impl crate::app::PexApp {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.owned_scan_in_progress = false;
+                        if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
+                            self.boot_phase = crate::app::BootPhase::Ready;
+                        }
                         break;
                     }
                 }
@@ -243,6 +246,9 @@ impl crate::app::PexApp {
                     self.record_owned_message(msg.clone());
                     self.owned_scan_in_progress = false;
                     self.set_status(msg);
+                    if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
+                        self.boot_phase = crate::app::BootPhase::Ready;
+                    }
                 }
                 Done { keys, modified } => {
                     let count = keys.len();
