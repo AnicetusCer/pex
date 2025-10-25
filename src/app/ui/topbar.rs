@@ -60,6 +60,12 @@ impl crate::app::PexApp {
             {
                 dirty = true;
             }
+            if !self.search_query.is_empty()
+                && ui.small_button("X").on_hover_text("Clear search").clicked()
+            {
+                self.search_query.clear();
+                dirty = true;
+            }
 
             if ui
                 .toggle_value(&mut self.filter_hd_only, "HD only")
