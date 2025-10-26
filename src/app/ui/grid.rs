@@ -31,9 +31,12 @@ fn draw_corner_badge(p: &eframe::egui::Painter, rect: eg::Rect, label: &str) {
 }
 
 impl crate::app::PexApp {
-    // src/app/ui/grid.rs
     pub(crate) fn ui_render_grouped_grid(&mut self, ui: &mut eg::Ui, ctx: &eg::Context) {
+        self.handle_keyboard_navigation(ctx);
+
         let groups = self.build_grouped_indices();
+        self.sync_selection_with_groups(&groups);
+        self.grid_rows.clear();
 
         let card_w: f32 = self.poster_width_ui;
         let text_h: f32 = 56.0;
@@ -63,13 +66,22 @@ impl crate::app::PexApp {
                         ui.add_space(left_pad);
                     }
 
+                    let mut row_buffer: Vec<usize> = Vec::new();
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = eg::vec2(H_SPACING, V_SPACING);
 
                         for (col, &idx) in idxs.iter().enumerate() {
-                            if col > 0 && col.is_multiple_of(cols) {
+                            if col > 0 && col % cols == 0 {
                                 ui.end_row();
+                                if !row_buffer.is_empty() {
+                                    self.grid_rows.push(std::mem::take(&mut row_buffer));
+                                }
                             }
+
+                            if row_buffer.is_empty() {
+                                row_buffer.reserve(cols);
+                            }
+                            row_buffer.push(idx);
 
                             ui.allocate_ui_with_layout(
                                 eg::vec2(card_w, card_h),
@@ -101,6 +113,11 @@ impl crate::app::PexApp {
                                         eg::pos2(rect.min.x, poster_rect.max.y),
                                         rect.max,
                                     );
+
+                                    if self.scroll_to_idx == Some(idx) {
+                                        ui.scroll_to_rect(rect, Some(eg::Align::Center));
+                                        self.scroll_to_idx = None;
+                                    }
 
                                     if let Some(row) = self.rows.get(idx) {
                                         // Poster
@@ -231,6 +248,9 @@ impl crate::app::PexApp {
 
                         ui.end_row();
                     });
+                    if !row_buffer.is_empty() {
+                        self.grid_rows.push(std::mem::take(&mut row_buffer));
+                    }
                 }
             });
     }

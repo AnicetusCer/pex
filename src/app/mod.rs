@@ -1,7 +1,7 @@
 // src/app/mod.rs — async DB scan + upfront poster prefetch + resized cache + single splash
 
 // ---- Standard lib imports ----
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -17,10 +17,21 @@ use urlencoding::encode;
 // ---- Local modules ----
 pub mod cache;
 use crate::app::cache::find_any_by_key;
+use crate::app::filters::{
+    parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
+};
 use crate::app::scheduled::ScheduledIndex;
 use crate::config::{load_config, local_db_path};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum NavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 pub mod prep;
 pub mod scheduled;
@@ -116,11 +127,16 @@ pub struct PexApp {
     // search/filter/sort controls
     search_query: String,
     filter_hd_only: bool,
+    filter_owned_before_cutoff: bool,
+    owned_before_cutoff_ts: u64,
+    owned_before_cutoff_input: String,
+    owned_before_cutoff_valid: bool,
 
     // channel filter
     show_channel_filter_popup: bool,
-    selected_channels: std::collections::BTreeSet<String>,
-    selected_genres: std::collections::BTreeSet<String>,
+    selected_channels: BTreeSet<String>,
+    selected_genres: BTreeSet<String>,
+    selected_decades: BTreeSet<i32>,
     show_genre_filter_popup: bool,
     show_advanced_popup: bool,
     advanced_feedback: Option<String>,
@@ -148,6 +164,8 @@ pub struct PexApp {
     last_hotset: Option<std::collections::HashMap<String, PathBuf>>,
 
     selected_idx: Option<usize>,
+    grid_rows: Vec<Vec<usize>>,
+    scroll_to_idx: Option<usize>,
     // UI state
     detail_panel_width: f32,
 }
@@ -203,10 +221,15 @@ impl Default for PexApp {
 
             search_query: String::new(),
             filter_hd_only: false,
+            filter_owned_before_cutoff: false,
+            owned_before_cutoff_ts: OWNED_BEFORE_CUTOFF_DEFAULT_TS,
+            owned_before_cutoff_input: OWNED_BEFORE_CUTOFF_DEFAULT_STR.to_string(),
+            owned_before_cutoff_valid: true,
 
             show_channel_filter_popup: false,
-            selected_channels: std::collections::BTreeSet::new(),
-            selected_genres: std::collections::BTreeSet::new(),
+            selected_channels: BTreeSet::new(),
+            selected_genres: BTreeSet::new(),
+            selected_decades: BTreeSet::new(),
             show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
@@ -228,6 +251,8 @@ impl Default for PexApp {
             last_hotset: prefs::load_hotset_manifest().ok(),
 
             selected_idx: None,
+            grid_rows: Vec::new(),
+            scroll_to_idx: None,
 
             detail_panel_width: 320.0,
         }
@@ -236,6 +261,166 @@ impl Default for PexApp {
 
 // ---------- methods ----------
 impl PexApp {
+    pub(crate) fn set_owned_cutoff_from_str(&mut self, input: &str) -> bool {
+        if let Some(ts) = parse_owned_cutoff(input) {
+            self.owned_before_cutoff_ts = ts;
+            self.owned_before_cutoff_input = input.trim().to_string();
+            self.owned_before_cutoff_valid = true;
+            true
+        } else {
+            self.owned_before_cutoff_input = input.to_string();
+            self.owned_before_cutoff_valid = false;
+            false
+        }
+    }
+
+    pub(crate) fn reset_owned_cutoff_to_default(&mut self) {
+        self.owned_before_cutoff_ts = OWNED_BEFORE_CUTOFF_DEFAULT_TS;
+        self.owned_before_cutoff_input = OWNED_BEFORE_CUTOFF_DEFAULT_STR.to_string();
+        self.owned_before_cutoff_valid = true;
+    }
+
+    fn handle_keyboard_navigation(&mut self, ctx: &eg::Context) {
+        if self.grid_rows.is_empty() {
+            return;
+        }
+
+        if ctx.memory(|mem| mem.focused().is_some()) {
+            return;
+        }
+
+        let mut direction: Option<NavDirection> = None;
+        ctx.input(|input| {
+            if input.key_pressed(eg::Key::ArrowUp) {
+                direction = Some(NavDirection::Up);
+            } else if input.key_pressed(eg::Key::ArrowDown) {
+                direction = Some(NavDirection::Down);
+            } else if input.key_pressed(eg::Key::ArrowLeft) {
+                direction = Some(NavDirection::Left);
+            } else if input.key_pressed(eg::Key::ArrowRight) {
+                direction = Some(NavDirection::Right);
+            }
+        });
+
+        let Some(dir) = direction else {
+            return;
+        };
+
+        if let Some(sel) = self.selected_idx {
+            if !self.is_idx_in_grid(sel) {
+                self.selected_idx = None;
+            }
+        }
+
+        if self.selected_idx.is_none() {
+            if let Some(first) = self.grid_rows.first().and_then(|row| row.first()).copied() {
+                self.selected_idx = Some(first);
+                self.scroll_to_idx = Some(first);
+                ctx.request_repaint();
+            }
+            return;
+        }
+
+        let current = self.selected_idx.unwrap();
+        if let Some(next) = self.compute_nav_target(current, dir) {
+            if next != current {
+                self.selected_idx = Some(next);
+                self.scroll_to_idx = Some(next);
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn compute_nav_target(&self, current: usize, dir: NavDirection) -> Option<usize> {
+        let (row_i, col_i) = self.find_grid_position(current)?;
+        let current_row = self.grid_rows.get(row_i)?;
+        match dir {
+            NavDirection::Left => {
+                if col_i > 0 {
+                    Some(current_row[col_i - 1])
+                } else if row_i > 0 {
+                    self.grid_rows
+                        .get(row_i - 1)
+                        .and_then(|row| row.last().copied())
+                        .or(Some(current))
+                } else {
+                    Some(current)
+                }
+            }
+            NavDirection::Right => {
+                if col_i + 1 < current_row.len() {
+                    Some(current_row[col_i + 1])
+                } else if row_i + 1 < self.grid_rows.len() {
+                    self.grid_rows
+                        .get(row_i + 1)
+                        .and_then(|row| row.first().copied())
+                        .or(Some(current))
+                } else {
+                    Some(current)
+                }
+            }
+            NavDirection::Up => {
+                if row_i == 0 {
+                    Some(current)
+                } else {
+                    let prev_row = &self.grid_rows[row_i - 1];
+                    if prev_row.is_empty() {
+                        Some(current)
+                    } else {
+                        let target_col = col_i.min(prev_row.len() - 1);
+                        Some(prev_row[target_col])
+                    }
+                }
+            }
+            NavDirection::Down => {
+                if row_i + 1 >= self.grid_rows.len() {
+                    Some(current)
+                } else {
+                    let next_row = &self.grid_rows[row_i + 1];
+                    if next_row.is_empty() {
+                        Some(current)
+                    } else {
+                        let target_col = col_i.min(next_row.len() - 1);
+                        Some(next_row[target_col])
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_grid_position(&self, idx: usize) -> Option<(usize, usize)> {
+        for (row_i, row) in self.grid_rows.iter().enumerate() {
+            if let Some(col_i) = row.iter().position(|&value| value == idx) {
+                return Some((row_i, col_i));
+            }
+        }
+        None
+    }
+
+    fn is_idx_in_grid(&self, idx: usize) -> bool {
+        self.grid_rows.iter().any(|row| row.contains(&idx))
+    }
+
+    fn sync_selection_with_groups(&mut self, groups: &[(i64, Vec<usize>)]) {
+        let first_idx = groups.iter().find_map(|(_, idxs)| idxs.first()).copied();
+
+        let selection_present = self
+            .selected_idx
+            .is_some_and(|idx| groups.iter().any(|(_, idxs)| idxs.contains(&idx)));
+
+        if selection_present {
+            return;
+        }
+
+        if let Some(first) = first_idx {
+            self.selected_idx = Some(first);
+            if self.scroll_to_idx.is_none() {
+                self.scroll_to_idx = Some(first);
+            }
+        } else {
+            self.selected_idx = None;
+        }
+    }
     // ----- tiny helpers ----
 
     /// Derive a “small” variant cache key from the base key (separate file entry).
@@ -628,6 +813,8 @@ impl PexApp {
         self.boot_phase = BootPhase::Starting;
         self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
         self.selected_idx = None;
+        self.grid_rows.clear();
+        self.scroll_to_idx = None;
         self.rating_states.clear();
         self.channel_icon_textures.clear();
         self.channel_icon_pending.clear();

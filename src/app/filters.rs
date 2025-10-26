@@ -1,7 +1,18 @@
 // src/app/filters.rs
+use chrono::{NaiveDate, TimeZone, Utc};
+use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 use super::SortKey;
+
+pub(crate) const OWNED_BEFORE_CUTOFF_DEFAULT_STR: &str = "2022-12-25";
+pub(crate) const OWNED_BEFORE_CUTOFF_DEFAULT_TS: u64 = 1_671_926_400; // 2022-12-25 00:00:00 UTC
+
+pub(crate) fn parse_owned_cutoff(input: &str) -> Option<u64> {
+    let date = NaiveDate::parse_from_str(input.trim(), "%Y-%m-%d").ok()?;
+    let dt = date.and_hms_opt(0, 0, 0)?;
+    Some(Utc.from_utc_datetime(&dt).timestamp().max(0) as u64)
+}
 
 impl crate::app::PexApp {
     /// Build grouped indices for the grid: per-day buckets with intra-day sorting applied.
@@ -18,6 +29,9 @@ impl crate::app::PexApp {
         let use_query = !query.is_empty();
         let have_channel_filter = !self.selected_channels.is_empty(); // EMPTY = no filter (show all)
         let have_genre_filter = !self.selected_genres.is_empty();
+        let have_decade_filter = !self.selected_decades.is_empty();
+        let owned_cutoff_active = self.filter_owned_before_cutoff;
+        let owned_cutoff_ts = self.owned_before_cutoff_ts;
 
         // 1) Filter + attach day bucket
         let mut filtered: Vec<(usize, i64)> = self
@@ -78,6 +92,21 @@ impl crate::app::PexApp {
                     }
                 }
 
+                if have_decade_filter {
+                    let decade = row.year.map(|y| (y / 10) * 10);
+                    match decade {
+                        Some(d) if self.selected_decades.contains(&d) => {}
+                        _ => return None,
+                    }
+                }
+
+                if owned_cutoff_active {
+                    match (row.owned, row.owned_modified) {
+                        (true, Some(ts)) if ts < owned_cutoff_ts => {}
+                        _ => return None,
+                    }
+                }
+
                 Some((idx, b))
             })
             .collect();
@@ -112,6 +141,16 @@ impl crate::app::PexApp {
         }
 
         groups
+    }
+
+    pub(crate) fn available_decades(&self) -> Vec<i32> {
+        let mut decades: BTreeSet<i32> = BTreeSet::new();
+        for row in &self.rows {
+            if let Some(year) = row.year {
+                decades.insert((year / 10) * 10);
+            }
+        }
+        decades.into_iter().collect()
     }
 
     /// Sort a day's indices according to the current SortKey.

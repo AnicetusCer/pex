@@ -67,31 +67,133 @@ impl crate::app::PexApp {
                 dirty = true;
             }
 
-            if ui
-                .toggle_value(&mut self.filter_hd_only, "HD only")
-                .on_hover_text("Show only broadcast HD airings")
-                .changed()
-            {
-                dirty = true;
-            }
-
             ui.separator();
 
-            if ui.button("Channel filter.").clicked() {
-                self.show_channel_filter_popup = true;
-            }
+            let filters_menu_active = self.filter_hd_only
+                || self.filter_owned_before_cutoff
+                || !self.selected_decades.is_empty()
+                || !self.selected_channels.is_empty()
+                || !self.selected_genres.is_empty()
+                || self.hide_owned
+                || self.dim_owned;
+            let filters_label: eg::WidgetText = if filters_menu_active {
+                eg::RichText::new("Filters").strong().into()
+            } else {
+                "Filters".into()
+            };
+            let mut menu_dirty = false;
+            ui.menu_button(filters_label, |ui| {
+                if ui
+                    .checkbox(&mut self.filter_hd_only, "HD only")
+                    .on_hover_text("Show only broadcast HD airings")
+                    .changed()
+                {
+                    menu_dirty = true;
+                }
 
-            if ui.button("Genre filter.").clicked() {
-                self.show_genre_filter_popup = true;
-            }
+                let decades = self.available_decades();
+                if !decades.is_empty() {
+                    ui.separator();
+                    ui.label(eg::RichText::new("Decades").strong());
+                    ui.horizontal_wrapped(|ui| {
+                        for decade in decades {
+                            let mut selected = self.selected_decades.contains(&decade);
+                            let label = if decade >= 0 {
+                                format!("{}s", decade)
+                            } else {
+                                format!("{decade}s")
+                            };
+                            if ui.checkbox(&mut selected, label).changed() {
+                                if selected {
+                                    self.selected_decades.insert(decade);
+                                } else {
+                                    self.selected_decades.remove(&decade);
+                                }
+                                menu_dirty = true;
+                            }
+                        }
+                    });
+                    if !self.selected_decades.is_empty()
+                        && ui.small_button("Clear decades").clicked()
+                    {
+                        self.selected_decades.clear();
+                        menu_dirty = true;
+                    }
+                }
 
-            if !self.selected_channels.is_empty()
-                && ui
-                    .small_button("Clear channels")
-                    .on_hover_text("Clear the channel include-only filter")
-                    .clicked()
-            {
-                self.selected_channels.clear();
+                ui.separator();
+                ui.label(eg::RichText::new("Channel & Genre").strong());
+                if ui.button("Select channels…").clicked() {
+                    self.show_channel_filter_popup = true;
+                    ui.close_menu();
+                }
+                if ui.button("Select genres…").clicked() {
+                    self.show_genre_filter_popup = true;
+                    ui.close_menu();
+                }
+                if !self.selected_channels.is_empty() && ui.small_button("Clear channels").clicked()
+                {
+                    self.selected_channels.clear();
+                    menu_dirty = true;
+                }
+                if !self.selected_genres.is_empty() && ui.small_button("Clear genres").clicked() {
+                    self.selected_genres.clear();
+                    menu_dirty = true;
+                }
+
+                ui.separator();
+                ui.label(eg::RichText::new("Owned recorded before").strong());
+                let checkbox_label = format!("Enable cutoff ({})", self.owned_before_cutoff_input);
+                if ui
+                    .checkbox(&mut self.filter_owned_before_cutoff, checkbox_label)
+                    .on_hover_text("Only show owned titles recorded before the cutoff date")
+                    .changed()
+                {
+                    menu_dirty = true;
+                }
+                let date_response = ui
+                    .add(
+                        eg::TextEdit::singleline(&mut self.owned_before_cutoff_input)
+                            .hint_text("YYYY-MM-DD"),
+                    )
+                    .on_hover_text("Set the owned recording cutoff date (UTC midnight)");
+                if date_response.changed() {
+                    let input = self.owned_before_cutoff_input.clone();
+                    self.set_owned_cutoff_from_str(&input);
+                    // Always mark dirty so prefs capture the user's input.
+                    menu_dirty = true;
+                }
+                if !self.owned_before_cutoff_valid {
+                    ui.colored_label(
+                        eg::Color32::from_rgb(200, 80, 80),
+                        "Use YYYY-MM-DD (e.g. 2022-12-25)",
+                    );
+                }
+                if ui.small_button("Reset cutoff").clicked() {
+                    self.reset_owned_cutoff_to_default();
+                    menu_dirty = true;
+                }
+
+                ui.separator();
+                ui.label(eg::RichText::new("Owned view").strong());
+                let hide_resp =
+                    ui.checkbox(&mut self.hide_owned, "Hide owned (except HD upgrades)");
+                if hide_resp.changed() {
+                    menu_dirty = true;
+                }
+                let dim_resp = ui.checkbox(&mut self.dim_owned, "Dim owned");
+                let dim_toggled = dim_resp.changed();
+                let slider_changed = if self.dim_owned {
+                    ui.add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %"))
+                        .changed()
+                } else {
+                    false
+                };
+                if dim_toggled || slider_changed {
+                    menu_dirty = true;
+                }
+            });
+            if menu_dirty {
                 dirty = true;
             }
 
@@ -137,21 +239,6 @@ impl crate::app::PexApp {
                 .add(eg::Slider::new(&mut self.poster_width_ui, 120.0..=220.0).suffix(" px"))
                 .changed()
             {
-                dirty = true;
-            }
-
-            ui.separator();
-
-            if ui.checkbox(&mut self.hide_owned, "Hide owned").changed() {
-                dirty = true;
-            }
-            let dim_response = ui.checkbox(&mut self.dim_owned, "Dim owned");
-            let dim_toggled = dim_response.changed();
-            let slider_changed = self.dim_owned
-                && ui
-                    .add(eg::Slider::new(&mut self.dim_strength_ui, 0.10..=0.90).text("Darken %"))
-                    .changed();
-            if dim_toggled || slider_changed {
                 dirty = true;
             }
 

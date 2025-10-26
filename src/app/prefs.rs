@@ -91,8 +91,28 @@ impl crate::app::PexApp {
                         self.selected_genres.insert(g.to_string());
                     }
                 }
+                "decades" => {
+                    self.selected_decades.clear();
+                    for d in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                        let trimmed = d.trim_end_matches(|c| c == 's' || c == 'S');
+                        if let Ok(year) = trimmed.parse::<i32>() {
+                            let decade = (year / 10) * 10;
+                            self.selected_decades.insert(decade);
+                        }
+                    }
+                }
                 "filter_hd_only" => {
                     self.filter_hd_only = matches!(v, "1" | "true" | "yes");
+                }
+                "filter_owned_before_cutoff" => {
+                    self.filter_owned_before_cutoff = matches!(v, "1" | "true" | "yes");
+                }
+                "owned_before_cutoff" => {
+                    if v.is_empty() {
+                        self.reset_owned_cutoff_to_default();
+                    } else {
+                        self.set_owned_cutoff_from_str(v);
+                    }
                 }
                 _ => {}
             }
@@ -113,6 +133,26 @@ impl crate::app::PexApp {
                 .join(",")
         };
 
+        let decades_csv = if self.selected_decades.is_empty() {
+            String::new()
+        } else {
+            self.selected_decades
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let genres_csv = if self.selected_genres.is_empty() {
+            String::new()
+        } else {
+            self.selected_genres
+                .iter()
+                .map(|s| s.replace(',', " "))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
         let txt = format!(
             "# pex ui prefs\n\
              day_range={}\n\
@@ -127,7 +167,10 @@ impl crate::app::PexApp {
              dim_strength={:.2}\n\
              channels={}\n\
              genres={}\n\
-             filter_hd_only={}\n",
+             decades={}\n\
+             filter_hd_only={}\n\
+             filter_owned_before_cutoff={}\n\
+             owned_before_cutoff={}\n",
             self.current_range.as_str(),
             self.search_query,
             self.sort_key.as_str(),
@@ -139,18 +182,15 @@ impl crate::app::PexApp {
             if self.dim_owned { "1" } else { "0" },
             self.dim_strength_ui,
             channels_csv,
-            {
-                if self.selected_genres.is_empty() {
-                    String::new()
-                } else {
-                    self.selected_genres
-                        .iter()
-                        .map(|s| s.replace(',', " "))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                }
-            },
+            genres_csv,
+            decades_csv,
             if self.filter_hd_only { "1" } else { "0" },
+            if self.filter_owned_before_cutoff {
+                "1"
+            } else {
+                "0"
+            },
+            self.owned_before_cutoff_input,
         );
 
         fs::write(path, txt)?;
