@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 // src/main.rs
 use eframe::egui::{IconData, ViewportBuilder};
 
