@@ -2,12 +2,16 @@
 use super::super::{DayRange, SortKey};
 use crate::config::AppConfig;
 
+use eframe::egui as eg;
+use std::borrow::Cow;
+use std::path::Path;
+
 struct DbSummary<'a> {
-    epg_source: &'a str,
+    epg_source: Cow<'a, str>,
     epg_source_exists: bool,
     epg_local: &'a Path,
     epg_local_exists: bool,
-    library_source: &'a str,
+    library_source: Cow<'a, str>,
     library_source_exists: bool,
     library_local: &'a Path,
     library_local_exists: bool,
@@ -15,8 +19,6 @@ struct DbSummary<'a> {
     cache_exists: bool,
     tmdb_key_present: bool,
 }
-use eframe::egui as eg;
-use std::path::Path;
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
     pub(crate) fn ui_render_topbar(&mut self, ui: &mut eg::Ui) {
@@ -392,22 +394,27 @@ impl crate::app::PexApp {
                         ui,
                         &cfg,
                         DbSummary {
-                            epg_source: cfg.plex_epg_db_source.as_deref().unwrap_or("<not set>"),
+                            epg_source: cfg
+                                .plex_epg_db_source
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.display().to_string()))
+                                .unwrap_or_else(|| Cow::Borrowed("<not set>")),
                             epg_source_exists: cfg
                                 .plex_epg_db_source
-                                .as_deref()
-                                .map(|p| Path::new(p).exists())
+                                .as_ref()
+                                .map(|p| p.exists())
                                 .unwrap_or(false),
                             epg_local: &db_path,
                             epg_local_exists: db_exists,
                             library_source: cfg
                                 .plex_library_db_source
-                                .as_deref()
-                                .unwrap_or("<not set>"),
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.display().to_string()))
+                                .unwrap_or_else(|| Cow::Borrowed("<not set>")),
                             library_source_exists: cfg
                                 .plex_library_db_source
-                                .as_deref()
-                                .map(|p| Path::new(p).exists())
+                                .as_ref()
+                                .map(|p| p.exists())
                                 .unwrap_or(false),
                             library_local: &library_db_path,
                             library_local_exists: library_db_exists,
@@ -436,7 +443,7 @@ impl crate::app::PexApp {
         let warn = eg::Color32::LIGHT_RED;
 
         ui.label(
-            eg::RichText::new(format!("EPG source: {}", summary.epg_source)).color(
+            eg::RichText::new(format!("EPG source: {}", summary.epg_source.as_ref())).color(
                 if summary.epg_source_exists {
                     good
                 } else {
@@ -450,13 +457,15 @@ impl crate::app::PexApp {
         );
 
         ui.label(
-            eg::RichText::new(format!("Library source: {}", summary.library_source)).color(
-                if summary.library_source_exists {
-                    good
-                } else {
-                    warn
-                },
-            ),
+            eg::RichText::new(format!(
+                "Library source: {}",
+                summary.library_source.as_ref()
+            ))
+            .color(if summary.library_source_exists {
+                good
+            } else {
+                warn
+            }),
         );
         ui.label(
             eg::RichText::new(format!(
