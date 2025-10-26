@@ -7,7 +7,7 @@ use image::{GenericImageView, ImageFormat};
 use reqwest::blocking::Client;
 use tracing::warn;
 
-use crate::config::load_config;
+use crate::config::{load_config, resolve_relative_path};
 
 // Chosen once on first call
 use std::sync::{Once, OnceLock};
@@ -23,15 +23,16 @@ pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
         .get_or_init(|| {
             let cfg = load_config();
-            // cfg.cache_dir: Option<String> — use default when None
-            let mut path = normalize_dir(PathBuf::from(
-                cfg.cache_dir.as_deref().unwrap_or(".pex_cache"),
-            ));
+            let mut path = normalize_dir(
+                cfg.cache_dir
+                    .clone()
+                    .unwrap_or_else(|| resolve_relative_path(".pex_cache")),
+            );
 
             if let Err(e) = fs::create_dir_all(&path) {
                 warn!("failed to create cache dir {}: {e}", path.display());
                 // Fall back to local folder if creation failed
-                path = PathBuf::from(".pex_cache");
+                path = normalize_dir(resolve_relative_path(".pex_cache"));
                 let _ = fs::create_dir_all(&path);
             }
             path

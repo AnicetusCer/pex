@@ -592,11 +592,7 @@ impl PexApp {
         let cfg = load_config();
         let local_db = local_db_path();
         if !local_db.exists() {
-            if cfg
-                .plex_epg_db_source
-                .as_deref()
-                .is_some_and(|s| !s.trim().is_empty())
-            {
+            if cfg.plex_epg_db_source.is_some() {
                 self.setup_warnings.push(format!(
                     "Local Plex EPG database not found at {}; it will be copied from plex_epg_db_source on startup.",
                     local_db.display()

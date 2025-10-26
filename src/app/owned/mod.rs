@@ -279,7 +279,7 @@ impl crate::app::PexApp {
                         let has_source = crate::config::load_config()
                             .plex_library_db_source
                             .as_ref()
-                            .is_some_and(|s| !s.trim().is_empty());
+                            .is_some();
 
                         if has_source {
                             if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {

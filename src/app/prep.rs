@@ -1,12 +1,12 @@
 // src/app/prep.rs
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io};
 use tracing::{info, warn};
 
+use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::app::cache::url_to_cache_key;
@@ -137,101 +137,161 @@ fn needs_db_update_daily(src: &Path, dst: &Path) -> io::Result<bool> {
     Ok(src_m > dst_m)
 }
 
-fn copy_with_progress<F>(src: &Path, dst: &Path, mut on_prog: F) -> io::Result<()>
-where
-    F: FnMut(u64, u64, f32, f64),
-{
-    let mut in_f = fs::File::open(src)?;
-    let total = in_f.metadata()?.len();
-
-    let tmp_path = PathBuf::from(format!("{}.tmp", dst.display()));
-    let mut out_f = fs::File::create(&tmp_path)?;
-
-    let mut buf = vec![0u8; 8 * 1024 * 1024];
-    let mut copied: u64 = 0;
-    let started = Instant::now();
-    let mut last_emit = Instant::now();
-
-    loop {
-        let n = in_f.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        out_f.write_all(&buf[..n])?;
-        copied += n as u64;
-
-        std::thread::yield_now();
-        if copied.is_multiple_of(64 * 1024 * 1024) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
-        if last_emit.elapsed() >= Duration::from_millis(150) {
-            let secs = started.elapsed().as_secs_f64().max(0.001);
-            let mbps = (copied as f64 / (1024.0 * 1024.0)) / secs;
-            let pct = if total > 0 {
-                copied as f32 / total as f32
-            } else {
-                1.0
-            };
-            on_prog(copied, total, pct, mbps);
-            last_emit = Instant::now();
-        }
-    }
-
-    let secs = started.elapsed().as_secs_f64().max(0.001);
-    let mbps = (copied as f64 / (1024.0 * 1024.0)) / secs;
-    on_prog(copied, total, 1.0, mbps);
-
-    out_f.flush()?;
-    drop(out_f);
-    fs::rename(&tmp_path, dst)?;
-    Ok(())
-}
-
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut os: OsString = path.as_os_str().to_os_string();
     os.push(format!("-{suffix}"));
     PathBuf::from(os)
 }
 
-fn copy_sqlite_sidecar(src: &Path, dst: &Path, suffix: &str) -> io::Result<()> {
-    let src_side = sqlite_sidecar_path(src, suffix);
-    let dst_side = sqlite_sidecar_path(dst, suffix);
-
-    if src_side.exists() {
-        if let Some(parent) = dst_side.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&src_side, &dst_side)?;
-    } else if dst_side.exists() {
-        let _ = fs::remove_file(&dst_side);
+fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", dst.display()));
+    if let Some(parent) = tmp_path.parent() {
+        fs::create_dir_all(parent)?;
     }
+
+    if tmp_path.exists() {
+        match fs::remove_file(&tmp_path) {
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    for suffix in ["wal", "shm"] {
+        let tmp_side = sqlite_sidecar_path(&tmp_path, suffix);
+        if tmp_side.exists() {
+            let _ = fs::remove_file(tmp_side);
+        }
+    }
+
+    #[cfg(not(windows))]
+    let src_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_URI;
+    #[cfg(windows)]
+    let src_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+
+    let src_conn = Connection::open_with_flags(src, src_flags).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Opening source database {} failed: {err}", src.display()),
+        )
+    })?;
+
+    let dst_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut dst_conn = Connection::open_with_flags(&tmp_path, dst_flags).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Opening destination database {} failed: {err}",
+                tmp_path.display()
+            ),
+        )
+    })?;
+    dst_conn.pragma_update(None, "journal_mode", "DELETE").ok();
+
+    let backup = Backup::new(&src_conn, &mut dst_conn).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "Starting SQLite backup from {} failed: {err}",
+                src.display()
+            ),
+        )
+    })?;
+
+    loop {
+        match backup.step(256).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("SQLite backup step for {} failed: {err}", src.display()),
+            )
+        })? {
+            StepResult::Done => break,
+            StepResult::More => {}
+            StepResult::Busy | StepResult::Locked => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => break,
+        }
+    }
+
+    drop(backup);
+    let _ = dst_conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
+    drop(dst_conn);
+    drop(src_conn);
+
+    for suffix in ["wal", "shm"] {
+        let tmp_side = sqlite_sidecar_path(&tmp_path, suffix);
+        if tmp_side.exists() {
+            let _ = fs::remove_file(tmp_side);
+        }
+    }
+
+    if dst.exists() {
+        match fs::remove_file(dst) {
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    fs::rename(&tmp_path, dst)?;
+
+    for suffix in ["wal", "shm"] {
+        let dst_side = sqlite_sidecar_path(dst, suffix);
+        if dst_side.exists() {
+            let _ = fs::remove_file(dst_side);
+        }
+    }
+
     Ok(())
 }
 
-fn copy_sqlite_db_with_sidecars<F>(src: &Path, dst: &Path, on_prog: F) -> io::Result<()>
-where
-    F: FnMut(u64, u64, f32, f64),
-{
-    copy_with_progress(src, dst, on_prog)?;
-    copy_sqlite_sidecar(src, dst, "wal")?;
-    copy_sqlite_sidecar(src, dst, "shm")?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    #[test]
+    fn copies_sqlite_db_via_backup() {
+        let dir = TempDir::new().unwrap();
+        let src_path = dir.path().join("source.db");
+        let dst_path = dir.path().join("dest.db");
+
+        let conn = Connection::open(&src_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE foo(id INTEGER PRIMARY KEY, name TEXT);
+             INSERT INTO foo(name) VALUES ('alice'), ('bob');",
+        )
+        .unwrap();
+        drop(conn);
+
+        copy_sqlite_db_with_sidecars(&src_path, &dst_path).expect("copy succeeds");
+        assert!(dst_path.exists());
+
+        let check = Connection::open(&dst_path).unwrap();
+        let mut stmt = check.prepare("SELECT name FROM foo ORDER BY id").unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec!["alice".to_string(), "bob".to_string()]);
+    }
 }
 
 /// Copy the Plex library database from `plex_library_db_source` into the local cache directory.
 /// When `force` is true the copy happens even if the daily freshness window has not elapsed.
 pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
     let cfg = load_config();
-    let Some(src_path) = cfg
-        .plex_library_db_source
-        .as_deref()
-        .and_then(|p| (!p.trim().is_empty()).then_some(p))
-    else {
+    let Some(src_path) = cfg.plex_library_db_source.as_ref() else {
         return Ok(false);
     };
 
-    let src = Path::new(src_path);
+    let src = src_path.as_path();
     if !src.exists() {
         return Err(format!(
             "plex_library_db_source does not exist at {}",
@@ -269,7 +329,7 @@ pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
         dst.display()
     );
 
-    copy_sqlite_db_with_sidecars(src, &dst, |_c, _t, _p, _mbps| {})
+    copy_sqlite_db_with_sidecars(src, &dst)
         .map_err(|err| format!("Copying Plex library DB failed: {err}"))?;
     let marker = last_sync_marker_path(&dst);
     let _ = touch_last_sync(&marker);
@@ -364,13 +424,13 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         info!("prep: {msg}");
 
         // Optional daily copy from source to local
-        if let Some(src_path) = cfg.plex_epg_db_source.as_deref() {
-            let src = Path::new(src_path);
+        if let Some(src_path) = cfg.plex_epg_db_source.as_ref() {
+            let src = src_path.as_path();
             match needs_db_update_daily(src, &db_path) {
                 Ok(true) => {
                     send(PrepMsg::Info("Stage 2/4 – Copying Plex DB from source (enables offline start-ups). First run may take a while.".into()));
                     let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_sqlite_db_with_sidecars(src, &db_path, |_c, _t, _p, _mbps| {});
+                    let _ = copy_sqlite_db_with_sidecars(src, &db_path);
                     let _ = touch_last_sync(&marker);
                 }
                 Ok(false) => send(PrepMsg::Info(
@@ -388,8 +448,8 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
 
         // Optional daily copy for the Plex library database
         let library_db_path = local_library_db_path();
-        if let Some(src_path) = cfg.plex_library_db_source.as_deref() {
-            let src = Path::new(src_path);
+        if let Some(src_path) = cfg.plex_library_db_source.as_ref() {
+            let src = src_path.as_path();
             match needs_db_update_daily(src, &library_db_path) {
                 Ok(true) => {
                     send(PrepMsg::Info(
@@ -401,11 +461,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                         library_db_path.display()
                     );
                     let marker = last_sync_marker_path(&library_db_path);
-                    match copy_sqlite_db_with_sidecars(
-                        src,
-                        &library_db_path,
-                        |_c, _t, _p, _mbps| {},
-                    ) {
+                    match copy_sqlite_db_with_sidecars(src, &library_db_path) {
                         Ok(_) => {
                             let _ = touch_last_sync(&marker);
                             send(PrepMsg::Info(
