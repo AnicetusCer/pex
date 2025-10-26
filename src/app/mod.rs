@@ -402,16 +402,18 @@ impl PexApp {
     }
 
     fn sync_selection_with_groups(&mut self, groups: &[(i64, Vec<usize>)]) {
-        let first_idx = groups.iter().find_map(|(_, idxs)| idxs.first()).copied();
+        let Some(current) = self.selected_idx else {
+            return;
+        };
 
-        let selection_present = self
-            .selected_idx
-            .is_some_and(|idx| groups.iter().any(|(_, idxs)| idxs.contains(&idx)));
-
-        if selection_present {
+        let still_valid = groups
+            .iter()
+            .any(|(_, idxs)| idxs.iter().any(|&idx| idx == current));
+        if still_valid {
             return;
         }
 
+        let first_idx = groups.iter().find_map(|(_, idxs)| idxs.first()).copied();
         if let Some(first) = first_idx {
             self.selected_idx = Some(first);
             if self.scroll_to_idx.is_none() {
