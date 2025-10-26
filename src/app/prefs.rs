@@ -94,7 +94,7 @@ impl crate::app::PexApp {
                 "decades" => {
                     self.selected_decades.clear();
                     for d in v.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                        let trimmed = d.trim_end_matches(|c| c == 's' || c == 'S');
+                        let trimmed = d.trim_end_matches(&['s', 'S'][..]);
                         if let Ok(year) = trimmed.parse::<i32>() {
                             let decade = (year / 10) * 10;
                             self.selected_decades.insert(decade);

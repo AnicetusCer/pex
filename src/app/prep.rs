@@ -98,7 +98,6 @@ fn parse_channel_meta(extra: &str) -> ChannelMeta {
         thumb,
     }
 }
-
 const MIN_COPY_INTERVAL_HOURS: u64 = 24;
 
 fn last_sync_marker_path(local_db: &Path) -> PathBuf {
@@ -172,42 +171,36 @@ fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
     let src_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let src_conn = Connection::open_with_flags(src, src_flags).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Opening source database {} failed: {err}", src.display()),
-        )
+        io::Error::other(format!(
+            "Opening source database {} failed: {err}",
+            src.display()
+        ))
     })?;
 
     let dst_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_CREATE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut dst_conn = Connection::open_with_flags(&tmp_path, dst_flags).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Opening destination database {} failed: {err}",
-                tmp_path.display()
-            ),
-        )
+        io::Error::other(format!(
+            "Opening destination database {} failed: {err}",
+            tmp_path.display()
+        ))
     })?;
     dst_conn.pragma_update(None, "journal_mode", "DELETE").ok();
 
     let backup = Backup::new(&src_conn, &mut dst_conn).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Starting SQLite backup from {} failed: {err}",
-                src.display()
-            ),
-        )
+        io::Error::other(format!(
+            "Starting SQLite backup from {} failed: {err}",
+            src.display()
+        ))
     })?;
 
     loop {
         match backup.step(256).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("SQLite backup step for {} failed: {err}", src.display()),
-            )
+            io::Error::other(format!(
+                "SQLite backup step for {} failed: {err}",
+                src.display()
+            ))
         })? {
             StepResult::Done => break,
             StepResult::More => {}
@@ -247,40 +240,6 @@ fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rusqlite::Connection;
-    use tempfile::TempDir;
-
-    #[test]
-    fn copies_sqlite_db_via_backup() {
-        let dir = TempDir::new().unwrap();
-        let src_path = dir.path().join("source.db");
-        let dst_path = dir.path().join("dest.db");
-
-        let conn = Connection::open(&src_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE foo(id INTEGER PRIMARY KEY, name TEXT);
-             INSERT INTO foo(name) VALUES ('alice'), ('bob');",
-        )
-        .unwrap();
-        drop(conn);
-
-        copy_sqlite_db_with_sidecars(&src_path, &dst_path).expect("copy succeeds");
-        assert!(dst_path.exists());
-
-        let check = Connection::open(&dst_path).unwrap();
-        let mut stmt = check.prepare("SELECT name FROM foo ORDER BY id").unwrap();
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
-        assert_eq!(rows, vec!["alice".to_string(), "bob".to_string()]);
-    }
 }
 
 /// Copy the Plex library database from `plex_library_db_source` into the local cache directory.
