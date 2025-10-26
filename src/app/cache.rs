@@ -472,7 +472,15 @@ pub fn download_and_store_resized_with_client(
 }
 
 fn normalize_dir(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    let fixed = s.replace("\\\\", "\\").replace('/', "\\");
-    PathBuf::from(fixed)
+    #[cfg(target_os = "windows")]
+    {
+        let s = p.to_string_lossy();
+        let fixed = s.replace('/', "\\").replace("\\\\", "\\");
+        PathBuf::from(fixed)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        p
+    }
 }
