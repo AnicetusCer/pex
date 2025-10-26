@@ -100,11 +100,7 @@ impl crate::app::PexApp {
                     ui.horizontal_wrapped(|ui| {
                         for decade in decades {
                             let mut selected = self.selected_decades.contains(&decade);
-                            let label = if decade >= 0 {
-                                format!("{}s", decade)
-                            } else {
-                                format!("{decade}s")
-                            };
+                            let label = format!("{decade}s");
                             if ui.checkbox(&mut selected, label).changed() {
                                 if selected {
                                     self.selected_decades.insert(decade);
