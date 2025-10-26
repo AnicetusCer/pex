@@ -406,9 +406,7 @@ impl PexApp {
             return;
         };
 
-        let still_valid = groups
-            .iter()
-            .any(|(_, idxs)| idxs.iter().any(|&idx| idx == current));
+        let still_valid = groups.iter().any(|(_, idxs)| idxs.contains(&current));
         if still_valid {
             return;
         }
