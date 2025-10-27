@@ -6,7 +6,6 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, io};
 use tracing::{info, warn};
 
-use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::app::cache::url_to_cache_key;
@@ -143,11 +142,11 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
-    let tmp_path = PathBuf::from(format!("{}.tmp", dst.display()));
-    if let Some(parent) = tmp_path.parent() {
+    if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
 
+    let tmp_path = dst.with_extension("tmp_copy");
     if tmp_path.exists() {
         match fs::remove_file(&tmp_path) {
             Ok(_) => {}
@@ -156,72 +155,12 @@ fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
 
-    for suffix in ["wal", "shm"] {
-        let tmp_side = sqlite_sidecar_path(&tmp_path, suffix);
-        if tmp_side.exists() {
-            let _ = fs::remove_file(tmp_side);
-        }
-    }
-
-    #[cfg(not(windows))]
-    let src_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_URI;
-    #[cfg(windows)]
-    let src_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-
-    let src_conn = Connection::open_with_flags(src, src_flags).map_err(|err| {
+    fs::copy(src, &tmp_path).map_err(|err| {
         io::Error::other(format!(
-            "Opening source database {} failed: {err}",
+            "Copying source database {} failed: {err}",
             src.display()
         ))
     })?;
-
-    let dst_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-        | OpenFlags::SQLITE_OPEN_CREATE
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut dst_conn = Connection::open_with_flags(&tmp_path, dst_flags).map_err(|err| {
-        io::Error::other(format!(
-            "Opening destination database {} failed: {err}",
-            tmp_path.display()
-        ))
-    })?;
-    dst_conn.pragma_update(None, "journal_mode", "DELETE").ok();
-
-    let backup = Backup::new(&src_conn, &mut dst_conn).map_err(|err| {
-        io::Error::other(format!(
-            "Starting SQLite backup from {} failed: {err}",
-            src.display()
-        ))
-    })?;
-
-    loop {
-        match backup.step(256).map_err(|err| {
-            io::Error::other(format!(
-                "SQLite backup step for {} failed: {err}",
-                src.display()
-            ))
-        })? {
-            StepResult::Done => break,
-            StepResult::More => {}
-            StepResult::Busy | StepResult::Locked => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            _ => break,
-        }
-    }
-
-    drop(backup);
-    let _ = dst_conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;");
-    drop(dst_conn);
-    drop(src_conn);
-
-    for suffix in ["wal", "shm"] {
-        let tmp_side = sqlite_sidecar_path(&tmp_path, suffix);
-        if tmp_side.exists() {
-            let _ = fs::remove_file(tmp_side);
-        }
-    }
 
     if dst.exists() {
         match fs::remove_file(dst) {
@@ -233,8 +172,16 @@ fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
     fs::rename(&tmp_path, dst)?;
 
     for suffix in ["wal", "shm"] {
+        let src_side = sqlite_sidecar_path(src, suffix);
         let dst_side = sqlite_sidecar_path(dst, suffix);
-        if dst_side.exists() {
+        if src_side.exists() {
+            fs::copy(&src_side, &dst_side).map_err(|err| {
+                io::Error::other(format!(
+                    "Copying SQLite sidecar {} failed: {err}",
+                    src_side.display()
+                ))
+            })?;
+        } else if dst_side.exists() {
             let _ = fs::remove_file(dst_side);
         }
     }
