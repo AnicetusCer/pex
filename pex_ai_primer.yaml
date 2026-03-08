@@ -25,7 +25,7 @@ project:
     - "Multi-stage caching: poster resize/store, channel icon prefetch, owned sidecars mirrored from Plex."
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
-    - "Advanced menu: clear/prune caches, refresh owned scan, backup/restore UI prefs."
+    - "Advanced menu: clear/prune poster cache, refresh owned scan, backup/restore UI prefs."
     - "DVR awareness: scheduled recordings highlighted with a REC badge sourced from Plex's library database."
   binaries:
     - pex (GUI)
@@ -139,7 +139,7 @@ flow:
     - Load "hotset.txt", attach known paths, prewarm textures
     - Kick channel icon prefetch for unseen URLs
     - refresh_scheduled_index() to merge DVR metadata from Plex library DB
-    - apply_owned_flags() if owned keys ready (sets owned flags + recorded dates)
+    - apply_owned_flags() if owned data ready (GUID-first owned matching, then title/year key fallback; sets owned flags + recorded dates)
     - start_prefetch(ctx)
     - prewarm_first_screen(ctx)
   prefetch:
@@ -150,7 +150,13 @@ flow:
     - UI lazily uploads textures (bounded per-frame by MAX_UPLOADS_PER_FRAME)
 
 config:
-  file: config.json
+  file: pex-config.json
+  lookup_order:
+    - PEX_CONFIG (if set)
+    - "<base_dir>/pex-config.json"
+    - "<cwd>/pex-config.json"
+    - "~/.pex-config.json"
+    - "legacy fallback: config.json"
   keys:
     - plex_epg_db_source: "Optional source DB copied into db/plex_epg.db once per day"
     - plex_library_db_source: "Optional library DB copied into db/plex_library.db for owned + DVR state"
@@ -273,15 +279,20 @@ icons:
   - Prefetched in background after prep so first selection doesn't block UI
 
 ratings:
-  - OMDb fetch triggered by detail panel button
+  - TMDb fetch triggered by detail panel button
   - Rating button hidden unless `tmdb_api_key` is set in config
   - Results cached in-memory per poster key for the session
 
 advanced_controls:
   - Poster cache: clear, prune to limit, or light refresh for stale files
-  - Owned cache: refresh (incremental) or clear (full reset)
+  - Owned cache: refresh owned scan (incremental)
   - UI prefs: backup / restore latest snapshot
-  - Status readouts: Plex DB path existence, OMDb key state
+  - Status readouts: active config path, Plex DB path existence, TMDb key state
+
+release_workflow:
+  - "release_windows.ps1 and release_linux.ps1 generate `checksums-<platform>-<tag>.txt` (SHA-256) for each portable zip."
+  - "Release helpers self-verify built artifacts against the generated checksum file before GitHub upload."
+  - "GitHub releases should include both the portable zip and checksum file for user verification."
 
 open_todos:
   - Consider surfacing channel badges in the grid and channel-filter popup

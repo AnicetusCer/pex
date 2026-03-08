@@ -1,6 +1,6 @@
 pub(crate) mod owned_scan_plex;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use eframe::egui as eg;
@@ -31,12 +31,21 @@ impl crate::app::PexApp {
     /// Apply the owned flags using the computed key set (no-ops if not ready).
     pub(crate) fn apply_owned_flags(&mut self) {
         let Some(keys) = &self.owned_keys else {
+            self.owned_match_stats = crate::app::OwnedMatchStats::default();
             return;
         };
+        self.owned_match_stats = crate::app::OwnedMatchStats::default();
+        let owned_guids = self.owned_guids.as_ref();
+        let guid_modified = self.owned_guid_modified.as_ref();
         let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
             let base_key = row.owned_key.clone();
             let mut matched_key: Option<String> = None;
+            let matched_guid = row
+                .guid
+                .as_deref()
+                .and_then(crate::app::utils::canonicalize_guid)
+                .filter(|guid| owned_guids.is_some_and(|set| set.contains(guid)));
 
             for candidate in Self::owned_key_variants(&row.title, row.year) {
                 if keys.contains(&candidate) {
@@ -53,10 +62,17 @@ impl crate::app::PexApp {
                 row.owned = true;
                 row.owned_key = found.clone();
                 row.owned_modified = modified.and_then(|m| m.get(&found)).and_then(|v| *v);
+                self.owned_match_stats.by_key += 1;
+            } else if let Some(guid) = matched_guid {
+                row.owned = true;
+                row.owned_key = base_key;
+                row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).and_then(|v| *v);
+                self.owned_match_stats.by_guid += 1;
             } else {
                 row.owned = false;
                 row.owned_key = base_key;
                 row.owned_modified = None;
+                self.owned_match_stats.misses += 1;
             }
         }
     }
@@ -228,6 +244,7 @@ impl crate::app::PexApp {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.owned_scan_in_progress = false;
+                        self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                         if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                             self.boot_phase = crate::app::BootPhase::Ready;
                         }
@@ -246,6 +263,7 @@ impl crate::app::PexApp {
                     let msg = format!("Owned scan error: {e}");
                     self.record_owned_message(msg.clone());
                     self.owned_scan_in_progress = false;
+                    self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     self.set_status(msg);
                     let should_retry =
                         if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
@@ -273,7 +291,15 @@ impl crate::app::PexApp {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }
                 }
-                Done { keys, modified } => {
+                Done(done) => {
+                    let crate::app::types::OwnedDone {
+                        keys,
+                        guids,
+                        hd_guids,
+                        guid_modified,
+                        modified,
+                    } = *done;
+                    self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     if keys.is_empty() {
                         self.owned_scan_in_progress = false;
                         let has_source = crate::config::load_config()
@@ -297,10 +323,14 @@ impl crate::app::PexApp {
                                 self.record_owned_message(
                                     "Owned scan returned no entries after automatic retries.",
                                 );
-                                self.set_status(
-                                    "Owned scan completed with no matches. Verify plex_library_db_source in config.json.",
-                                );
+                                self.set_status(format!(
+                                    "Owned scan completed with no matches. Verify plex_library_db_source in {}.",
+                                    crate::config::CONFIG_FILENAME
+                                ));
                                 self.owned_keys = Some(HashSet::new());
+                                self.owned_guids = Some(HashSet::new());
+                                self.owned_hd_guids = Some(HashSet::new());
+                                self.owned_guid_modified = Some(HashMap::new());
                                 self.owned_retry_next = None;
                             }
                         } else {
@@ -309,6 +339,9 @@ impl crate::app::PexApp {
                             );
                             self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
                             self.owned_keys = Some(HashSet::new());
+                            self.owned_guids = Some(HashSet::new());
+                            self.owned_hd_guids = Some(HashSet::new());
+                            self.owned_guid_modified = Some(HashMap::new());
                             self.owned_retry_next = None;
                         }
 
@@ -323,7 +356,10 @@ impl crate::app::PexApp {
 
                     let count = keys.len();
                     self.owned_keys = Some(keys);
+                    self.owned_guids = Some(guids);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
+                    self.owned_hd_guids = Some(hd_guids);
+                    self.owned_guid_modified = Some(guid_modified);
                     self.owned_modified = Some(modified);
                     self.apply_owned_flags();
                     self.mark_dirty();

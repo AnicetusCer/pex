@@ -11,7 +11,7 @@ Pex helps you:
 - See at a glance which films are already scheduled to record in Plex.
 - Bring channel art, genre groupings, and on-demand TMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
-To get rolling, copy `config.example.json` (or the platform-specific samples in `make_portable/`) to `config.json` and fill in your Plex database paths. The only real prerequisite is that you're using Plex DVR with its standard EPG—Pex mirrors Plex's own library database to figure out what you already own, so there's no filesystem scraping or directory configuration to babysit.
+To get rolling, copy `config.example.json` (or the platform-specific samples in `make_portable/`) to `pex-config.json` and fill in your Plex database paths. The only real prerequisite is that you're using Plex DVR with its standard EPG—Pex mirrors Plex's own library database to figure out what you already own, so there's no filesystem scraping or directory configuration to babysit.
 
 Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it's easy to tweak. Grab the code, point your favourite AI at the included primer, and you'll have a head start on customising things for your own setup—especially if your filenames don't follow the `Title (Year)` pattern the app expects today.
 
@@ -32,12 +32,46 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
 - On Windows run `pwsh ./release_windows.ps1 -Version 1.2.3` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
 - On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.3` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
+- Release helpers also upload `checksums-<platform>-<tag>.txt` so each zip can be verified after download.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
+
+---
+
+## Verify Downloads
+
+Each release includes:
+- `pex-portable-<platform>-<tag>.zip`
+- `checksums-<platform>-<tag>.txt`
+
+Verify the zip against the published checksum file before running.
+
+### Windows (PowerShell)
+
+```powershell
+$zip = "pex-portable-windows-x86_64-v1.2.3.zip"
+$checksums = "checksums-windows-x86_64-v1.2.3.txt"
+
+$line = Get-Content $checksums | Where-Object { $_ -like "*`*$zip" } | Select-Object -First 1
+if (-not $line) { throw "No checksum entry found for $zip" }
+$expected = ($line -split " ")[0].ToLowerInvariant()
+$actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+
+if ($expected -eq $actual) { "OK: checksum matches." } else { "ERROR: checksum mismatch." }
+```
+
+### Linux
+
+```bash
+sha256sum -c checksums-linux-x86_64-v1.2.3.txt
+```
+
+Expected output: `...zip: OK`
 
 ---
 
 ## Table of Contents
 - [Downloads & Releases](#downloads--releases)
+- [Verify Downloads](#verify-downloads)
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
@@ -73,7 +107,7 @@ Pex runs on Windows, macOS, and Linux (including WSL) using
 
 - `src/`
   - `main.rs` / `lib.rs` – launch the egui app and wire tracing.
-  - `config.rs` – parses `config.json`, owns `OwnedSourceKind`, and exposes helper paths for the copied databases.
+  - `config.rs` – parses `pex-config.json` (or `~/.pex-config.json`), owns `OwnedSourceKind`, and exposes helper paths for the copied databases.
   - `app/`
     - `mod.rs` – central application state, message pump, advanced actions, and egui integration.
     - `prep.rs` – copies the Plex databases (daily freshness), queries poster rows, and emits `PrepMsg`.
@@ -92,7 +126,7 @@ Pex runs on Windows, macOS, and Linux (including WSL) using
 - `make_portable/` – scripts and template config for packaging a portable build.
 - `db/` – working copies of the Plex databases (populated on first run).
 - `.pex_cache/` – generated cache directory (posters, owned sidecars, UI prefs).
-- `config.example.json` – starter configuration; copy to `config.json` for local runs.
+- `config.example.json` – starter configuration; copy to `pex-config.json` for local runs.
 
 ---
 
@@ -123,15 +157,15 @@ the accompanying WAL/SHM files) exist on disk.
    ```bash
    git clone https://github.com/AnicetusCer/pex.git
    cd pex
-   cp config.example.json config.json
+   cp config.example.json pex-config.json
    ```
 
 2. **Populate the database folder**
    - Copy your Plex EPG SQLite file into `db/plex_epg.db`, *or*
-   - Set `plex_epg_db_source` in `config.json` to the path of Plex’s live DB so Pex can refresh `db/plex_epg.db` automatically.
+   - Set `plex_epg_db_source` in `pex-config.json` to the path of Plex’s live DB so Pex can refresh `db/plex_epg.db` automatically.
    - Do the same for your Plex library database: copy it into `db/plex_library.db` or set `plex_library_db_source` and let Pex maintain the mirror. Owned detection relies on this copy so you don’t have to crawl your filesystem.
 
-3. **Edit `config.json`** (see the [Configuration Reference](#configuration-reference)).
+3. **Edit `pex-config.json`** (see the [Configuration Reference](#configuration-reference)).
 
 4. **Build and run the app**
    ```bash
@@ -149,8 +183,7 @@ the accompanying WAL/SHM files) exist on disk.
 
 ## Configuration Reference
 
-Pex reads `config.json` from the repository root. All keys are optional unless
-otherwise stated; absent keys fall back to reasonable defaults.
+Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to the app/current directory, then `~/.pex-config.json` (Windows/Linux/macOS home). Legacy `config.json` is still accepted for backward compatibility. All keys are optional unless otherwise stated; absent keys fall back to reasonable defaults.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -227,7 +260,7 @@ Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Ple
 
 ### First run (cold start)
 1. Copy or configure access to the Plex EPG DB (and optionally the library DB).
-2. Populate `config.json` with your Plex database paths and OMDb settings.
+2. Populate `pex-config.json` with your Plex database paths and TMDb settings.
 3. Launch with `cargo run --release`.
 4. Let the initial owned scan and poster prefetch finish (progress appears in
 the status bar). Large libraries may take several minutes.

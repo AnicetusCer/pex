@@ -9,6 +9,13 @@ use urlencoding::decode;
 use crate::app::utils;
 use crate::config::local_library_db_path;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScheduledMatchKind {
+    Guid,
+    TitleSlot,
+    None,
+}
+
 /// Snapshot of Plex DVR scheduled recordings pulled from media_grabs.
 #[derive(Default)]
 pub(crate) struct ScheduledIndex {
@@ -21,27 +28,38 @@ impl ScheduledIndex {
         self.guids.is_empty() && self.title_slots.is_empty()
     }
 
-    pub fn is_scheduled(
+    pub fn match_kind(
         &self,
         guid: Option<&str>,
         title: &str,
         year: Option<i32>,
         airing: Option<SystemTime>,
-    ) -> bool {
+    ) -> ScheduledMatchKind {
         if let Some(g) = guid {
+            if let Some(canonical) = utils::canonicalize_guid(g) {
+                if self.guids.contains(&canonical) {
+                    return ScheduledMatchKind::Guid;
+                }
+            }
             if self.guids.contains(g) {
-                return true;
+                return ScheduledMatchKind::Guid;
             }
         }
         let Some(airing_ts) = airing.and_then(system_time_to_unix) else {
-            return false;
+            return ScheduledMatchKind::None;
         };
         let Some(key) = make_title_key(title, year) else {
-            return false;
+            return ScheduledMatchKind::None;
         };
-        self.title_slots
+        if self
+            .title_slots
             .get(&key)
             .is_some_and(|set| set.contains(&airing_ts))
+        {
+            ScheduledMatchKind::TitleSlot
+        } else {
+            ScheduledMatchKind::None
+        }
     }
 }
 
@@ -120,7 +138,11 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
             .map_err(|err| err.to_string())?
             .filter(|g| !g.is_empty())
         {
-            index.guids.insert(guid);
+            if let Some(canonical) = utils::canonicalize_guid(&guid) {
+                index.guids.insert(canonical);
+            } else {
+                index.guids.insert(guid);
+            }
             continue;
         }
 
@@ -130,7 +152,11 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
             .filter(|k| !k.is_empty())
         {
             if let Some(decoded) = decode_mt_key(&mt_key) {
-                index.guids.insert(decoded);
+                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
+                    index.guids.insert(canonical);
+                } else {
+                    index.guids.insert(decoded);
+                }
                 continue;
             }
         }
@@ -193,7 +219,11 @@ fn load_from_media_subscriptions(
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         if let Some(g) = &guid {
-            index.guids.insert(g.clone());
+            if let Some(canonical) = utils::canonicalize_guid(g) {
+                index.guids.insert(canonical);
+            } else {
+                index.guids.insert(g.clone());
+            }
         }
 
         let title = parsed
@@ -255,7 +285,12 @@ fn load_from_subscription_desired(
         }
         match decode(&remote) {
             Ok(cow) => {
-                index.guids.insert(cow.into_owned());
+                let decoded = cow.into_owned();
+                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
+                    index.guids.insert(canonical);
+                } else {
+                    index.guids.insert(decoded);
+                }
             }
             Err(err) => {
                 warn!("Failed to decode metadata_subscription_desired_items remote_id {remote}: {err}");

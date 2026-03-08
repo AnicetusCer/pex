@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 
 use crate::app::cache;
-use crate::app::types::OwnedMsg;
+use crate::app::types::{OwnedDone, OwnedMsg};
 use crate::app::PexApp;
 use crate::config::local_library_db_path;
 
@@ -71,11 +71,22 @@ impl OwnedScanPlex {
             match collect_plex_owned_entries(&conn) {
                 Ok(entries) => {
                     let mut owned: HashSet<String> = HashSet::new();
+                    let mut owned_guids: HashSet<String> = HashSet::new();
                     let mut hd_keys: HashSet<String> = HashSet::new();
+                    let mut hd_guids: HashSet<String> = HashSet::new();
+                    let mut guid_modified: HashMap<String, Option<u64>> = HashMap::new();
                     let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
 
                     for entry in entries {
-                        accumulate_owned_entry(&entry, &mut owned, &mut hd_keys, &mut owned_dates);
+                        accumulate_owned_entry(
+                            &entry,
+                            &mut owned,
+                            &mut owned_guids,
+                            &mut hd_keys,
+                            &mut hd_guids,
+                            &mut guid_modified,
+                            &mut owned_dates,
+                        );
                     }
 
                     let cache_dir = cache::cache_dir();
@@ -90,10 +101,13 @@ impl OwnedScanPlex {
                     let _ = tx.send(Info(format!(
                         "Stage 3/4 - Plex library owned scan complete ({count} keys)."
                     )));
-                    let _ = tx.send(Done {
+                    let _ = tx.send(Done(Box::new(OwnedDone {
                         keys: owned,
+                        guids: owned_guids,
+                        hd_guids,
+                        guid_modified,
                         modified: owned_dates,
-                    });
+                    })));
                 }
                 Err(err) => {
                     let _ = tx.send(Error(err));
@@ -240,7 +254,10 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
 fn accumulate_owned_entry(
     entry: &PlexOwnedEntry,
     owned: &mut HashSet<String>,
+    owned_guids: &mut HashSet<String>,
     hd_keys: &mut HashSet<String>,
+    hd_guids: &mut HashSet<String>,
+    guid_modified: &mut HashMap<String, Option<u64>>,
     owned_dates: &mut HashMap<String, Option<u64>>,
 ) {
     let hd = is_hd(entry.width, entry.height);
@@ -280,6 +297,18 @@ fn accumulate_owned_entry(
             push_keys_for(name);
         }
     }
+
+    if let Some(guid) = entry
+        .guid
+        .as_deref()
+        .and_then(crate::app::utils::canonicalize_guid)
+    {
+        guid_modified.insert(guid.clone(), entry.updated_at);
+        owned_guids.insert(guid.clone());
+        if hd {
+            hd_guids.insert(guid);
+        }
+    }
 }
 
 fn is_hd(width: Option<u32>, height: Option<u32>) -> bool {
@@ -291,12 +320,11 @@ fn persist_owned_keys_sidecar(
     owned_keys: &HashSet<String>,
 ) -> Result<(), String> {
     let path = cache_dir.join("owned_all.txt");
+    let mut keys: Vec<&String> = owned_keys.iter().collect();
+    keys.sort_unstable();
     fs::write(
         &path,
-        owned_keys
-            .iter()
-            .map(|k| format!("{k}\n"))
-            .collect::<String>(),
+        keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
     )
     .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
@@ -306,9 +334,8 @@ fn persist_owned_hd_sidecar(
     hd_keys: &HashSet<String>,
 ) -> Result<(), String> {
     let path = cache_dir.join("owned_hd.txt");
-    fs::write(
-        &path,
-        hd_keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
-    )
+    let mut keys: Vec<&String> = hd_keys.iter().collect();
+    keys.sort_unstable();
+    fs::write(&path, keys.iter().map(|k| format!("{k}\n")).collect::<String>())
     .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }

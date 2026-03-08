@@ -7,6 +7,8 @@ use std::borrow::Cow;
 use std::path::Path;
 
 struct DbSummary<'a> {
+    config_path: Cow<'a, str>,
+    config_exists: bool,
     epg_source: Cow<'a, str>,
     epg_source_exists: bool,
     epg_local: &'a Path,
@@ -18,6 +20,12 @@ struct DbSummary<'a> {
     cache_dir: &'a Path,
     cache_exists: bool,
     tmdb_key_present: bool,
+    owned_by_guid: usize,
+    owned_by_key: usize,
+    owned_misses: usize,
+    scheduled_by_guid: usize,
+    scheduled_by_title_slot: usize,
+    scheduled_misses: usize,
 }
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
@@ -368,6 +376,7 @@ impl crate::app::PexApp {
 
         let mut open = self.show_advanced_popup;
         let cfg = crate::config::load_config();
+        let active_config = crate::config::discover_config_path();
         let db_path = crate::config::local_db_path();
         let db_exists = db_path.exists();
         let library_db_path = crate::config::local_library_db_path();
@@ -390,6 +399,11 @@ impl crate::app::PexApp {
                         ui,
                         &cfg,
                         DbSummary {
+                            config_path: active_config
+                                .as_ref()
+                                .map(|p| Cow::Owned(p.display().to_string()))
+                                .unwrap_or_else(|| Cow::Borrowed("<not found>")),
+                            config_exists: active_config.is_some(),
                             epg_source: cfg
                                 .plex_epg_db_source
                                 .as_ref()
@@ -417,6 +431,12 @@ impl crate::app::PexApp {
                             cache_dir: &cache_dir,
                             cache_exists,
                             tmdb_key_present,
+                            owned_by_guid: self.owned_match_stats.by_guid,
+                            owned_by_key: self.owned_match_stats.by_key,
+                            owned_misses: self.owned_match_stats.misses,
+                            scheduled_by_guid: self.scheduled_match_stats.by_guid,
+                            scheduled_by_title_slot: self.scheduled_match_stats.by_title_slot,
+                            scheduled_misses: self.scheduled_match_stats.misses,
                         },
                     );
                     ui.separator();
@@ -438,6 +458,11 @@ impl crate::app::PexApp {
         let good = eg::Color32::LIGHT_GREEN;
         let warn = eg::Color32::LIGHT_RED;
 
+        ui.label(
+            eg::RichText::new(format!("Config file: {}", summary.config_path.as_ref())).color(
+                if summary.config_exists { good } else { warn },
+            ),
+        );
         ui.label(
             eg::RichText::new(format!("EPG source: {}", summary.epg_source.as_ref())).color(
                 if summary.epg_source_exists {
@@ -478,6 +503,20 @@ impl crate::app::PexApp {
         ui.label(
             eg::RichText::new(format!("Cache root: {}", summary.cache_dir.display()))
                 .color(if summary.cache_exists { good } else { warn }),
+        );
+        ui.label(
+            eg::RichText::new(format!(
+                "Owned matches: guid={} key={} miss={}",
+                summary.owned_by_guid, summary.owned_by_key, summary.owned_misses
+            ))
+            .color(good),
+        );
+        ui.label(
+            eg::RichText::new(format!(
+                "Scheduled matches: guid={} title/time={} miss={}",
+                summary.scheduled_by_guid, summary.scheduled_by_title_slot, summary.scheduled_misses
+            ))
+            .color(good),
         );
 
         if !summary.tmdb_key_present {
@@ -525,26 +564,6 @@ impl crate::app::PexApp {
 
     fn advanced_owned_controls(&mut self, ui: &mut eg::Ui) {
         ui.label(eg::RichText::new("Owned library cache").strong());
-        if ui.button("Clear owned cache").clicked() {
-            match self.clear_owned_cache() {
-                Ok(removed) => {
-                    self.record_owned_message(format!(
-                        "Owned cache cleared manually (removed {removed} file{}).",
-                        if removed == 1 { "" } else { "s" }
-                    ));
-                    self.advanced_feedback = Some(format!(
-                        "Owned cache cleared (removed {removed} files). Rescanning library."
-                    ));
-                    self.set_status("Owned cache cleared; rescanning library.");
-                }
-                Err(err) => {
-                    let msg = format!("Owned cache clear failed: {err}");
-                    self.advanced_feedback = Some(msg.clone());
-                    self.set_status(msg.clone());
-                    self.record_owned_message(msg);
-                }
-            }
-        }
         if ui.button("Refresh owned scan").clicked() {
             self.refresh_owned_scan();
             self.advanced_feedback = Some("Owned scan refresh started (incremental).".into());

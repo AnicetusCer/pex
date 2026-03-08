@@ -3,8 +3,7 @@
 // ---- Standard lib imports ----
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,8 +19,8 @@ use crate::app::cache::find_any_by_key;
 use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
-use crate::app::scheduled::ScheduledIndex;
-use crate::config::{load_config, local_db_path};
+use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
+use crate::config::{discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -61,8 +60,27 @@ const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
 const OWNED_AUTO_RETRY_MAX: u8 = 2;
+pub(crate) const STARTUP_STAGE1_DONE: f32 = 0.12;
+pub(crate) const STARTUP_STAGE2_STARTED: f32 = 0.20;
+pub(crate) const STARTUP_STAGE2_DONE: f32 = 0.55;
+pub(crate) const STARTUP_STAGE3_DONE: f32 = 0.75;
+pub(crate) const STARTUP_STAGE4_START: f32 = 0.75;
 pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str =
     "Stage 3/4 - Owned scan complete (Owned and HD badges ready). Finishing artwork cache...";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OwnedMatchStats {
+    pub by_guid: usize,
+    pub by_key: usize,
+    pub misses: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScheduledMatchStats {
+    pub by_guid: usize,
+    pub by_title_slot: usize,
+    pub misses: usize,
+}
 
 pub struct PexApp {
     // data
@@ -73,6 +91,7 @@ pub struct PexApp {
 
     // splash state
     loading_progress: f32,
+    startup_progress_floor: f32,
     loading_message: String,
     last_item_msg: String,
 
@@ -112,8 +131,12 @@ pub struct PexApp {
     // background owned scan
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
+    owned_guids: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
+    owned_hd_guids: Option<HashSet<String>>,
+    owned_guid_modified: Option<HashMap<String, Option<u64>>>,
     owned_modified: Option<HashMap<String, Option<u64>>>,
+    owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
     owned_retry_attempts: u8,
@@ -123,6 +146,7 @@ pub struct PexApp {
     rating_states: HashMap<String, RatingState>,
 
     scheduled_index: Option<ScheduledIndex>,
+    scheduled_match_stats: ScheduledMatchStats,
 
     // search/filter/sort controls
     search_query: String,
@@ -178,6 +202,7 @@ impl Default for PexApp {
             current_range: DayRange::Two,
 
             loading_progress: 0.0,
+            startup_progress_floor: 0.0,
             loading_message: String::new(),
             last_item_msg: String::new(),
 
@@ -208,8 +233,12 @@ impl Default for PexApp {
 
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
+            owned_guids: None,
             owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_hd_guids: None,
+            owned_guid_modified: None,
             owned_modified: None,
+            owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
             owned_retry_attempts: 0,
@@ -218,6 +247,7 @@ impl Default for PexApp {
             rating_rx: None,
             rating_states: HashMap::new(),
             scheduled_index: None,
+            scheduled_match_stats: ScheduledMatchStats::default(),
 
             search_query: String::new(),
             filter_hd_only: false,
@@ -449,9 +479,20 @@ impl PexApp {
 
     /// Determine whether the owned library already has an HD copy of this title.
     pub(crate) fn row_owned_is_hd(&self, row: &PosterRow) -> bool {
-        self.owned_hd_keys
+        if self
+            .owned_hd_keys
             .as_ref()
             .is_some_and(|set| set.contains(&row.owned_key))
+        {
+            return true;
+        }
+        let Some(owned_hd_guids) = self.owned_hd_guids.as_ref() else {
+            return false;
+        };
+        row.guid
+            .as_deref()
+            .and_then(crate::app::utils::canonicalize_guid)
+            .is_some_and(|guid| owned_hd_guids.contains(&guid))
     }
 
     fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
@@ -495,15 +536,28 @@ impl PexApp {
     }
 
     fn apply_scheduled_flags(&mut self) {
+        self.scheduled_match_stats = ScheduledMatchStats::default();
         for row in &mut self.rows {
             row.scheduled = false;
         }
         let Some(index) = self.scheduled_index.as_ref() else {
+            self.scheduled_match_stats.misses = self.rows.len();
             return;
         };
         for row in &mut self.rows {
-            if index.is_scheduled(row.guid.as_deref(), &row.title, row.year, row.airing) {
-                row.scheduled = true;
+            match index.match_kind(row.guid.as_deref(), &row.title, row.year, row.airing) {
+                ScheduledMatchKind::Guid => {
+                    row.scheduled = true;
+                    self.scheduled_match_stats.by_guid += 1;
+                }
+                ScheduledMatchKind::TitleSlot => {
+                    row.scheduled = true;
+                    self.scheduled_match_stats.by_title_slot += 1;
+                }
+                ScheduledMatchKind::None => {
+                    row.scheduled = false;
+                    self.scheduled_match_stats.misses += 1;
+                }
             }
         }
     }
@@ -582,10 +636,11 @@ impl PexApp {
         self.setup_warnings.clear();
         self.set_status("Stage 1/4 – Checking config & cache (validates Plex paths and tools).");
 
-        let cfg_path = Path::new("config.json");
-        if !cfg_path.exists() {
+        if discover_config_path().is_none() {
             self.setup_warnings.push(
-                "config.json not found next to the executable; using built-in defaults.".into(),
+                format!(
+                    "No config file found ({CONFIG_FILENAME} next to the app/current directory or {HOME_CONFIG_FILENAME} in your home directory); using built-in defaults."
+                ),
             );
         }
 
@@ -599,7 +654,7 @@ impl PexApp {
                 ));
             } else {
                 self.setup_errors.push(format!(
-                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in config.json or copy the DB into the db/ folder.",
+                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in {CONFIG_FILENAME} or copy the DB into the db/ folder.",
                     local_db.display()
                 ));
             }
@@ -674,7 +729,9 @@ impl PexApp {
                 if ui.button("Retry checks").clicked() {
                     self.setup_checked = false;
                 }
-                ui.label("Edit config.json next to the executable, then press Retry.");
+                ui.label(format!(
+                    "Edit {CONFIG_FILENAME} (or {HOME_CONFIG_FILENAME} in your home directory), then press Retry."
+                ));
             });
     }
 
@@ -692,6 +749,24 @@ impl PexApp {
     fn set_phase(&mut self, phase: Phase) {
         self.phase = phase;
         self.phase_started = Instant::now();
+    }
+
+    const fn set_startup_progress_floor(&mut self, progress: f32) {
+        self.startup_progress_floor = self.startup_progress_floor.max(progress.clamp(0.0, 1.0));
+    }
+
+    fn startup_progress(&self) -> f32 {
+        let mut progress = self.startup_progress_floor;
+        if self.prefetch_started {
+            let prefetch_ratio = if self.total_targets == 0 {
+                1.0
+            } else {
+                (self.completed + self.failed) as f32 / self.total_targets as f32
+            }
+            .clamp(0.0, 1.0);
+            progress = progress.max((1.0 - STARTUP_STAGE4_START).mul_add(prefetch_ratio, STARTUP_STAGE4_START));
+        }
+        progress.clamp(0.0, 1.0)
     }
 
     fn ready_count(&self) -> usize {
@@ -802,6 +877,7 @@ impl PexApp {
         self.completed = 0;
         self.failed = 0;
         self.loading_progress = 0.0;
+        self.startup_progress_floor = 0.0;
         self.last_item_msg.clear();
         self.stage4_complete_message = None;
         self.phase = Phase::Prefetching;
@@ -898,28 +974,6 @@ impl PexApp {
         Ok(removed)
     }
 
-    fn clear_owned_cache_files(&self) -> Result<usize, String> {
-        let dir = crate::app::cache::cache_dir();
-        let mut removed = 0usize;
-        for name in ["owned_all.txt", "owned_hd.txt"] {
-            let path = dir.join(name);
-            match fs::remove_file(&path) {
-                Ok(_) => removed += 1,
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(format!("Failed to remove {}: {err}", path.display()));
-                }
-            }
-        }
-        Ok(removed)
-    }
-
-    fn clear_owned_cache(&mut self) -> Result<usize, String> {
-        let removed = self.clear_owned_cache_files()?;
-        self.refresh_owned_scan();
-        Ok(removed)
-    }
-
     fn refresh_owned_scan(&mut self) {
         self.refresh_owned_scan_internal(true, true);
     }
@@ -931,8 +985,12 @@ impl PexApp {
         }
         self.owned_rx = None;
         self.owned_keys = None;
+        self.owned_guids = None;
         self.owned_hd_keys = None;
+        self.owned_hd_guids = None;
+        self.owned_guid_modified = None;
         self.owned_modified = None;
+        self.owned_match_stats = OwnedMatchStats::default();
         for row in &mut self.rows {
             row.owned = false;
             row.owned_modified = None;
@@ -1154,6 +1212,7 @@ impl eframe::App for PexApp {
             } else {
                 "Stage 1/4 - Setup complete with warnings (see Advanced menu).".into()
             };
+            self.set_startup_progress_floor(STARTUP_STAGE1_DONE);
             self.heartbeat_last = Instant::now();
             self.heartbeat_dots = 0;
 
@@ -1252,14 +1311,7 @@ impl eframe::App for PexApp {
                         ui.monospace(&self.last_item_msg);
                     }
 
-                    let db_phase = if self.prefetch_started {
-                        self.loading_progress.max(0.02)
-                    } else {
-                        let t = ctx.input(|i| i.time) as f32;
-                        0.18f32.mul_add((t * 0.8) % 1.0, 0.02)
-                    };
-
-                    ui.add(eg::ProgressBar::new(db_phase).show_percentage());
+                    ui.add(eg::ProgressBar::new(self.startup_progress()).show_percentage());
                     ui.separator();
                     ui.add(eg::Spinner::new().size(14.0));
                     ui.separator();

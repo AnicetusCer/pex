@@ -34,6 +34,7 @@ impl crate::app::PexApp {
             self.completed = 0;
             self.failed = 0;
             self.loading_progress = 1.0;
+            self.set_startup_progress_floor(1.0);
             self.boot_phase = super::BootPhase::Ready;
             self.prewarm_first_screen(ctx);
             ctx.request_repaint();
@@ -41,6 +42,7 @@ impl crate::app::PexApp {
         }
 
         self.prefetch_started = true;
+        self.set_startup_progress_floor(crate::app::STARTUP_STAGE4_START);
 
         self.completed = 0;
         self.failed = 0;
@@ -216,9 +218,11 @@ impl crate::app::PexApp {
                     self.set_status(message.clone());
                 }
                 self.last_item_msg = message;
+                self.set_startup_progress_floor(1.0);
             }
         } else {
             self.loading_progress = 1.0;
+            self.set_startup_progress_floor(1.0);
         }
 
         if drained > 0 {
