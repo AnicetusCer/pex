@@ -228,6 +228,7 @@ impl crate::app::PexApp {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.owned_scan_in_progress = false;
+                        self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                         if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                             self.boot_phase = crate::app::BootPhase::Ready;
                         }
@@ -246,6 +247,7 @@ impl crate::app::PexApp {
                     let msg = format!("Owned scan error: {e}");
                     self.record_owned_message(msg.clone());
                     self.owned_scan_in_progress = false;
+                    self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     self.set_status(msg);
                     let should_retry =
                         if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
@@ -274,6 +276,7 @@ impl crate::app::PexApp {
                     }
                 }
                 Done { keys, modified } => {
+                    self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     if keys.is_empty() {
                         self.owned_scan_in_progress = false;
                         let has_source = crate::config::load_config()
@@ -297,9 +300,10 @@ impl crate::app::PexApp {
                                 self.record_owned_message(
                                     "Owned scan returned no entries after automatic retries.",
                                 );
-                                self.set_status(
-                                    "Owned scan completed with no matches. Verify plex_library_db_source in config.json.",
-                                );
+                                self.set_status(format!(
+                                    "Owned scan completed with no matches. Verify plex_library_db_source in {}.",
+                                    crate::config::CONFIG_FILENAME
+                                ));
                                 self.owned_keys = Some(HashSet::new());
                                 self.owned_retry_next = None;
                             }

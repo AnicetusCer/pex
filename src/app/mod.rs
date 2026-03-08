@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -21,7 +21,7 @@ use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
 use crate::app::scheduled::ScheduledIndex;
-use crate::config::{load_config, local_db_path};
+use crate::config::{discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -61,6 +61,11 @@ const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
 const OWNED_AUTO_RETRY_MAX: u8 = 2;
+pub(crate) const STARTUP_STAGE1_DONE: f32 = 0.12;
+pub(crate) const STARTUP_STAGE2_STARTED: f32 = 0.20;
+pub(crate) const STARTUP_STAGE2_DONE: f32 = 0.55;
+pub(crate) const STARTUP_STAGE3_DONE: f32 = 0.75;
+pub(crate) const STARTUP_STAGE4_START: f32 = 0.75;
 pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str =
     "Stage 3/4 - Owned scan complete (Owned and HD badges ready). Finishing artwork cache...";
 
@@ -73,6 +78,7 @@ pub struct PexApp {
 
     // splash state
     loading_progress: f32,
+    startup_progress_floor: f32,
     loading_message: String,
     last_item_msg: String,
 
@@ -178,6 +184,7 @@ impl Default for PexApp {
             current_range: DayRange::Two,
 
             loading_progress: 0.0,
+            startup_progress_floor: 0.0,
             loading_message: String::new(),
             last_item_msg: String::new(),
 
@@ -582,10 +589,11 @@ impl PexApp {
         self.setup_warnings.clear();
         self.set_status("Stage 1/4 – Checking config & cache (validates Plex paths and tools).");
 
-        let cfg_path = Path::new("config.json");
-        if !cfg_path.exists() {
+        if discover_config_path().is_none() {
             self.setup_warnings.push(
-                "config.json not found next to the executable; using built-in defaults.".into(),
+                format!(
+                    "No config file found ({CONFIG_FILENAME} next to the app/current directory or {HOME_CONFIG_FILENAME} in your home directory); using built-in defaults."
+                ),
             );
         }
 
@@ -599,7 +607,7 @@ impl PexApp {
                 ));
             } else {
                 self.setup_errors.push(format!(
-                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in config.json or copy the DB into the db/ folder.",
+                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in {CONFIG_FILENAME} or copy the DB into the db/ folder.",
                     local_db.display()
                 ));
             }
@@ -674,7 +682,9 @@ impl PexApp {
                 if ui.button("Retry checks").clicked() {
                     self.setup_checked = false;
                 }
-                ui.label("Edit config.json next to the executable, then press Retry.");
+                ui.label(format!(
+                    "Edit {CONFIG_FILENAME} (or {HOME_CONFIG_FILENAME} in your home directory), then press Retry."
+                ));
             });
     }
 
@@ -692,6 +702,24 @@ impl PexApp {
     fn set_phase(&mut self, phase: Phase) {
         self.phase = phase;
         self.phase_started = Instant::now();
+    }
+
+    fn set_startup_progress_floor(&mut self, progress: f32) {
+        self.startup_progress_floor = self.startup_progress_floor.max(progress.clamp(0.0, 1.0));
+    }
+
+    fn startup_progress(&self) -> f32 {
+        let mut progress = self.startup_progress_floor;
+        if self.prefetch_started {
+            let prefetch_ratio = if self.total_targets == 0 {
+                1.0
+            } else {
+                (self.completed + self.failed) as f32 / self.total_targets as f32
+            }
+            .clamp(0.0, 1.0);
+            progress = progress.max(STARTUP_STAGE4_START + (1.0 - STARTUP_STAGE4_START) * prefetch_ratio);
+        }
+        progress.clamp(0.0, 1.0)
     }
 
     fn ready_count(&self) -> usize {
@@ -802,6 +830,7 @@ impl PexApp {
         self.completed = 0;
         self.failed = 0;
         self.loading_progress = 0.0;
+        self.startup_progress_floor = 0.0;
         self.last_item_msg.clear();
         self.stage4_complete_message = None;
         self.phase = Phase::Prefetching;
@@ -1154,6 +1183,7 @@ impl eframe::App for PexApp {
             } else {
                 "Stage 1/4 - Setup complete with warnings (see Advanced menu).".into()
             };
+            self.set_startup_progress_floor(STARTUP_STAGE1_DONE);
             self.heartbeat_last = Instant::now();
             self.heartbeat_dots = 0;
 
@@ -1252,14 +1282,7 @@ impl eframe::App for PexApp {
                         ui.monospace(&self.last_item_msg);
                     }
 
-                    let db_phase = if self.prefetch_started {
-                        self.loading_progress.max(0.02)
-                    } else {
-                        let t = ctx.input(|i| i.time) as f32;
-                        0.18f32.mul_add((t * 0.8) % 1.0, 0.02)
-                    };
-
-                    ui.add(eg::ProgressBar::new(db_phase).show_percentage());
+                    ui.add(eg::ProgressBar::new(self.startup_progress()).show_percentage());
                     ui.separator();
                     ui.add(eg::Spinner::new().size(14.0));
                     ui.separator();

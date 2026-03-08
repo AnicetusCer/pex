@@ -9,7 +9,9 @@ use tracing::{info, warn};
 pub const LOCAL_DB_DIR: &str = "db";
 pub const LOCAL_EPG_DB_FILE: &str = "plex_epg.db";
 pub const LOCAL_LIBRARY_DB_FILE: &str = "plex_library.db";
-const CONFIG_FILENAME: &str = "config.json";
+pub const CONFIG_FILENAME: &str = "pex-config.json";
+pub const HOME_CONFIG_FILENAME: &str = ".pex-config.json";
+const LEGACY_CONFIG_FILENAME: &str = "config.json";
 
 static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -66,28 +68,7 @@ pub fn resolve_relative_path<P: AsRef<Path>>(input: P) -> PathBuf {
 }
 
 fn read_config_source() -> Option<(PathBuf, String)> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(custom) = env::var("PEX_CONFIG") {
-        let candidate = PathBuf::from(custom);
-        let candidate = if candidate.is_absolute() {
-            candidate
-        } else {
-            resolve_relative_path(candidate)
-        };
-        candidates.push(candidate);
-    }
-
-    candidates.push(base_dir().join(CONFIG_FILENAME));
-
-    if let Ok(cwd) = env::current_dir() {
-        let candidate = cwd.join(CONFIG_FILENAME);
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    }
-
-    for path in candidates {
+    for path in config_candidates() {
         match fs::read_to_string(&path) {
             Ok(raw) => return Some((path, raw)),
             Err(err) => {
@@ -100,6 +81,55 @@ fn read_config_source() -> Option<(PathBuf, String)> {
     }
 
     None
+}
+
+fn push_unique(candidates: &mut Vec<PathBuf>, path: PathBuf) {
+    if !candidates.contains(&path) {
+        candidates.push(path);
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
+fn config_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(custom) = env::var("PEX_CONFIG") {
+        let candidate = PathBuf::from(custom);
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            resolve_relative_path(candidate)
+        };
+        push_unique(&mut candidates, candidate);
+    }
+
+    // Preferred defaults: executable/base dir, then cwd, then home.
+    push_unique(&mut candidates, base_dir().join(CONFIG_FILENAME));
+
+    if let Ok(cwd) = env::current_dir() {
+        push_unique(&mut candidates, cwd.join(CONFIG_FILENAME));
+    }
+
+    if let Some(home) = home_dir() {
+        push_unique(&mut candidates, home.join(HOME_CONFIG_FILENAME));
+    }
+
+    // Backward compatibility for existing setups.
+    push_unique(&mut candidates, base_dir().join(LEGACY_CONFIG_FILENAME));
+    if let Ok(cwd) = env::current_dir() {
+        push_unique(&mut candidates, cwd.join(LEGACY_CONFIG_FILENAME));
+    }
+
+    candidates
+}
+
+pub fn discover_config_path() -> Option<PathBuf> {
+    config_candidates().into_iter().find(|p| p.exists())
 }
 
 pub fn load_config() -> AppConfig {
@@ -122,7 +152,7 @@ pub fn load_config() -> AppConfig {
                     }
                     if raw.contains("\"plex_db_source\"") {
                         warn!(
-                            "`plex_db_source` is deprecated; rename it to `plex_epg_db_source` in config.json."
+                            "`plex_db_source` is deprecated; rename it to `plex_epg_db_source` in {CONFIG_FILENAME}."
                         );
                     }
                 }
@@ -138,12 +168,12 @@ pub fn load_config() -> AppConfig {
                     cfg.tmdb_api_key = Some(api_key);
                     if raw.contains("\"omdb_api_key\"") {
                         warn!(
-                            "`omdb_api_key` is deprecated; rename it to `tmdb_api_key` in config.json."
+                            "`omdb_api_key` is deprecated; rename it to `tmdb_api_key` in {CONFIG_FILENAME}."
                         );
                     }
                     if raw.contains("\"the_movie_db_api_key\"") {
                         warn!(
-                            "`the_movie_db_api_key` is deprecated; rename it to `tmdb_api_key` in config.json."
+                            "`the_movie_db_api_key` is deprecated; rename it to `tmdb_api_key` in {CONFIG_FILENAME}."
                         );
                     }
                 }
@@ -159,7 +189,7 @@ pub fn load_config() -> AppConfig {
         }
     } else {
         info!(
-            "No {CONFIG_FILENAME} found near {} (or via PEX_CONFIG); using defaults.",
+            "No config found ({CONFIG_FILENAME}, {HOME_CONFIG_FILENAME}, or legacy {LEGACY_CONFIG_FILENAME}) near {} (or via PEX_CONFIG); using defaults.",
             base_dir().display()
         );
     }
