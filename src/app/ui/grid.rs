@@ -66,27 +66,15 @@ impl crate::app::PexApp {
                         ui.add_space(left_pad);
                     }
 
-                    let mut row_buffer: Vec<usize> = Vec::new();
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = eg::vec2(H_SPACING, V_SPACING);
+                    for row_indices in idxs.chunks(cols) {
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing = eg::vec2(H_SPACING, V_SPACING);
 
-                        for (col, &idx) in idxs.iter().enumerate() {
-                            if col > 0 && col % cols == 0 {
-                                ui.end_row();
-                                if !row_buffer.is_empty() {
-                                    self.grid_rows.push(std::mem::take(&mut row_buffer));
-                                }
-                            }
-
-                            if row_buffer.is_empty() {
-                                row_buffer.reserve(cols);
-                            }
-                            row_buffer.push(idx);
-
-                            ui.allocate_ui_with_layout(
-                                eg::vec2(card_w, card_h),
-                                eg::Layout::top_down(eg::Align::Min),
-                                |ui| {
+                            for &idx in row_indices {
+                                ui.allocate_ui_with_layout(
+                                    eg::vec2(card_w, card_h),
+                                    eg::Layout::top_down(eg::Align::Min),
+                                    |ui| {
                                     ui.set_min_size(eg::vec2(card_w, card_h));
                                     let rect = ui.max_rect();
 
@@ -119,7 +107,7 @@ impl crate::app::PexApp {
                                         self.scroll_to_idx = None;
                                     }
 
-                                    if let Some(row) = self.rows.get(idx) {
+                                        if let Some(row) = self.rows.get(idx) {
                                         // Poster
                                         if let Some(tex) = &row.tex {
                                             ui.painter().image(
@@ -232,24 +220,21 @@ impl crate::app::PexApp {
                                             );
                                         });
 
-                                        // Selection stroke
-                                        if self.selected_idx == Some(idx) {
-                                            let highlight = poster_rect.expand(2.0);
-                                            ui.painter().rect_stroke(
-                                                highlight,
-                                                6.0,
-                                                eg::Stroke::new(2.0, eg::Color32::YELLOW),
-                                            );
+                                            // Selection stroke
+                                            if self.selected_idx == Some(idx) {
+                                                let highlight = poster_rect.expand(2.0);
+                                                ui.painter().rect_stroke(
+                                                    highlight,
+                                                    6.0,
+                                                    eg::Stroke::new(2.0, eg::Color32::YELLOW),
+                                                );
+                                            }
                                         }
-                                    }
-                                },
-                            );
-                        }
-
-                        ui.end_row();
-                    });
-                    if !row_buffer.is_empty() {
-                        self.grid_rows.push(std::mem::take(&mut row_buffer));
+                                    },
+                                );
+                            }
+                        });
+                        self.grid_rows.push(row_indices.to_vec());
                     }
                 }
             });
