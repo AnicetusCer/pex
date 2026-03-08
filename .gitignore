@@ -1,6 +1,9 @@
 /target
 .pex_cache
 /config.json
+/pex-config.json
+/.pex-config.json
+/gitignore-config.json
 db/*
 !db/.gitkeep
 Cargo.lock

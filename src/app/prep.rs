@@ -543,7 +543,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         if list.is_empty() {
             warn!("prep: no posters found — likely DB path/columns mismatch");
             send(PrepMsg::Info(
-                "No posters found — check DB path/type in config.json".into(),
+                format!(
+                    "No posters found — check DB path/type in {}",
+                    crate::config::CONFIG_FILENAME
+                ),
             ));
         }
 
@@ -559,6 +562,7 @@ impl crate::app::PexApp {
         }
         self.prep_started = true;
         self.boot_phase = super::BootPhase::CheckingNew;
+        self.set_startup_progress_floor(crate::app::STARTUP_STAGE2_STARTED);
         self.set_status("Stage 2/4 - Preparing Plex guide data (scans the EPG so the grid knows what's airing).");
         self.last_item_msg.clear();
 
@@ -724,6 +728,7 @@ impl crate::app::PexApp {
 
                         // Owned flags (if ready)
                         self.apply_owned_flags();
+                        self.set_startup_progress_floor(crate::app::STARTUP_STAGE2_DONE);
                         let poster_done_status =
                             format!("Poster prep complete. {} items ready.", self.rows.len());
                         if self.owned_keys.is_some() {

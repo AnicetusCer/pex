@@ -15,6 +15,8 @@ impl crate::app::PexApp {
             if !self.loading_message.is_empty() {
                 ui.label(&self.loading_message);
             }
+            ui.add_space(6.0);
+            ui.add(eg::ProgressBar::new(self.startup_progress()).show_percentage());
             ui.add_space(12.0);
             ui.label("Startup stages:");
             ui.label("1) Setup & cache validation (checks config, DB paths, tools).");

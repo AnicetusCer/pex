@@ -198,7 +198,10 @@ impl crate::app::PexApp {
                         RatingState::MissingApiKey => {
                             ui.label(
                                 eg::RichText::new(
-                                    "Set tmdb_api_key in config.json to enable ratings.",
+                                    format!(
+                                        "Set tmdb_api_key in {} to enable ratings.",
+                                        crate::config::CONFIG_FILENAME
+                                    ),
                                 )
                                 .weak(),
                             );
