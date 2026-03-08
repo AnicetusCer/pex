@@ -10,6 +10,8 @@ pub enum OwnedMsg {
     Info(String),
     Done {
         keys: HashSet<String>,
+        guids: HashSet<String>,
+        hd_guids: HashSet<String>,
         modified: HashMap<String, Option<u64>>,
     },
     Error(String),
