@@ -62,7 +62,14 @@ if (-not $zipPath -or -not (Test-Path -Path $zipPath)) {
     throw "Portable zip not found at '$zipPath'."
 }
 
+$artifactDir = Split-Path -Parent $zipPath
+$checksumsName = "checksums-$platformId-$tag.txt"
+$checksumsPath = Join-Path $artifactDir $checksumsName
+$checksumsPath = New-ArtifactChecksums -ArtifactPaths @($zipPath) -OutputPath $checksumsPath
+Test-ArtifactChecksums -ChecksumPath $checksumsPath -ArtifactDir $artifactDir
+
 Write-Host "`nBundle ready at $zipPath" -ForegroundColor Green
+Write-Host "Checksums ready at $checksumsPath (verified)." -ForegroundColor Green
 
 $tagExists = Test-TagExists -Tag $tag
 if ($tagExists) {
@@ -94,8 +101,8 @@ else {
 $releaseExists = Test-ReleaseExists -Tag $tag
 if ($releaseExists) {
     Write-Host "Release $tag already exists on GitHub." -ForegroundColor Yellow
-    if (Ask-YesNo "Upload $zipName to the existing release (clobbers if present)?" "Y") {
-        gh release upload $tag $zipPath --clobber || throw "gh release upload failed"
+    if (Ask-YesNo "Upload $zipName and $checksumsName to the existing release (clobbers if present)?" "Y") {
+        gh release upload $tag $zipPath $checksumsPath --clobber || throw "gh release upload failed"
         Write-Host "Asset uploaded." -ForegroundColor Green
     }
     else {
@@ -107,7 +114,7 @@ else {
     if (Ask-YesNo "Create GitHub release $tag now?" "Y") {
         $notesFile = "CHANGELOG.md"
         $notesArg = if (Test-Path $notesFile) { "--notes-file `"$notesFile`"" } else { "--notes `"Release $tag`"" }
-        $cmd = "gh release create $tag `"$zipPath`" $notesArg"
+        $cmd = "gh release create $tag `"$zipPath`" `"$checksumsPath`" $notesArg"
         Write-Host "`n--> $cmd" -ForegroundColor Cyan
         Invoke-Expression $cmd || throw "gh release create failed"
         Write-Host "Release $tag created." -ForegroundColor Green

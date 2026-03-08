@@ -32,12 +32,46 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
 - On Windows run `pwsh ./release_windows.ps1 -Version 1.2.3` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
 - On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.3` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
+- Release helpers also upload `checksums-<platform>-<tag>.txt` so each zip can be verified after download.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
+
+---
+
+## Verify Downloads
+
+Each release includes:
+- `pex-portable-<platform>-<tag>.zip`
+- `checksums-<platform>-<tag>.txt`
+
+Verify the zip against the published checksum file before running.
+
+### Windows (PowerShell)
+
+```powershell
+$zip = "pex-portable-windows-x86_64-v1.2.3.zip"
+$checksums = "checksums-windows-x86_64-v1.2.3.txt"
+
+$line = Get-Content $checksums | Where-Object { $_ -like "*`*$zip" } | Select-Object -First 1
+if (-not $line) { throw "No checksum entry found for $zip" }
+$expected = ($line -split " ")[0].ToLowerInvariant()
+$actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+
+if ($expected -eq $actual) { "OK: checksum matches." } else { "ERROR: checksum mismatch." }
+```
+
+### Linux
+
+```bash
+sha256sum -c checksums-linux-x86_64-v1.2.3.txt
+```
+
+Expected output: `...zip: OK`
 
 ---
 
 ## Table of Contents
 - [Downloads & Releases](#downloads--releases)
+- [Verify Downloads](#verify-downloads)
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)

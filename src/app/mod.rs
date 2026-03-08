@@ -120,6 +120,7 @@ pub struct PexApp {
     owned_guids: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
     owned_hd_guids: Option<HashSet<String>>,
+    owned_guid_modified: Option<HashMap<String, Option<u64>>>,
     owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
@@ -219,6 +220,7 @@ impl Default for PexApp {
             owned_guids: None,
             owned_hd_keys: Self::load_owned_hd_sidecar(),
             owned_hd_guids: None,
+            owned_guid_modified: None,
             owned_modified: None,
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
@@ -718,7 +720,7 @@ impl PexApp {
         self.phase_started = Instant::now();
     }
 
-    fn set_startup_progress_floor(&mut self, progress: f32) {
+    const fn set_startup_progress_floor(&mut self, progress: f32) {
         self.startup_progress_floor = self.startup_progress_floor.max(progress.clamp(0.0, 1.0));
     }
 
@@ -731,7 +733,7 @@ impl PexApp {
                 (self.completed + self.failed) as f32 / self.total_targets as f32
             }
             .clamp(0.0, 1.0);
-            progress = progress.max(STARTUP_STAGE4_START + (1.0 - STARTUP_STAGE4_START) * prefetch_ratio);
+            progress = progress.max((1.0 - STARTUP_STAGE4_START).mul_add(prefetch_ratio, STARTUP_STAGE4_START));
         }
         progress.clamp(0.0, 1.0)
     }
@@ -955,6 +957,7 @@ impl PexApp {
         self.owned_guids = None;
         self.owned_hd_keys = None;
         self.owned_hd_guids = None;
+        self.owned_guid_modified = None;
         self.owned_modified = None;
         for row in &mut self.rows {
             row.owned = false;

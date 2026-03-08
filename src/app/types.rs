@@ -8,13 +8,16 @@ use std::time::SystemTime;
 // ---- cross-thread messages / data ----
 pub enum OwnedMsg {
     Info(String),
-    Done {
-        keys: HashSet<String>,
-        guids: HashSet<String>,
-        hd_guids: HashSet<String>,
-        modified: HashMap<String, Option<u64>>,
-    },
+    Done(Box<OwnedDone>),
     Error(String),
+}
+
+pub struct OwnedDone {
+    pub keys: HashSet<String>,
+    pub guids: HashSet<String>,
+    pub hd_guids: HashSet<String>,
+    pub guid_modified: HashMap<String, Option<u64>>,
+    pub modified: HashMap<String, Option<u64>>,
 }
 
 #[derive(Clone, Debug)]
