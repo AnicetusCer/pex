@@ -1,6 +1,7 @@
 // src/app/util.rs
 use chrono::{Local, TimeZone};
 use std::time::SystemTime;
+use urlencoding::decode;
 pub(crate) fn normalize_title(s: &str) -> String {
     let mut normalized = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -47,6 +48,29 @@ pub(crate) fn find_year_in_str(s: &str) -> Option<i32> {
         }
     }
     None
+}
+
+pub(crate) fn canonicalize_guid(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let decoded = decode(trimmed)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| trimmed.to_string());
+    let base = decoded
+        .split('#')
+        .next()
+        .unwrap_or(decoded.as_str())
+        .split('?')
+        .next()
+        .unwrap_or(decoded.as_str())
+        .trim();
+    if base.is_empty() {
+        return None;
+    }
+    Some(base.to_ascii_lowercase())
 }
 
 pub(crate) fn day_bucket(ts: SystemTime) -> i64 {

@@ -538,26 +538,6 @@ impl crate::app::PexApp {
 
     fn advanced_owned_controls(&mut self, ui: &mut eg::Ui) {
         ui.label(eg::RichText::new("Owned library cache").strong());
-        if ui.button("Clear owned cache").clicked() {
-            match self.clear_owned_cache() {
-                Ok(removed) => {
-                    self.record_owned_message(format!(
-                        "Owned cache cleared manually (removed {removed} file{}).",
-                        if removed == 1 { "" } else { "s" }
-                    ));
-                    self.advanced_feedback = Some(format!(
-                        "Owned cache cleared (removed {removed} files). Rescanning library."
-                    ));
-                    self.set_status("Owned cache cleared; rescanning library.");
-                }
-                Err(err) => {
-                    let msg = format!("Owned cache clear failed: {err}");
-                    self.advanced_feedback = Some(msg.clone());
-                    self.set_status(msg.clone());
-                    self.record_owned_message(msg);
-                }
-            }
-        }
         if ui.button("Refresh owned scan").clicked() {
             self.refresh_owned_scan();
             self.advanced_feedback = Some("Owned scan refresh started (incremental).".into());

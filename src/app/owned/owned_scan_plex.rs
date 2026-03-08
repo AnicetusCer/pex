@@ -71,11 +71,20 @@ impl OwnedScanPlex {
             match collect_plex_owned_entries(&conn) {
                 Ok(entries) => {
                     let mut owned: HashSet<String> = HashSet::new();
+                    let mut owned_guids: HashSet<String> = HashSet::new();
                     let mut hd_keys: HashSet<String> = HashSet::new();
+                    let mut hd_guids: HashSet<String> = HashSet::new();
                     let mut owned_dates: HashMap<String, Option<u64>> = HashMap::new();
 
                     for entry in entries {
-                        accumulate_owned_entry(&entry, &mut owned, &mut hd_keys, &mut owned_dates);
+                        accumulate_owned_entry(
+                            &entry,
+                            &mut owned,
+                            &mut owned_guids,
+                            &mut hd_keys,
+                            &mut hd_guids,
+                            &mut owned_dates,
+                        );
                     }
 
                     let cache_dir = cache::cache_dir();
@@ -92,6 +101,8 @@ impl OwnedScanPlex {
                     )));
                     let _ = tx.send(Done {
                         keys: owned,
+                        guids: owned_guids,
+                        hd_guids,
                         modified: owned_dates,
                     });
                 }
@@ -240,7 +251,9 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
 fn accumulate_owned_entry(
     entry: &PlexOwnedEntry,
     owned: &mut HashSet<String>,
+    owned_guids: &mut HashSet<String>,
     hd_keys: &mut HashSet<String>,
+    hd_guids: &mut HashSet<String>,
     owned_dates: &mut HashMap<String, Option<u64>>,
 ) {
     let hd = is_hd(entry.width, entry.height);
@@ -278,6 +291,17 @@ fn accumulate_owned_entry(
         }
         if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
             push_keys_for(name);
+        }
+    }
+
+    if let Some(guid) = entry
+        .guid
+        .as_deref()
+        .and_then(crate::app::utils::canonicalize_guid)
+    {
+        owned_guids.insert(guid.clone());
+        if hd {
+            hd_guids.insert(guid);
         }
     }
 }

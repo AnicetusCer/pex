@@ -3,7 +3,6 @@
 // ---- Standard lib imports ----
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -118,7 +117,9 @@ pub struct PexApp {
     // background owned scan
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
+    owned_guids: Option<HashSet<String>>,
     owned_hd_keys: Option<HashSet<String>>,
+    owned_hd_guids: Option<HashSet<String>>,
     owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
@@ -215,7 +216,9 @@ impl Default for PexApp {
 
             owned_rx: None,
             owned_keys: Self::load_owned_keys_sidecar(),
+            owned_guids: None,
             owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_hd_guids: None,
             owned_modified: None,
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
@@ -456,9 +459,20 @@ impl PexApp {
 
     /// Determine whether the owned library already has an HD copy of this title.
     pub(crate) fn row_owned_is_hd(&self, row: &PosterRow) -> bool {
-        self.owned_hd_keys
+        if self
+            .owned_hd_keys
             .as_ref()
             .is_some_and(|set| set.contains(&row.owned_key))
+        {
+            return true;
+        }
+        let Some(owned_hd_guids) = self.owned_hd_guids.as_ref() else {
+            return false;
+        };
+        row.guid
+            .as_deref()
+            .and_then(crate::app::utils::canonicalize_guid)
+            .is_some_and(|guid| owned_hd_guids.contains(&guid))
     }
 
     fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
@@ -927,28 +941,6 @@ impl PexApp {
         Ok(removed)
     }
 
-    fn clear_owned_cache_files(&self) -> Result<usize, String> {
-        let dir = crate::app::cache::cache_dir();
-        let mut removed = 0usize;
-        for name in ["owned_all.txt", "owned_hd.txt"] {
-            let path = dir.join(name);
-            match fs::remove_file(&path) {
-                Ok(_) => removed += 1,
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(format!("Failed to remove {}: {err}", path.display()));
-                }
-            }
-        }
-        Ok(removed)
-    }
-
-    fn clear_owned_cache(&mut self) -> Result<usize, String> {
-        let removed = self.clear_owned_cache_files()?;
-        self.refresh_owned_scan();
-        Ok(removed)
-    }
-
     fn refresh_owned_scan(&mut self) {
         self.refresh_owned_scan_internal(true, true);
     }
@@ -960,7 +952,9 @@ impl PexApp {
         }
         self.owned_rx = None;
         self.owned_keys = None;
+        self.owned_guids = None;
         self.owned_hd_keys = None;
+        self.owned_hd_guids = None;
         self.owned_modified = None;
         for row in &mut self.rows {
             row.owned = false;
