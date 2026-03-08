@@ -20,7 +20,9 @@ use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
 use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
-use crate::config::{discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME};
+use crate::config::{
+    discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME,
+};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
 
@@ -764,7 +766,8 @@ impl PexApp {
                 (self.completed + self.failed) as f32 / self.total_targets as f32
             }
             .clamp(0.0, 1.0);
-            progress = progress.max((1.0 - STARTUP_STAGE4_START).mul_add(prefetch_ratio, STARTUP_STAGE4_START));
+            progress = progress
+                .max((1.0 - STARTUP_STAGE4_START).mul_add(prefetch_ratio, STARTUP_STAGE4_START));
         }
         progress.clamp(0.0, 1.0)
     }

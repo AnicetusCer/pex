@@ -542,12 +542,10 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         info!("prep: final poster rows after dedupe = {}", list.len());
         if list.is_empty() {
             warn!("prep: no posters found — likely DB path/columns mismatch");
-            send(PrepMsg::Info(
-                format!(
-                    "No posters found — check DB path/type in {}",
-                    crate::config::CONFIG_FILENAME
-                ),
-            ));
+            send(PrepMsg::Info(format!(
+                "No posters found — check DB path/type in {}",
+                crate::config::CONFIG_FILENAME
+            )));
         }
 
         send(PrepMsg::Done(list));

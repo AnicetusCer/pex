@@ -336,6 +336,9 @@ fn persist_owned_hd_sidecar(
     let path = cache_dir.join("owned_hd.txt");
     let mut keys: Vec<&String> = hd_keys.iter().collect();
     keys.sort_unstable();
-    fs::write(&path, keys.iter().map(|k| format!("{k}\n")).collect::<String>())
+    fs::write(
+        &path,
+        keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
+    )
     .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }

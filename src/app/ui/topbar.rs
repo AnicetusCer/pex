@@ -459,9 +459,8 @@ impl crate::app::PexApp {
         let warn = eg::Color32::LIGHT_RED;
 
         ui.label(
-            eg::RichText::new(format!("Config file: {}", summary.config_path.as_ref())).color(
-                if summary.config_exists { good } else { warn },
-            ),
+            eg::RichText::new(format!("Config file: {}", summary.config_path.as_ref()))
+                .color(if summary.config_exists { good } else { warn }),
         );
         ui.label(
             eg::RichText::new(format!("EPG source: {}", summary.epg_source.as_ref())).color(
@@ -514,7 +513,9 @@ impl crate::app::PexApp {
         ui.label(
             eg::RichText::new(format!(
                 "Scheduled matches: guid={} title/time={} miss={}",
-                summary.scheduled_by_guid, summary.scheduled_by_title_slot, summary.scheduled_misses
+                summary.scheduled_by_guid,
+                summary.scheduled_by_title_slot,
+                summary.scheduled_misses
             ))
             .color(good),
         );

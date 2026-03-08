@@ -75,150 +75,155 @@ impl crate::app::PexApp {
                                     eg::vec2(card_w, card_h),
                                     eg::Layout::top_down(eg::Align::Min),
                                     |ui| {
-                                    ui.set_min_size(eg::vec2(card_w, card_h));
-                                    let rect = ui.max_rect();
+                                        ui.set_min_size(eg::vec2(card_w, card_h));
+                                        let rect = ui.max_rect();
 
-                                    // selection
-                                    let id = eg::Id::new(("card_sel", idx));
-                                    if ui.interact(rect, id, eg::Sense::click()).clicked() {
-                                        self.selected_idx = Some(idx);
-                                    }
+                                        // selection
+                                        let id = eg::Id::new(("card_sel", idx));
+                                        if ui.interact(rect, id, eg::Sense::click()).clicked() {
+                                            self.selected_idx = Some(idx);
+                                        }
 
-                                    // opportunistic upload
-                                    if uploads_left > 0 && self.try_lazy_upload_row(ctx, idx) {
-                                        uploads_left -= 1;
-                                    }
+                                        // opportunistic upload
+                                        if uploads_left > 0 && self.try_lazy_upload_row(ctx, idx) {
+                                            uploads_left -= 1;
+                                        }
 
-                                    // rects
-                                    let poster_rect = eg::Rect::from_min_max(
-                                        rect.min,
-                                        eg::pos2(
-                                            rect.min.x + card_w,
-                                            card_w.mul_add(1.5, rect.min.y),
-                                        ),
-                                    );
-                                    let text_rect = eg::Rect::from_min_max(
-                                        eg::pos2(rect.min.x, poster_rect.max.y),
-                                        rect.max,
-                                    );
+                                        // rects
+                                        let poster_rect = eg::Rect::from_min_max(
+                                            rect.min,
+                                            eg::pos2(
+                                                rect.min.x + card_w,
+                                                card_w.mul_add(1.5, rect.min.y),
+                                            ),
+                                        );
+                                        let text_rect = eg::Rect::from_min_max(
+                                            eg::pos2(rect.min.x, poster_rect.max.y),
+                                            rect.max,
+                                        );
 
-                                    if self.scroll_to_idx == Some(idx) {
-                                        ui.scroll_to_rect(rect, Some(eg::Align::Center));
-                                        self.scroll_to_idx = None;
-                                    }
+                                        if self.scroll_to_idx == Some(idx) {
+                                            ui.scroll_to_rect(rect, Some(eg::Align::Center));
+                                            self.scroll_to_idx = None;
+                                        }
 
                                         if let Some(row) = self.rows.get(idx) {
-                                        // Poster
-                                        if let Some(tex) = &row.tex {
-                                            ui.painter().image(
-                                                tex.id(),
-                                                poster_rect,
-                                                eg::Rect::from_min_max(
-                                                    eg::pos2(0.0, 0.0),
-                                                    eg::pos2(1.0, 1.0),
-                                                ),
-                                                eg::Color32::WHITE,
-                                            );
-                                        } else {
-                                            ui.painter().rect_filled(
-                                                poster_rect,
-                                                6.0,
-                                                eg::Color32::from_gray(40),
-                                            );
-                                        }
+                                            // Poster
+                                            if let Some(tex) = &row.tex {
+                                                ui.painter().image(
+                                                    tex.id(),
+                                                    poster_rect,
+                                                    eg::Rect::from_min_max(
+                                                        eg::pos2(0.0, 0.0),
+                                                        eg::pos2(1.0, 1.0),
+                                                    ),
+                                                    eg::Color32::WHITE,
+                                                );
+                                            } else {
+                                                ui.painter().rect_filled(
+                                                    poster_rect,
+                                                    6.0,
+                                                    eg::Color32::from_gray(40),
+                                                );
+                                            }
 
-                                        if row.scheduled {
-                                            let pad = 6.0;
-                                            let size = eg::vec2(56.0, 22.0);
-                                            let rec_rect = eg::Rect::from_min_size(
-                                                eg::pos2(
-                                                    poster_rect.left() + pad,
-                                                    poster_rect.top() + pad,
-                                                ),
-                                                size,
-                                            );
-                                            let fill = eg::Color32::from_rgb(200, 40, 40);
-                                            let stroke = eg::Color32::from_rgb(140, 16, 16);
-                                            ui.painter().rect_filled(
-                                                rec_rect,
-                                                eg::Rounding::same(6.0),
-                                                fill,
-                                            );
-                                            ui.painter().rect_stroke(
-                                                rec_rect,
-                                                eg::Rounding::same(6.0),
-                                                eg::Stroke::new(1.0, stroke),
-                                            );
-                                            ui.painter().text(
-                                                rec_rect.center(),
-                                                eg::Align2::CENTER_CENTER,
-                                                "REC",
-                                                eg::FontId::monospace(13.0),
-                                                eg::Color32::WHITE,
-                                            );
-                                        }
+                                            if row.scheduled {
+                                                let pad = 6.0;
+                                                let size = eg::vec2(56.0, 22.0);
+                                                let rec_rect = eg::Rect::from_min_size(
+                                                    eg::pos2(
+                                                        poster_rect.left() + pad,
+                                                        poster_rect.top() + pad,
+                                                    ),
+                                                    size,
+                                                );
+                                                let fill = eg::Color32::from_rgb(200, 40, 40);
+                                                let stroke = eg::Color32::from_rgb(140, 16, 16);
+                                                ui.painter().rect_filled(
+                                                    rec_rect,
+                                                    eg::Rounding::same(6.0),
+                                                    fill,
+                                                );
+                                                ui.painter().rect_stroke(
+                                                    rec_rect,
+                                                    eg::Rounding::same(6.0),
+                                                    eg::Stroke::new(1.0, stroke),
+                                                );
+                                                ui.painter().text(
+                                                    rec_rect.center(),
+                                                    eg::Align2::CENTER_CENTER,
+                                                    "REC",
+                                                    eg::FontId::monospace(13.0),
+                                                    eg::Color32::WHITE,
+                                                );
+                                            }
 
-                                        // --- Compute statuses (needed for badges & dimming) ---
-                                        let broadcast_hd = Self::row_broadcast_hd(row);
-                                        let owned_is_hd = self.row_owned_is_hd(row);
-                                        let better_hd_available =
-                                            row.owned && !owned_is_hd && broadcast_hd;
+                                            // --- Compute statuses (needed for badges & dimming) ---
+                                            let broadcast_hd = Self::row_broadcast_hd(row);
+                                            let owned_is_hd = self.row_owned_is_hd(row);
+                                            let better_hd_available =
+                                                row.owned && !owned_is_hd && broadcast_hd;
 
-                                        // Corner badge: show only for HD airings; SD gets no symbol
-                                        if better_hd_available {
-                                            draw_corner_badge(ui.painter(), poster_rect, "HD ↑");
-                                        } else if broadcast_hd {
-                                            draw_corner_badge(ui.painter(), poster_rect, "HD");
-                                        }
+                                            // Corner badge: show only for HD airings; SD gets no symbol
+                                            if better_hd_available {
+                                                draw_corner_badge(
+                                                    ui.painter(),
+                                                    poster_rect,
+                                                    "HD ↑",
+                                                );
+                                            } else if broadcast_hd {
+                                                draw_corner_badge(ui.painter(), poster_rect, "HD");
+                                            }
 
-                                        // Dim overlay: do NOT dim if there's an HD upgrade airing
-                                        let should_dim =
-                                            row.owned && self.dim_owned && !better_hd_available;
-                                        if should_dim {
-                                            let a = (self.dim_strength_ui.clamp(0.10, 0.90) * 255.0)
-                                                as u8;
-                                            let overlay_rect = poster_rect.expand(0.5);
-                                            ui.painter().rect_filled(
-                                                overlay_rect,
-                                                eg::Rounding::ZERO,
-                                                eg::Color32::from_black_alpha(a),
+                                            // Dim overlay: do NOT dim if there's an HD upgrade airing
+                                            let should_dim =
+                                                row.owned && self.dim_owned && !better_hd_available;
+                                            if should_dim {
+                                                let a = (self.dim_strength_ui.clamp(0.10, 0.90)
+                                                    * 255.0)
+                                                    as u8;
+                                                let overlay_rect = poster_rect.expand(0.5);
+                                                ui.painter().rect_filled(
+                                                    overlay_rect,
+                                                    eg::Rounding::ZERO,
+                                                    eg::Color32::from_black_alpha(a),
+                                                );
+                                            }
+
+                                            // Label
+                                            let title_line = row.year.map_or_else(
+                                                || row.title.clone(),
+                                                |y| format!("{} ({})", row.title, y),
                                             );
-                                        }
+                                            let ch = row
+                                                .channel
+                                                .as_deref()
+                                                .map(crate::app::utils::humanize_channel)
+                                                .unwrap_or_else(|| "—".into());
+                                            let line2 = if broadcast_hd {
+                                                format!("{ch} • HD")
+                                            } else {
+                                                ch
+                                            };
+                                            let tm = row
+                                                .airing
+                                                .map(crate::app::utils::hhmm_utc)
+                                                .unwrap_or_else(|| "—".into());
+                                            let line3 = tm + " UTC";
 
-                                        // Label
-                                        let title_line = row.year.map_or_else(
-                                            || row.title.clone(),
-                                            |y| format!("{} ({})", row.title, y),
-                                        );
-                                        let ch = row
-                                            .channel
-                                            .as_deref()
-                                            .map(crate::app::utils::humanize_channel)
-                                            .unwrap_or_else(|| "—".into());
-                                        let line2 = if broadcast_hd {
-                                            format!("{ch} • HD")
-                                        } else {
-                                            ch
-                                        };
-                                        let tm = row
-                                            .airing
-                                            .map(crate::app::utils::hhmm_utc)
-                                            .unwrap_or_else(|| "—".into());
-                                        let line3 = tm + " UTC";
-
-                                        let label_text = format!(
-                                            "{title}\n{line2}\n{line3}",
-                                            title = title_line
-                                        );
-
-                                        ui.allocate_ui_at_rect(text_rect, |ui| {
-                                            ui.add(
-                                                eg::Label::new(
-                                                    eg::RichText::new(label_text).size(14.0),
-                                                )
-                                                .wrap(),
+                                            let label_text = format!(
+                                                "{title}\n{line2}\n{line3}",
+                                                title = title_line
                                             );
-                                        });
+
+                                            ui.allocate_ui_at_rect(text_rect, |ui| {
+                                                ui.add(
+                                                    eg::Label::new(
+                                                        eg::RichText::new(label_text).size(14.0),
+                                                    )
+                                                    .wrap(),
+                                                );
+                                            });
 
                                             // Selection stroke
                                             if self.selected_idx == Some(idx) {
