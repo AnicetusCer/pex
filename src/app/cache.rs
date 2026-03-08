@@ -23,11 +23,8 @@ pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
         .get_or_init(|| {
             let cfg = load_config();
-            let mut path = normalize_dir(
-                cfg.cache_dir
-                    .clone()
-                    .unwrap_or_else(|| resolve_relative_path(".pex_cache")),
-            );
+            let mut path =
+                normalize_dir(cfg.cache_dir.unwrap_or_else(|| resolve_relative_path(".pex_cache")));
 
             if let Err(e) = fs::create_dir_all(&path) {
                 warn!("failed to create cache dir {}: {e}", path.display());

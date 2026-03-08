@@ -29,6 +29,11 @@ impl ScheduledIndex {
         airing: Option<SystemTime>,
     ) -> bool {
         if let Some(g) = guid {
+            if let Some(canonical) = utils::canonicalize_guid(g) {
+                if self.guids.contains(&canonical) {
+                    return true;
+                }
+            }
             if self.guids.contains(g) {
                 return true;
             }
@@ -120,7 +125,11 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
             .map_err(|err| err.to_string())?
             .filter(|g| !g.is_empty())
         {
-            index.guids.insert(guid);
+            if let Some(canonical) = utils::canonicalize_guid(&guid) {
+                index.guids.insert(canonical);
+            } else {
+                index.guids.insert(guid);
+            }
             continue;
         }
 
@@ -130,7 +139,11 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
             .filter(|k| !k.is_empty())
         {
             if let Some(decoded) = decode_mt_key(&mt_key) {
-                index.guids.insert(decoded);
+                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
+                    index.guids.insert(canonical);
+                } else {
+                    index.guids.insert(decoded);
+                }
                 continue;
             }
         }
@@ -193,7 +206,11 @@ fn load_from_media_subscriptions(
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         if let Some(g) = &guid {
-            index.guids.insert(g.clone());
+            if let Some(canonical) = utils::canonicalize_guid(g) {
+                index.guids.insert(canonical);
+            } else {
+                index.guids.insert(g.clone());
+            }
         }
 
         let title = parsed
@@ -255,7 +272,12 @@ fn load_from_subscription_desired(
         }
         match decode(&remote) {
             Ok(cow) => {
-                index.guids.insert(cow.into_owned());
+                let decoded = cow.into_owned();
+                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
+                    index.guids.insert(canonical);
+                } else {
+                    index.guids.insert(decoded);
+                }
             }
             Err(err) => {
                 warn!("Failed to decode metadata_subscription_desired_items remote_id {remote}: {err}");

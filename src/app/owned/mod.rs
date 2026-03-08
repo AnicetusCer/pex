@@ -1,6 +1,6 @@
 pub(crate) mod owned_scan_plex;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use eframe::egui as eg;
@@ -34,6 +34,7 @@ impl crate::app::PexApp {
             return;
         };
         let owned_guids = self.owned_guids.as_ref();
+        let guid_modified = self.owned_guid_modified.as_ref();
         let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
             let base_key = row.owned_key.clone();
@@ -42,7 +43,7 @@ impl crate::app::PexApp {
                 .guid
                 .as_deref()
                 .and_then(crate::app::utils::canonicalize_guid)
-                .is_some_and(|guid| owned_guids.is_some_and(|set| set.contains(&guid)));
+                .filter(|guid| owned_guids.is_some_and(|set| set.contains(guid)));
 
             for candidate in Self::owned_key_variants(&row.title, row.year) {
                 if keys.contains(&candidate) {
@@ -59,10 +60,10 @@ impl crate::app::PexApp {
                 row.owned = true;
                 row.owned_key = found.clone();
                 row.owned_modified = modified.and_then(|m| m.get(&found)).and_then(|v| *v);
-            } else if matched_guid {
+            } else if let Some(guid) = matched_guid {
                 row.owned = true;
                 row.owned_key = base_key;
-                row.owned_modified = None;
+                row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).and_then(|v| *v);
             } else {
                 row.owned = false;
                 row.owned_key = base_key;
@@ -285,12 +286,14 @@ impl crate::app::PexApp {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }
                 }
-                Done {
-                    keys,
-                    guids,
-                    hd_guids,
-                    modified,
-                } => {
+                Done(done) => {
+                    let crate::app::types::OwnedDone {
+                        keys,
+                        guids,
+                        hd_guids,
+                        guid_modified,
+                        modified,
+                    } = *done;
                     self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     if keys.is_empty() {
                         self.owned_scan_in_progress = false;
@@ -322,6 +325,7 @@ impl crate::app::PexApp {
                                 self.owned_keys = Some(HashSet::new());
                                 self.owned_guids = Some(HashSet::new());
                                 self.owned_hd_guids = Some(HashSet::new());
+                                self.owned_guid_modified = Some(HashMap::new());
                                 self.owned_retry_next = None;
                             }
                         } else {
@@ -332,6 +336,7 @@ impl crate::app::PexApp {
                             self.owned_keys = Some(HashSet::new());
                             self.owned_guids = Some(HashSet::new());
                             self.owned_hd_guids = Some(HashSet::new());
+                            self.owned_guid_modified = Some(HashMap::new());
                             self.owned_retry_next = None;
                         }
 
@@ -349,6 +354,7 @@ impl crate::app::PexApp {
                     self.owned_guids = Some(guids);
                     self.owned_hd_keys = Self::load_owned_hd_sidecar();
                     self.owned_hd_guids = Some(hd_guids);
+                    self.owned_guid_modified = Some(guid_modified);
                     self.owned_modified = Some(modified);
                     self.apply_owned_flags();
                     self.mark_dirty();

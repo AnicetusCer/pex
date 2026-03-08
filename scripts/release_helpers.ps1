@@ -318,3 +318,62 @@ function Should-UpdateDocs {
 
     return $false
 }
+
+function New-ArtifactChecksums {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArtifactPaths,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    $lines = @()
+    foreach ($artifact in $ArtifactPaths) {
+        if (-not (Test-Path -Path $artifact)) {
+            throw "Checksum generation failed: artifact not found at '$artifact'."
+        }
+        $hash = Get-FileHash -Path $artifact -Algorithm SHA256
+        $name = Split-Path -Leaf $artifact
+        $lines += "$($hash.Hash.ToLowerInvariant()) *$name"
+    }
+
+    Set-Content -Path $OutputPath -Value ($lines -join "`n") -Encoding ASCII
+    return (Resolve-Path $OutputPath).Path
+}
+
+function Test-ArtifactChecksums {
+    param(
+        [Parameter(Mandatory = $true)][string]$ChecksumPath,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    if (-not (Test-Path -Path $ChecksumPath)) {
+        throw "Checksum verification failed: checksum file not found at '$ChecksumPath'."
+    }
+
+    $content = Get-Content -Path $ChecksumPath
+    if (-not $content -or $content.Count -eq 0) {
+        throw "Checksum verification failed: checksum file '$ChecksumPath' is empty."
+    }
+
+    foreach ($line in $content) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+        $trimmed = $line.Trim()
+        $match = [regex]::Match($trimmed, "^(?<hash>[A-Fa-f0-9]{64}) \*(?<name>.+)$")
+        if (-not $match.Success) {
+            throw "Checksum verification failed: malformed line '$trimmed'."
+        }
+
+        $expected = $match.Groups["hash"].Value.ToLowerInvariant()
+        $name = $match.Groups["name"].Value
+        $artifactPath = Join-Path $ArtifactDir $name
+        if (-not (Test-Path -Path $artifactPath)) {
+            throw "Checksum verification failed: artifact '$name' missing in '$ArtifactDir'."
+        }
+
+        $actual = (Get-FileHash -Path $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            throw "Checksum verification failed for '$name'. expected=$expected actual=$actual"
+        }
+    }
+}
