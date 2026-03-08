@@ -31,8 +31,10 @@ impl crate::app::PexApp {
     /// Apply the owned flags using the computed key set (no-ops if not ready).
     pub(crate) fn apply_owned_flags(&mut self) {
         let Some(keys) = &self.owned_keys else {
+            self.owned_match_stats = crate::app::OwnedMatchStats::default();
             return;
         };
+        self.owned_match_stats = crate::app::OwnedMatchStats::default();
         let owned_guids = self.owned_guids.as_ref();
         let guid_modified = self.owned_guid_modified.as_ref();
         let modified = self.owned_modified.as_ref();
@@ -60,14 +62,17 @@ impl crate::app::PexApp {
                 row.owned = true;
                 row.owned_key = found.clone();
                 row.owned_modified = modified.and_then(|m| m.get(&found)).and_then(|v| *v);
+                self.owned_match_stats.by_key += 1;
             } else if let Some(guid) = matched_guid {
                 row.owned = true;
                 row.owned_key = base_key;
                 row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).and_then(|v| *v);
+                self.owned_match_stats.by_guid += 1;
             } else {
                 row.owned = false;
                 row.owned_key = base_key;
                 row.owned_modified = None;
+                self.owned_match_stats.misses += 1;
             }
         }
     }

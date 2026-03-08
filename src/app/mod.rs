@@ -19,7 +19,7 @@ use crate::app::cache::find_any_by_key;
 use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
-use crate::app::scheduled::ScheduledIndex;
+use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
 use crate::config::{discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME};
 
 type WorkItem = (usize, String, String, Option<PathBuf>);
@@ -67,6 +67,20 @@ pub(crate) const STARTUP_STAGE3_DONE: f32 = 0.75;
 pub(crate) const STARTUP_STAGE4_START: f32 = 0.75;
 pub(crate) const OWNED_SCAN_COMPLETE_STATUS: &str =
     "Stage 3/4 - Owned scan complete (Owned and HD badges ready). Finishing artwork cache...";
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OwnedMatchStats {
+    pub by_guid: usize,
+    pub by_key: usize,
+    pub misses: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScheduledMatchStats {
+    pub by_guid: usize,
+    pub by_title_slot: usize,
+    pub misses: usize,
+}
 
 pub struct PexApp {
     // data
@@ -122,6 +136,7 @@ pub struct PexApp {
     owned_hd_guids: Option<HashSet<String>>,
     owned_guid_modified: Option<HashMap<String, Option<u64>>>,
     owned_modified: Option<HashMap<String, Option<u64>>>,
+    owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
     owned_retry_attempts: u8,
@@ -131,6 +146,7 @@ pub struct PexApp {
     rating_states: HashMap<String, RatingState>,
 
     scheduled_index: Option<ScheduledIndex>,
+    scheduled_match_stats: ScheduledMatchStats,
 
     // search/filter/sort controls
     search_query: String,
@@ -222,6 +238,7 @@ impl Default for PexApp {
             owned_hd_guids: None,
             owned_guid_modified: None,
             owned_modified: None,
+            owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
             owned_retry_attempts: 0,
@@ -230,6 +247,7 @@ impl Default for PexApp {
             rating_rx: None,
             rating_states: HashMap::new(),
             scheduled_index: None,
+            scheduled_match_stats: ScheduledMatchStats::default(),
 
             search_query: String::new(),
             filter_hd_only: false,
@@ -518,15 +536,28 @@ impl PexApp {
     }
 
     fn apply_scheduled_flags(&mut self) {
+        self.scheduled_match_stats = ScheduledMatchStats::default();
         for row in &mut self.rows {
             row.scheduled = false;
         }
         let Some(index) = self.scheduled_index.as_ref() else {
+            self.scheduled_match_stats.misses = self.rows.len();
             return;
         };
         for row in &mut self.rows {
-            if index.is_scheduled(row.guid.as_deref(), &row.title, row.year, row.airing) {
-                row.scheduled = true;
+            match index.match_kind(row.guid.as_deref(), &row.title, row.year, row.airing) {
+                ScheduledMatchKind::Guid => {
+                    row.scheduled = true;
+                    self.scheduled_match_stats.by_guid += 1;
+                }
+                ScheduledMatchKind::TitleSlot => {
+                    row.scheduled = true;
+                    self.scheduled_match_stats.by_title_slot += 1;
+                }
+                ScheduledMatchKind::None => {
+                    row.scheduled = false;
+                    self.scheduled_match_stats.misses += 1;
+                }
             }
         }
     }
@@ -959,6 +990,7 @@ impl PexApp {
         self.owned_hd_guids = None;
         self.owned_guid_modified = None;
         self.owned_modified = None;
+        self.owned_match_stats = OwnedMatchStats::default();
         for row in &mut self.rows {
             row.owned = false;
             row.owned_modified = None;

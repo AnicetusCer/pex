@@ -20,6 +20,12 @@ struct DbSummary<'a> {
     cache_dir: &'a Path,
     cache_exists: bool,
     tmdb_key_present: bool,
+    owned_by_guid: usize,
+    owned_by_key: usize,
+    owned_misses: usize,
+    scheduled_by_guid: usize,
+    scheduled_by_title_slot: usize,
+    scheduled_misses: usize,
 }
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
@@ -425,6 +431,12 @@ impl crate::app::PexApp {
                             cache_dir: &cache_dir,
                             cache_exists,
                             tmdb_key_present,
+                            owned_by_guid: self.owned_match_stats.by_guid,
+                            owned_by_key: self.owned_match_stats.by_key,
+                            owned_misses: self.owned_match_stats.misses,
+                            scheduled_by_guid: self.scheduled_match_stats.by_guid,
+                            scheduled_by_title_slot: self.scheduled_match_stats.by_title_slot,
+                            scheduled_misses: self.scheduled_match_stats.misses,
                         },
                     );
                     ui.separator();
@@ -491,6 +503,20 @@ impl crate::app::PexApp {
         ui.label(
             eg::RichText::new(format!("Cache root: {}", summary.cache_dir.display()))
                 .color(if summary.cache_exists { good } else { warn }),
+        );
+        ui.label(
+            eg::RichText::new(format!(
+                "Owned matches: guid={} key={} miss={}",
+                summary.owned_by_guid, summary.owned_by_key, summary.owned_misses
+            ))
+            .color(good),
+        );
+        ui.label(
+            eg::RichText::new(format!(
+                "Scheduled matches: guid={} title/time={} miss={}",
+                summary.scheduled_by_guid, summary.scheduled_by_title_slot, summary.scheduled_misses
+            ))
+            .color(good),
         );
 
         if !summary.tmdb_key_present {

@@ -320,12 +320,11 @@ fn persist_owned_keys_sidecar(
     owned_keys: &HashSet<String>,
 ) -> Result<(), String> {
     let path = cache_dir.join("owned_all.txt");
+    let mut keys: Vec<&String> = owned_keys.iter().collect();
+    keys.sort_unstable();
     fs::write(
         &path,
-        owned_keys
-            .iter()
-            .map(|k| format!("{k}\n"))
-            .collect::<String>(),
+        keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
     )
     .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
@@ -335,9 +334,8 @@ fn persist_owned_hd_sidecar(
     hd_keys: &HashSet<String>,
 ) -> Result<(), String> {
     let path = cache_dir.join("owned_hd.txt");
-    fs::write(
-        &path,
-        hd_keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
-    )
+    let mut keys: Vec<&String> = hd_keys.iter().collect();
+    keys.sort_unstable();
+    fs::write(&path, keys.iter().map(|k| format!("{k}\n")).collect::<String>())
     .map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
