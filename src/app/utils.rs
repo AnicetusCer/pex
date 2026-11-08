@@ -32,24 +32,6 @@ pub(crate) fn normalize_title(s: &str) -> String {
         .join(" ")
 }
 
-pub(crate) fn find_year_in_str(s: &str) -> Option<i32> {
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len().saturating_sub(3) {
-        if bytes[i].is_ascii_digit()
-            && bytes[i + 1].is_ascii_digit()
-            && bytes[i + 2].is_ascii_digit()
-            && bytes[i + 3].is_ascii_digit()
-        {
-            if let Ok(val) = s[i..i + 4].parse::<i32>() {
-                if (1900..=2099).contains(&val) {
-                    return Some(val);
-                }
-            }
-        }
-    }
-    None
-}
-
 pub(crate) fn canonicalize_guid(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

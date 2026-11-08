@@ -15,7 +15,6 @@ use urlencoding::encode;
 
 // ---- Local modules ----
 pub mod cache;
-use crate::app::cache::find_any_by_key;
 use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
@@ -23,8 +22,6 @@ use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
 use crate::config::{
     discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME,
 };
-
-type WorkItem = (usize, String, String, Option<PathBuf>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NavDirection {
@@ -120,7 +117,6 @@ pub struct PexApp {
     completed: usize,
     failed: usize,
 
-    work_tx: Option<Sender<WorkItem>>,
     done_rx: Option<Receiver<PrefetchDone>>,
 
     // --- control flags (UI only; not wired yet) ---
@@ -226,7 +222,6 @@ impl Default for PexApp {
             completed: 0,
             failed: 0,
 
-            work_tx: None,
             done_rx: None,
 
             hide_owned: false,
@@ -460,53 +455,20 @@ impl PexApp {
         format!("{base}__s")
     }
 
-    pub(crate) fn make_owned_key(title: &str, year: Option<i32>) -> String {
-        let normalized = utils::normalize_title(title);
-        let year = year.or_else(|| utils::find_year_in_str(title));
-        year.map_or_else(
-            || {
-                let digest = md5::compute(normalized.as_bytes());
-                let short = format!("{:x}", digest);
-                let short = &short[..short.len().min(8)];
-                format!("{normalized}:0:{short}")
-            },
-            |year| format!("{normalized}:{year}"),
-        )
-    }
-
     /// Determine whether the airing metadata implies an HD broadcast.
     pub(crate) const fn row_broadcast_hd(row: &PosterRow) -> bool {
         row.broadcast_hd
     }
 
-    /// Determine whether the owned library already has an HD copy of this title.
-    pub(crate) fn row_owned_is_hd(&self, row: &PosterRow) -> bool {
-        if self
-            .owned_hd_keys
-            .as_ref()
-            .is_some_and(|set| set.contains(&row.owned_key))
-        {
-            return true;
-        }
-        let Some(owned_hd_guids) = self.owned_hd_guids.as_ref() else {
-            return false;
-        };
-        row.guid
-            .as_deref()
-            .and_then(crate::app::utils::canonicalize_guid)
-            .is_some_and(|guid| owned_hd_guids.contains(&guid))
-    }
-
     fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
-        Self::load_sidecar_file("owned_all.txt")
+        Self::load_sidecar_file(owned::ALL_SIDECAR)
     }
 
     fn load_owned_hd_sidecar() -> Option<HashSet<String>> {
-        Self::load_sidecar_file("owned_hd.txt")
+        Self::load_sidecar_file(owned::HD_SIDECAR)
     }
 
     fn load_sidecar_file(file_name: &str) -> Option<HashSet<String>> {
-        use std::{collections::HashSet, fs};
         let path = crate::app::cache::cache_dir().join(file_name);
         let text = fs::read_to_string(path).ok()?;
         let mut set = HashSet::new();
@@ -520,23 +482,6 @@ impl PexApp {
 }
 
 impl PexApp {
-    fn refresh_scheduled_index(&mut self) {
-        match crate::app::scheduled::load_scheduled_index() {
-            Ok(index) => {
-                if index.is_empty() {
-                    self.scheduled_index = None;
-                } else {
-                    self.scheduled_index = Some(index);
-                }
-            }
-            Err(err) => {
-                warn!("Failed to load scheduled recordings: {err}");
-                self.scheduled_index = None;
-            }
-        }
-        self.apply_scheduled_flags();
-    }
-
     fn apply_scheduled_flags(&mut self) {
         self.scheduled_match_stats = ScheduledMatchStats::default();
         for row in &mut self.rows {
@@ -570,9 +515,6 @@ impl PexApp {
         if let Some(row) = self.rows.get_mut(idx) {
             if row.tex.is_some() || matches!(row.state, PosterState::Failed) {
                 return false;
-            }
-            if row.path.is_none() {
-                row.path = find_any_by_key(&row.key); // fallback single lookup only once
             }
             if let Some(path) = row.path.as_ref() {
                 match crate::app::gfx::load_texture_from_path(
@@ -873,7 +815,6 @@ impl PexApp {
         self.prep_started = false;
         self.prep_rx = None;
         self.prefetch_started = false;
-        self.work_tx = None;
         self.done_rx = None;
         self.rows.clear();
         self.total_targets = 0;
@@ -893,7 +834,6 @@ impl PexApp {
         self.rating_states.clear();
         self.channel_icon_textures.clear();
         self.channel_icon_pending.clear();
-        self.owned_modified = None;
         self.set_status("Restarting poster prep…");
         self.start_poster_prep();
         ctx.request_repaint();
@@ -939,44 +879,6 @@ impl PexApp {
         });
     }
 
-    fn clear_poster_cache_files(&self) -> Result<usize, String> {
-        let dir = crate::app::cache::cache_dir();
-        if !dir.exists() {
-            return Ok(0);
-        }
-        let mut removed = 0usize;
-        let entries =
-            fs::read_dir(&dir).map_err(|err| format!("Failed to read {}: {err}", dir.display()))?;
-        for entry in entries {
-            let entry =
-                entry.map_err(|err| format!("Failed to read entry in {}: {err}", dir.display()))?;
-            let path = entry.path();
-            if !entry
-                .file_type()
-                .map_err(|err| format!("Failed to stat {}: {err}", path.display()))?
-                .is_file()
-            {
-                continue;
-            }
-            let remove = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    let ext = ext.to_ascii_lowercase();
-                    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba")
-                })
-                .unwrap_or(false);
-            if !remove {
-                continue;
-            }
-            fs::remove_file(&path)
-                .map_err(|err| format!("Failed to remove {}: {err}", path.display()))?;
-            removed += 1;
-        }
-        let _ = fs::remove_file(dir.join("hotset.txt"));
-        Ok(removed)
-    }
-
     fn refresh_owned_scan(&mut self) {
         self.refresh_owned_scan_internal(true, true);
     }
@@ -986,34 +888,7 @@ impl PexApp {
             self.owned_retry_attempts = 0;
             self.owned_retry_next = None;
         }
-        self.owned_rx = None;
-        self.owned_keys = None;
-        self.owned_guids = None;
-        self.owned_hd_keys = None;
-        self.owned_hd_guids = None;
-        self.owned_guid_modified = None;
-        self.owned_modified = None;
-        self.owned_match_stats = OwnedMatchStats::default();
-        for row in &mut self.rows {
-            row.owned = false;
-            row.owned_modified = None;
-        }
-        self.mark_dirty();
-        self.owned_scan_in_progress = false;
-        self.record_owned_message("Refreshing owned scan…");
-
-        match crate::app::prep::sync_library_db_from_source(force_copy) {
-            Ok(true) => {
-                self.record_owned_message("Copied Plex library DB from plex_library_db_source.")
-            }
-            Ok(false) => {}
-            Err(err) => {
-                self.record_owned_message(format!("Plex library DB refresh skipped: {err}"))
-            }
-        }
-
-        self.refresh_scheduled_index();
-        self.start_owned_scan();
+        self.start_owned_scan(force_copy);
     }
 }
 
@@ -1132,12 +1007,12 @@ fn tmdb_get(client: &reqwest::blocking::Client, url: &str) -> Result<String, Rat
     let resp = client
         .get(url)
         .send()
-        .map_err(|err| RatingState::Error(format!("network: {err}")))?;
+        .map_err(|err| RatingState::Error(format!("network: {}", err.without_url())))?;
     if !resp.status().is_success() {
         return Err(RatingState::Error(format!("HTTP {}", resp.status())));
     }
     resp.text()
-        .map_err(|err| RatingState::Error(format!("read: {err}")))
+        .map_err(|err| RatingState::Error(format!("read: {}", err.without_url())))
 }
 
 fn parse_tmdb_body<T: DeserializeOwned>(body: &str) -> Result<T, RatingState> {
@@ -1221,7 +1096,7 @@ impl eframe::App for PexApp {
 
             // Kick off poster prep first (Stage 2), then owned scan (Stage 3)
             self.start_poster_prep();
-            self.start_owned_scan();
+            self.start_owned_scan(false);
         }
 
         // Drive warm-up progress
@@ -1295,6 +1170,11 @@ impl eframe::App for PexApp {
             self.ui_render_channel_filter_popup(ctx);
             self.ui_render_genre_filter_popup(ctx);
             self.ui_render_advanced_popup(ctx);
+
+            if self.prefetch_started && self.loading_progress >= 1.0 && self.rows.is_empty() {
+                ui.label("No films in the programme guide.");
+                return;
+            }
 
             // Decide whether to show the early splash (before enough textures ready)
             let show_splash = !self.should_show_grid();

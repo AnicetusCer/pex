@@ -8,11 +8,14 @@ use std::time::SystemTime;
 // ---- cross-thread messages / data ----
 pub enum OwnedMsg {
     Info(String),
+    Scheduled(Result<super::scheduled::ScheduledIndex, String>),
     Done(Box<OwnedDone>),
     Error(String),
 }
 
+#[derive(Default)]
 pub struct OwnedDone {
+    pub hd_keys: HashSet<String>,
     pub keys: HashSet<String>,
     pub guids: HashSet<String>,
     pub hd_guids: HashSet<String>,
@@ -172,7 +175,7 @@ pub struct PosterRow {
     pub state: PosterState,
     pub owned: bool,
     pub owned_modified: Option<u64>,
-    pub owned_key: String,
+    pub owned_hd: bool,
     pub broadcast_hd: bool,
     pub scheduled: bool,
 }

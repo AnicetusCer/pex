@@ -1,7 +1,5 @@
 ﻿# Pex (Plex EPG Explorer)
 
-![Film discovery grid](../src/assets/PEXFilmEPG.png)
-
 If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this app is for you. Pex is my personal way to dig through two weeks of Plex DVR listings and decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
 
 Pex helps you browse upcoming film broacasts in a more advanced way:
@@ -13,7 +11,7 @@ Pex helps you browse upcoming film broacasts in a more advanced way:
 
 If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. Point the entries at your Plex EPG and library databases and you’re done—Pex mirrors Plex’s own data to decide what you already own, so there’s no filesystem crawl to configure.
 
-Because the app is written in Rust, the portable build runs on Windows, Linux, and macOS. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likely change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
+Portable builds are available for x86-64 Windows and Linux. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likely change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
 
 Need a head start on the paths? See `config_example.windows` and `config_example.linux` in this folder for realistic sample values covering common Plex installations and multi-library layouts.
 
@@ -21,7 +19,7 @@ Need a head start on the paths? See `config_example.windows` and `config_example
 
 ## What’s inside?
 
-- `pex.exe` (Windows) or `pex` (Linux/macOS) – the application binary.
+- `pex.exe` (Windows) or `pex` (Linux) – the application binary.
 - `config.json` – edit this to match your Plex setup and movie library.
 - `README.md` – this guide.
 - `db/` (created on first run) – Pex will copy your Plex EPG database here.
@@ -104,11 +102,11 @@ the next run (expect another long initial scan while it repopulates).
 
 ---
 
-## Windows vs. Linux/macOS differences
+## Windows and Linux differences
 
 - **Paths** – stick to forward slashes in `config.json`. Windows backslashes
   must be escaped (`"D:\\\\Media"`), so forward slashes are easier.
-- **Executable name** – Windows builds end with `.exe`; Linux/macOS builds are
+- **Executable name** – Windows builds end with `.exe`; Linux builds are
   just `pex`. The rest of the bundle layout is identical.
 
 ---

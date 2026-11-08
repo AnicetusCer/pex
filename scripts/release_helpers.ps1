@@ -75,32 +75,49 @@ function Test-TagExists {
     return $LASTEXITCODE -eq 0
 }
 
-function Normalize-PortablePath {
-    param([Parameter()][object]$PathValue)
+function Assert-ReleaseSource {
+    param([Parameter(Mandatory)][string]$Commit)
 
-    if ($null -eq $PathValue) {
-        return $null
+    git merge-base --is-ancestor $Commit HEAD
+    if ($LASTEXITCODE -ne 0) { throw "Release revision $Commit is not an ancestor of HEAD." }
+    # A generated download page is committed after the first platform is published.
+    git diff --quiet $Commit HEAD -- . ':(exclude)docs/index.html'
+    if ($LASTEXITCODE -ne 0) { throw "Source at HEAD differs from release revision $Commit." }
+}
+
+function Get-ReleaseTag {
+    param([Parameter(Mandatory)][string]$Version)
+    $tag = if ($Version.StartsWith('v')) { $Version } else { "v$Version" }
+    $json = cargo metadata --locked --offline --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { throw "Unable to read locked Cargo metadata." }
+    $package = ($json | ConvertFrom-Json).packages | Where-Object name -EQ 'pex'
+    if (-not $package -or $tag -cne "v$($package.version)") {
+        throw "Requested tag $tag must match Cargo package version $($package.version)."
     }
+    if (Test-TagExists $tag) { Assert-ReleaseSource "refs/tags/$tag" }
+    return $tag
+}
 
-    if ($PathValue -is [System.Array]) {
-        $PathValue = $PathValue | Where-Object { $_ } | Select-Object -Last 1
+function Assert-PublishedTag {
+    param([Parameter(Mandatory)][string]$Tag)
+    $ref = "refs/tags/$Tag"
+    $remote = @(git ls-remote --exit-code --tags origin $ref "$ref^{}")
+    if ($LASTEXITCODE -ne 0 -or -not $remote) { throw "Push tag $Tag before publishing its assets." }
+    # git lists the peeled commit last for an annotated tag.
+    $commit = ($remote[-1] -split '\s+')[0]
+    Assert-ReleaseSource $commit
+}
+
+function Build-PexRelease {
+    $messages = cargo build --release --locked --bin pex --message-format=json-render-diagnostics
+    if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed." }
+    $binary = $messages | ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'pex' -and $_.executable } |
+        Select-Object -ExpandProperty executable
+    if (-not $binary -or -not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw "Cargo did not produce a pex executable."
     }
-
-    if ($PathValue -is [System.IO.FileSystemInfo]) {
-        return $PathValue.FullName
-    }
-
-    $stringValue = $PathValue -as [string]
-    if ([string]::IsNullOrWhiteSpace($stringValue)) {
-        return $null
-    }
-
-    $stringValue = $stringValue.Trim()
-    if ($stringValue -match '^Created\s+(?<full>.+)$') {
-        $stringValue = $Matches['full'].Trim()
-    }
-
-    return $stringValue
+    return $binary
 }
 
 function Get-FriendlyPlatformName {
@@ -166,7 +183,7 @@ function Get-ReleaseAssets {
     }
 
     return [pscustomobject]@{
-        Assets      = ($assets | Sort-Object -Property Name)
+        Assets      = @($assets | Sort-Object -Property Name)
         PublishedAt = $parsed.publishedAt
     }
 }
@@ -215,7 +232,7 @@ function Update-DownloadsPage {
         [Parameter(Mandatory = $true)][string]$Tag,
         [Parameter(Mandatory = $true)][string]$RepoSlug,
         [Parameter()][array]$Assets,
-        [Parameter()][string]$PublishedAt
+        [Parameter()][Nullable[DateTimeOffset]]$PublishedAt
     )
 
     $docsDir = "docs"
@@ -224,17 +241,8 @@ function Update-DownloadsPage {
     }
 
     $releaseUrl = "https://github.com/$RepoSlug/releases/tag/$Tag"
-    if ([string]::IsNullOrWhiteSpace($PublishedAt)) {
-        $updatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
-    }
-    else {
-        try {
-            $updatedAt = (Get-Date $PublishedAt).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
-        }
-        catch {
-            $updatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss 'UTC'"
-        }
-    }
+    $timestamp = if ($null -ne $PublishedAt) { $PublishedAt.UtcDateTime } else { [DateTime]::UtcNow }
+    $updatedAt = $timestamp.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", [cultureinfo]::InvariantCulture)
     $downloadSection = Build-DownloadSection -Tag $Tag -ReleaseUrl $releaseUrl -Assets $Assets
 
     $html = @"
@@ -296,7 +304,7 @@ $downloadSection
 
 function Should-UpdateDocs {
     param(
-        [Parameter(Mandatory = $true)][array]$Assets,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][array]$Assets,
         [Parameter(Mandatory = $true)][string]$CurrentPlatformId
     )
 

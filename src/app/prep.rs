@@ -1,5 +1,5 @@
 // src/app/prep.rs
-use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
@@ -103,144 +103,141 @@ fn last_sync_marker_path(local_db: &Path) -> PathBuf {
     PathBuf::from(format!("{}.last_sync", local_db.display()))
 }
 
-fn fresh_enough(marker_path: &Path) -> io::Result<bool> {
-    fs::metadata(marker_path).map_or(Ok(false), |meta| {
-        let m = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let age = SystemTime::now().duration_since(m).unwrap_or_default();
-        Ok(age.as_secs() < MIN_COPY_INTERVAL_HOURS * 3600)
+fn sqlite_sidecar_path(db: &Path, suffix: &str) -> PathBuf {
+    let mut name = db.as_os_str().to_owned();
+    name.push(format!("-{suffix}"));
+    PathBuf::from(name)
+}
+
+fn mirror_due(dst: &Path) -> bool {
+    // A leftover marker must not suppress recovery after deleting a local DB.
+    if !fs::metadata(dst).is_ok_and(|m| m.len() > 0) {
+        return true;
+    }
+    let age = fs::metadata(last_sync_marker_path(dst))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|time| SystemTime::now().duration_since(time).ok());
+    age.is_none_or(|age| age >= Duration::from_secs(MIN_COPY_INTERVAL_HOURS * 3600))
+}
+
+#[derive(PartialEq, Eq)]
+struct FileState {
+    len: u64,
+    modified: SystemTime,
+    header: Vec<u8>,
+}
+
+fn file_state(path: &Path, header_bytes: u64) -> io::Result<FileState> {
+    let file = fs::File::open(path)?;
+    let meta = file.metadata()?;
+    let mut header = Vec::new();
+    file.take(header_bytes).read_to_end(&mut header)?;
+    Ok(FileState {
+        len: meta.len(),
+        modified: meta.modified()?,
+        header,
     })
 }
 
-fn touch_last_sync(marker_path: &Path) -> io::Result<()> {
-    fs::write(marker_path, b"ok")
-}
-
-fn needs_db_update_daily(src: &Path, dst: &Path) -> io::Result<bool> {
-    if fresh_enough(&last_sync_marker_path(dst))? {
-        return Ok(false);
+fn source_state(src: &Path) -> io::Result<(FileState, Option<FileState>)> {
+    // A nonempty rollback journal can mean uncommitted pages are in the main file.
+    if fs::metadata(sqlite_sidecar_path(src, "journal")).map_or_else(
+        |e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        },
+        |m| Ok(m.len() != 0),
+    )? {
+        return Err(io::Error::other(
+            "source has a rollback journal; try again when idle",
+        ));
     }
-
-    let src_meta = fs::metadata(src)
-        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("src meta: {e}")))?;
-    let dst_meta = match fs::metadata(dst) {
-        Ok(m) => m,
-        Err(_) => return Ok(true), // no local db yet
+    let main = file_state(src, 100)?;
+    let wal = match file_state(&sqlite_sidecar_path(src, "wal"), 32) {
+        Ok(state) => Some(state),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
     };
-
-    if src_meta.len() != dst_meta.len() {
-        return Ok(true);
-    }
-    let src_m = src_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let dst_m = dst_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    Ok(src_m > dst_m)
+    Ok((main, wal))
 }
 
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut os: OsString = path.as_os_str().to_os_string();
-    os.push(format!("-{suffix}"));
-    PathBuf::from(os)
-}
-
-fn copy_sqlite_db_with_sidecars(src: &Path, dst: &Path) -> io::Result<()> {
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let tmp_path = dst.with_extension("tmp_copy");
-    if tmp_path.exists() {
-        match fs::remove_file(&tmp_path) {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-
-    fs::copy(src, &tmp_path).map_err(|err| {
-        io::Error::other(format!(
-            "Copying source database {} failed: {err}",
-            src.display()
-        ))
-    })?;
-
-    if dst.exists() {
-        match fs::remove_file(dst) {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-    fs::rename(&tmp_path, dst)?;
-
-    for suffix in ["wal", "shm"] {
-        let src_side = sqlite_sidecar_path(src, suffix);
-        let dst_side = sqlite_sidecar_path(dst, suffix);
-        if src_side.exists() {
-            fs::copy(&src_side, &dst_side).map_err(|err| {
-                io::Error::other(format!(
-                    "Copying SQLite sidecar {} failed: {err}",
-                    src_side.display()
-                ))
-            })?;
-        } else if dst_side.exists() {
-            let _ = fs::remove_file(dst_side);
-        }
-    }
-
+fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
+    // Keep the staging files writable when the NAS files are read-only.
+    io::copy(&mut fs::File::open(src)?, &mut fs::File::create(dst)?)?;
     Ok(())
 }
 
-/// Copy the Plex library database from `plex_library_db_source` into the local cache directory.
-/// When `force` is true the copy happens even if the daily freshness window has not elapsed.
-pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
-    let cfg = load_config();
-    let Some(src_path) = cfg.plex_library_db_source.as_ref() else {
-        return Ok(false);
-    };
-
-    let src = src_path.as_path();
-    if !src.exists() {
-        return Err(format!(
-            "plex_library_db_source does not exist at {}",
-            src.display()
+fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
+    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    if dst.exists() && fs::canonicalize(src)? == fs::canonicalize(dst)? {
+        return Err(io::Error::other(
+            "source and destination refer to the same database",
         ));
     }
-
-    let dst = local_library_db_path();
-
-    let should_copy = if force {
-        true
+    let scratch = tempfile::tempdir_in(parent)?;
+    let staged = tempfile::NamedTempFile::new_in(scratch.path())?.into_temp_path();
+    let staged_path: &Path = staged.as_ref();
+    let before = source_state(src)?;
+    copy_contents(src, staged_path)?;
+    if before.1.is_some() {
+        copy_contents(
+            &sqlite_sidecar_path(src, "wal"),
+            &sqlite_sidecar_path(staged_path, "wal"),
+        )?;
+    }
+    if before != source_state(src)? {
+        return Err(io::Error::other(
+            "source changed during copy; keeping previous snapshot",
+        ));
+    }
+    // Rebuild SHM locally, validate the guide/library schema and let SQLite replay
+    // committed WAL frames. Never copy a live SHM file or touch SQLite on the NAS.
+    let db = Connection::open(staged_path).map_err(io::Error::other)?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM metadata_items), EXISTS(SELECT 1 FROM media_items)",
+        [],
+        |_| Ok(()),
+    )
+    .map_err(io::Error::other)?;
+    db.pragma_update(None, "journal_mode", "DELETE")
+        .map_err(io::Error::other)?;
+    if dst.exists()
+        || ["wal", "shm", "journal"]
+            .iter()
+            .any(|suffix| sqlite_sidecar_path(dst, suffix).exists())
+    {
+        // Restore transactionally into legacy mirrors, including existing local WALs.
+        // An error rolls back without exposing mismatched generations of DB and WAL.
+        db.backup(rusqlite::DatabaseName::Main, dst, None)
+            .map_err(io::Error::other)?;
     } else {
-        match needs_db_update_daily(src, &dst) {
-            Ok(needed) => needed,
-            Err(err) => return Err(format!("Plex library DB freshness check failed: {err}")),
-        }
-    };
+        drop(db);
+        staged.persist_noclobber(dst).map_err(|err| err.error)?;
+    }
+    Ok(())
+}
 
-    if !should_copy {
+fn sync_mirror(src: &Path, dst: &Path, force: bool) -> io::Result<bool> {
+    if !force && !mirror_due(dst) {
         return Ok(false);
     }
-
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "Failed to create Plex library DB directory {}: {err}",
-                parent.display()
-            )
-        })?;
-    }
-
-    info!(
-        "Refreshing Plex library DB copy from {} to {} (force={force})",
-        src.display(),
-        dst.display()
-    );
-
-    copy_sqlite_db_with_sidecars(src, &dst)
-        .map_err(|err| format!("Copying Plex library DB failed: {err}"))?;
-    let marker = last_sync_marker_path(&dst);
-    let _ = touch_last_sync(&marker);
-
+    // Committed WAL frames can change without any change to the main DB file.
+    copy_sqlite_snapshot(src, dst)?;
+    fs::write(last_sync_marker_path(dst), b"ok")?;
     Ok(true)
+}
+
+pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
+    let Some(src) = load_config().plex_library_db_source else {
+        return Ok(false);
+    };
+    sync_mirror(&src, &local_library_db_path(), force)
+        .map_err(|e| format!("Copying Plex library from {} failed: {e}", src.display()))
 }
 
 // Set to true if you want to synthesize a tiny fake list for debugging.
@@ -332,69 +329,23 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         // Optional daily copy from source to local
         if let Some(src_path) = cfg.plex_epg_db_source.as_ref() {
             let src = src_path.as_path();
-            match needs_db_update_daily(src, &db_path) {
-                Ok(true) => {
-                    send(PrepMsg::Info("Stage 2/4 – Copying Plex DB from source (enables offline start-ups). First run may take a while.".into()));
-                    let marker = last_sync_marker_path(&db_path);
-                    let _ = copy_sqlite_db_with_sidecars(src, &db_path);
-                    let _ = touch_last_sync(&marker);
-                }
-                Ok(false) => send(PrepMsg::Info(
-                    "Stage 2/4 – Local Plex DB already fresh; skipping copy.".into(),
+            match sync_mirror(src, &db_path, false) {
+                Ok(true) => send(PrepMsg::Info(
+                    "Stage 2/4 – Copied Plex EPG database.".into(),
                 )),
-                Err(e) => send(PrepMsg::Info(format!(
-                    "Stage 2/4 – Freshness check failed (continuing anyway): {e}"
-                ))),
-            }
-        } else {
-            send(PrepMsg::Info(
-                "Stage 2/4 – Using existing local EPG DB (no source copy configured).".into(),
-            ));
-        }
-
-        // Optional daily copy for the Plex library database
-        let library_db_path = local_library_db_path();
-        if let Some(src_path) = cfg.plex_library_db_source.as_ref() {
-            let src = src_path.as_path();
-            match needs_db_update_daily(src, &library_db_path) {
-                Ok(true) => {
-                    send(PrepMsg::Info(
-                        "Stage 2/4 – Copying Plex library DB from plex_library_db_source.".into(),
-                    ));
-                    info!(
-                        "prep: copying Plex library DB from {} to {}",
-                        src.display(),
-                        library_db_path.display()
-                    );
-                    let marker = last_sync_marker_path(&library_db_path);
-                    match copy_sqlite_db_with_sidecars(src, &library_db_path) {
-                        Ok(_) => {
-                            let _ = touch_last_sync(&marker);
-                            send(PrepMsg::Info(
-                                "Stage 2/4 – Plex library DB copy complete.".into(),
-                            ));
-                        }
-                        Err(err) => {
-                            warn!(
-                                "Copying Plex library DB failed (continuing with existing copy if any): {err}"
-                            );
-                            send(PrepMsg::Info(format!(
-                                "Stage 2/4 – Copying Plex library DB failed: {err}"
-                            )));
-                        }
+                Ok(false) => send(PrepMsg::Info(
+                    "Stage 2/4 – Using fresh local EPG database.".into(),
+                )),
+                Err(err) => {
+                    let message = format!("Copying Plex EPG from {} failed: {err}", src.display());
+                    warn!("{message}");
+                    if !db_path.exists() {
+                        send(PrepMsg::Error(message));
+                        return;
                     }
+                    send(PrepMsg::Info(format!("{message}; using the local copy.")));
                 }
-                Ok(false) => send(PrepMsg::Info(
-                    "Stage 2/4 – Plex library DB already fresh; skipping copy.".into(),
-                )),
-                Err(e) => send(PrepMsg::Info(format!(
-                    "Stage 2/4 – Plex library DB freshness check failed (continuing anyway): {e}"
-                ))),
             }
-        } else {
-            send(PrepMsg::Info(
-                "Stage 2/4 – plex_library_db_source not set; skipping Plex library DB copy.".into(),
-            ));
         }
 
         // Open DB read-only
@@ -486,7 +437,15 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         let mut list: Vec<PrepItem> = Vec::new();
         let mut last_emit = Instant::now();
 
-        while let Ok(Some(row)) = q.next() {
+        loop {
+            let row = match q.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(err) => {
+                    send(PrepMsg::Error(format!("Reading guide rows failed: {err}")));
+                    return;
+                }
+            };
             let title: Option<String> = row.get(0).ok().flatten();
             let url: Option<String> = row.get(1).ok().flatten();
             let begins: Option<i64> = row.get(2).ok().flatten();
@@ -645,7 +604,6 @@ impl crate::app::PexApp {
                                     tags_joined.as_deref(),
                                     channel_display.as_deref(),
                                 );
-                                let owned_key = Self::make_owned_key(&item.title, item.year);
                                 let summary = item.summary.and_then(|s| {
                                     let trimmed = s.trim();
                                     if trimmed.is_empty() {
@@ -675,7 +633,7 @@ impl crate::app::PexApp {
                                     state,
                                     owned: false, // filled in by apply_owned_flags()
                                     owned_modified: None,
-                                    owned_key,
+                                    owned_hd: false,
                                     broadcast_hd,
                                     scheduled: false,
                                 }
@@ -722,14 +680,14 @@ impl crate::app::PexApp {
                         }
 
                         // Scheduled recordings (from Plex library DB)
-                        self.refresh_scheduled_index();
+                        self.apply_scheduled_flags();
 
                         // Owned flags (if ready)
                         self.apply_owned_flags();
                         self.set_startup_progress_floor(crate::app::STARTUP_STAGE2_DONE);
                         let poster_done_status =
                             format!("Poster prep complete. {} items ready.", self.rows.len());
-                        if self.owned_keys.is_some() {
+                        if self.owned_keys.is_some() || !self.owned_scan_in_progress {
                             self.boot_phase = crate::app::BootPhase::Ready;
                             self.set_status(poster_done_status);
                         } else {
@@ -737,7 +695,10 @@ impl crate::app::PexApp {
                             self.set_status("Poster prep complete. Scanning owned library...");
                         }
 
-                        self.start_prefetch(ctx);
+                        self.start_prefetch(
+                            ctx,
+                            std::env::var_os("PEX_DISABLE_PREFETCH").is_some(),
+                        );
                         self.prewarm_first_screen(ctx);
 
                         keep = None;
@@ -764,5 +725,83 @@ impl crate::app::PexApp {
         if seen_any {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    fn source(path: &Path) -> Connection {
+        let db = Connection::open(path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE metadata_items(id INTEGER);
+             CREATE TABLE media_items(id INTEGER);
+             INSERT INTO metadata_items VALUES (1);
+             PRAGMA journal_mode=WAL;
+             PRAGMA wal_autocheckpoint=0;",
+        )
+        .unwrap();
+        db
+    }
+
+    fn count(path: &Path) -> i64 {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT count(*) FROM metadata_items", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn committed_wal_frames_reach_new_and_existing_mirrors() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("mirror.db");
+        let db = source(&src);
+        db.execute("INSERT INTO metadata_items VALUES (2)", [])
+            .unwrap();
+        assert!(sync_mirror(&src, &dst, false).unwrap());
+        assert_eq!(count(&dst), 2);
+        db.execute("INSERT INTO metadata_items VALUES (3)", [])
+            .unwrap();
+        assert!(!sync_mirror(&src, &dst, false).unwrap());
+        fs::remove_file(last_sync_marker_path(&dst)).unwrap();
+        // Simulate a prior version's WAL-mode mirror, open during refresh.
+        let local = Connection::open(&dst).unwrap();
+        local.pragma_update(None, "journal_mode", "WAL").unwrap();
+        local
+            .execute_batch("BEGIN; SELECT * FROM metadata_items;")
+            .unwrap();
+        assert!(sync_mirror(&src, &dst, false).unwrap());
+        assert_eq!(count(&dst), 3);
+        let old_rows: i64 = local
+            .query_row("SELECT count(*) FROM metadata_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(old_rows, 2);
+    }
+
+    #[test]
+    fn missing_mirror_is_recovered_even_with_a_fresh_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("mirror.db");
+        drop(source(&src));
+        fs::write(last_sync_marker_path(&dst), b"ok").unwrap();
+        assert!(sync_mirror(&src, &dst, false).unwrap());
+        assert_eq!(count(&dst), 1);
+    }
+
+    #[test]
+    fn failed_refresh_preserves_previous_mirror_and_remains_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("mirror.db");
+        drop(source(&src));
+        sync_mirror(&src, &dst, false).unwrap();
+        fs::remove_file(last_sync_marker_path(&dst)).unwrap();
+        fs::write(&src, b"invalid SQLite data").unwrap();
+        assert!(sync_mirror(&src, &dst, false).is_err());
+        assert!(mirror_due(&dst));
+        assert_eq!(count(&dst), 1);
     }
 }

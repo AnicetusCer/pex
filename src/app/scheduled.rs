@@ -18,34 +18,37 @@ pub(crate) enum ScheduledMatchKind {
 
 /// Snapshot of Plex DVR scheduled recordings pulled from media_grabs.
 #[derive(Default)]
-pub(crate) struct ScheduledIndex {
+pub struct ScheduledIndex {
     guids: HashSet<String>,
+    guid_slots: HashMap<String, HashSet<i64>>,
     title_slots: HashMap<String, HashSet<i64>>,
 }
 
 impl ScheduledIndex {
     pub fn is_empty(&self) -> bool {
-        self.guids.is_empty() && self.title_slots.is_empty()
+        self.guids.is_empty() && self.guid_slots.is_empty() && self.title_slots.is_empty()
     }
 
-    pub fn match_kind(
+    pub(crate) fn match_kind(
         &self,
         guid: Option<&str>,
         title: &str,
         year: Option<i32>,
         airing: Option<SystemTime>,
     ) -> ScheduledMatchKind {
-        if let Some(g) = guid {
-            if let Some(canonical) = utils::canonicalize_guid(g) {
-                if self.guids.contains(&canonical) {
-                    return ScheduledMatchKind::Guid;
-                }
-            }
-            if self.guids.contains(g) {
+        let airing_ts = airing.and_then(system_time_to_unix);
+        if let Some(guid) = guid.and_then(utils::canonicalize_guid) {
+            if self.guids.contains(&guid)
+                || airing_ts.is_some_and(|slot| {
+                    self.guid_slots
+                        .get(&guid)
+                        .is_some_and(|slots| slots.contains(&slot))
+                })
+            {
                 return ScheduledMatchKind::Guid;
             }
         }
-        let Some(airing_ts) = airing.and_then(system_time_to_unix) else {
+        let Some(airing_ts) = airing_ts else {
             return ScheduledMatchKind::None;
         };
         let Some(key) = make_title_key(title, year) else {
@@ -94,6 +97,11 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
     let conn = Connection::open_with_flags(&path, flags)
         .map_err(|err| format!("open library db failed: {err}"))?;
 
+    let now = system_time_to_unix(SystemTime::now()).unwrap_or_default();
+    read_scheduled_index(&conn, now)
+}
+
+fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, String> {
     let mut stmt = conn
         .prepare(
             r#"
@@ -102,22 +110,16 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
             json_extract(extra_data, '$."mt:guid"')   AS mt_guid,
             json_extract(extra_data, '$."mt:key"')    AS mt_key,
             json_extract(extra_data, '$."mt:title"')  AS mt_title,
-            json_extract(extra_data, '$."mt:year"')   AS mt_year,
-            json_extract(extra_data, '$."me:beginsAt"') AS begins_at
+            CAST(json_extract(extra_data, '$."mt:year"') AS TEXT) AS mt_year,
+            CAST(json_extract(extra_data, '$."me:beginsAt"') AS TEXT) AS begins_at
         FROM media_grabs
-        WHERE extra_data IS NOT NULL
-          AND json_extract(extra_data, '$."me:beginsAt"') IS NOT NULL
+        WHERE json_valid(extra_data)
           AND status IN (0, 1, 2, 3)
         "#,
         )
         .map_err(|err| format!("prepare scheduled query failed: {err}"))?;
 
     let mut index = ScheduledIndex::default();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
     let mut rows = stmt
         .query([])
         .map_err(|err| format!("query scheduled rows failed: {err}"))?;
@@ -129,36 +131,24 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
         };
 
         // Ignore recordings that are far in the past (already completed long ago)
-        if begins_at + 86_400 < now {
+        if begins_at < now.saturating_sub(86_400) {
             continue;
         }
 
-        if let Some(guid) = row
-            .get::<_, Option<String>>("mt_guid")
-            .map_err(|err| err.to_string())?
-            .filter(|g| !g.is_empty())
+        let guid: Option<String> = row.get("mt_guid").map_err(|err| err.to_string())?;
+        let mt_key: Option<String> = row.get("mt_key").map_err(|err| err.to_string())?;
+        if let Some(guid) = guid
+            .as_deref()
+            .and_then(utils::canonicalize_guid)
+            .or_else(|| {
+                mt_key
+                    .as_deref()
+                    .and_then(decode_mt_key)
+                    .as_deref()
+                    .and_then(utils::canonicalize_guid)
+            })
         {
-            if let Some(canonical) = utils::canonicalize_guid(&guid) {
-                index.guids.insert(canonical);
-            } else {
-                index.guids.insert(guid);
-            }
-            continue;
-        }
-
-        if let Some(mt_key) = row
-            .get::<_, Option<String>>("mt_key")
-            .map_err(|err| err.to_string())?
-            .filter(|k| !k.is_empty())
-        {
-            if let Some(decoded) = decode_mt_key(&mt_key) {
-                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
-                    index.guids.insert(canonical);
-                } else {
-                    index.guids.insert(decoded);
-                }
-                continue;
-            }
+            index.guid_slots.entry(guid).or_default().insert(begins_at);
         }
 
         let title_opt: Option<String> = row.get("mt_title").map_err(|err| err.to_string())?;
@@ -174,8 +164,7 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
         }
     }
 
-    load_from_media_subscriptions(&conn, &mut index)?;
-    load_from_subscription_desired(&conn, &mut index)?;
+    load_from_media_subscriptions(conn, &mut index, now)?;
 
     Ok(index)
 }
@@ -183,19 +172,19 @@ pub(crate) fn load_scheduled_index() -> Result<ScheduledIndex, String> {
 fn load_from_media_subscriptions(
     conn: &Connection,
     index: &mut ScheduledIndex,
+    now: i64,
 ) -> Result<(), String> {
     let mut stmt = conn
-        .prepare("SELECT extra_data FROM media_subscriptions WHERE extra_data IS NOT NULL")
+        .prepare(
+            "SELECT s.extra_data, d.remote_id FROM media_subscriptions s
+                  LEFT JOIN metadata_subscription_desired_items d ON d.sub_id = s.id
+                  WHERE s.extra_data IS NOT NULL",
+        )
         .map_err(|err| format!("prepare media_subscriptions failed: {err}"))?;
 
     let mut rows = stmt
         .query([])
         .map_err(|err| format!("query media_subscriptions failed: {err}"))?;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
 
     while let Some(row) = rows.next().map_err(|err| err.to_string())? {
         let blob: Option<String> = row.get(0).map_err(|err| err.to_string())?;
@@ -213,87 +202,51 @@ fn load_from_media_subscriptions(
             }
         };
 
-        let guid = parsed
-            .get("hi:guid")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
-        if let Some(g) = &guid {
-            if let Some(canonical) = utils::canonicalize_guid(g) {
-                index.guids.insert(canonical);
-            } else {
-                index.guids.insert(g.clone());
-            }
-        }
-
-        let title = parsed
-            .get("hi:title")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let year = parsed
-            .get("hi:year")
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse::<i32>().ok());
-        let Some(title) = title else {
-            continue;
-        };
-
-        let airing_times_raw = parsed
+        let times = parsed
             .get("pv:airingTimes")
             .and_then(Value::as_str)
-            .unwrap_or("");
-        let decoded_times = match decode(airing_times_raw) {
-            Ok(cow) => cow,
-            Err(_) => continue,
-        };
+            .and_then(|raw| decode(raw).ok());
+        let slots: Vec<i64> = times
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .filter(|&ts| ts >= now.saturating_sub(86_400))
+            .collect();
 
-        for ts_str in decoded_times.split(',') {
-            let Ok(ts) = ts_str.trim().parse::<i64>() else {
-                continue;
-            };
-            if ts + 86_400 < now {
-                continue;
-            }
-            if let Some(key) = make_title_key(&title, year) {
-                index.title_slots.entry(key).or_default().insert(ts);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn load_from_subscription_desired(
-    conn: &Connection,
-    index: &mut ScheduledIndex,
-) -> Result<(), String> {
-    let mut stmt = conn
-        .prepare("SELECT remote_id FROM metadata_subscription_desired_items")
-        .map_err(|err| format!("prepare metadata_subscription_desired_items failed: {err}"))?;
-
-    let mut rows = stmt
-        .query([])
-        .map_err(|err| format!("query metadata_subscription_desired_items failed: {err}"))?;
-
-    while let Some(row) = rows.next().map_err(|err| err.to_string())? {
-        let remote: Option<String> = row.get(0).map_err(|err| err.to_string())?;
-        let Some(remote) = remote else {
-            continue;
-        };
-        if remote.trim().is_empty() {
-            continue;
-        }
-        match decode(&remote) {
-            Ok(cow) => {
-                let decoded = cow.into_owned();
-                if let Some(canonical) = utils::canonicalize_guid(&decoded) {
-                    index.guids.insert(canonical);
-                } else {
-                    index.guids.insert(decoded);
+        let one_shot = parsed.get("pr:oneShot").is_some_and(|v| {
+            v.as_bool() == Some(true)
+                || v.as_i64() == Some(1)
+                || v.as_str()
+                    .is_some_and(|text| text == "1" || text.eq_ignore_ascii_case("true"))
+        });
+        let remote: Option<String> = row.get(1).map_err(|err| err.to_string())?;
+        for guid in [
+            parsed.get("hi:guid").and_then(Value::as_str),
+            remote.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(utils::canonicalize_guid)
+        {
+            if one_shot {
+                if !slots.is_empty() {
+                    index.guid_slots.entry(guid).or_default().extend(&slots);
                 }
+            } else {
+                index.guids.insert(guid);
             }
-            Err(err) => {
-                warn!("Failed to decode metadata_subscription_desired_items remote_id {remote}: {err}");
+        }
+        if let Some(title) = parsed.get("hi:title").and_then(Value::as_str) {
+            let year = parsed.get("hi:year").and_then(|val| {
+                val.as_i64()
+                    .and_then(|y| i32::try_from(y).ok())
+                    .or_else(|| val.as_str().and_then(|s| s.parse().ok()))
+            });
+            if let Some(key) = make_title_key(title, year) {
+                if !slots.is_empty() {
+                    index.title_slots.entry(key).or_default().extend(slots);
+                }
             }
         }
     }
@@ -308,6 +261,57 @@ fn decode_mt_key(mt_key: &str) -> Option<String> {
         Err(err) => {
             warn!("Failed to decode mt:key {encoded}: {err}");
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_one_shot_recording_marks_only_its_selected_airing() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"
+            CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+            CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+            CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);
+            INSERT INTO media_grabs VALUES
+                (0, '{"mt:guid":"plex://grab","mt:title":"Guide title","mt:year":2023,"me:beginsAt":200000}'),
+                (0, 'malformed legacy entry');
+            INSERT INTO media_subscriptions VALUES
+                (1, '{"pr:oneShot":"1","hi:guid":"plex://one","pv:airingTimes":"200000"}'),
+                (2, '{"pr:oneShot":"0","hi:guid":"plex://all"}'),
+                (3, '{"pr:oneShot":"1","hi:guid":"plex://past","pv:airingTimes":"10"}');
+            INSERT INTO metadata_subscription_desired_items VALUES
+                (1, 'plex%3A%2F%2Fdesired'),
+                (99, 'plex%3A%2F%2Forphan');
+        "#).unwrap();
+        let index = read_scheduled_index(&db, 190000).unwrap();
+        let slot = |ts| Some(UNIX_EPOCH + std::time::Duration::from_secs(ts));
+        for guid in ["plex://one", "plex://desired", "plex://grab"] {
+            assert_eq!(
+                index.match_kind(Some(guid), "", None, slot(200000)),
+                ScheduledMatchKind::Guid
+            );
+            assert_eq!(
+                index.match_kind(Some(guid), "", None, slot(210000)),
+                ScheduledMatchKind::None
+            );
+        }
+        assert_eq!(
+            index.match_kind(None, "Guide title", Some(2023), slot(200000)),
+            ScheduledMatchKind::TitleSlot
+        );
+        assert_eq!(
+            index.match_kind(Some("plex://all"), "", None, slot(210000)),
+            ScheduledMatchKind::Guid
+        );
+        for guid in ["plex://past", "plex://orphan"] {
+            assert_eq!(
+                index.match_kind(Some(guid), "", None, slot(200000)),
+                ScheduledMatchKind::None
+            );
         }
     }
 }

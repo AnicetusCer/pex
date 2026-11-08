@@ -10,7 +10,7 @@ use tracing::error;
 
 #[cfg(target_os = "linux")]
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{filter::LevelFilter, EnvFilter};
 
 fn pick_renderer() -> eframe::Renderer {
     match env::var("PEX_RENDERER").as_deref() {
@@ -32,7 +32,13 @@ fn pick_renderer() -> eframe::Renderer {
 
 fn main() -> eframe::Result<()> {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            let level = pex::config::load_config()
+                .log_level
+                .and_then(|value| value.trim().parse::<LevelFilter>().ok())
+                .unwrap_or(LevelFilter::INFO);
+            EnvFilter::new(level.to_string())
+        }))
         .try_init();
 
     #[cfg(target_os = "linux")]

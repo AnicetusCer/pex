@@ -6,7 +6,6 @@
 /gitignore-config.json
 db/*
 !db/.gitkeep
-Cargo.lock
 *.Zone.Identifier
 make_portable/dist/
 make_portable/*.zip

@@ -84,7 +84,7 @@ impl crate::app::PexApp {
 
                 // hide-owned, but KEEP rows that are HD upgrades (airing HD while owned is SD)
                 if self.hide_owned && row.owned {
-                    let owned_is_hd = self.row_owned_is_hd(row);
+                    let owned_is_hd = row.owned_hd;
 
                     let is_upgrade = broadcast_hd && !owned_is_hd;
                     if !is_upgrade {

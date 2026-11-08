@@ -8,10 +8,14 @@ use eframe::egui as eg;
 use self::owned_scan_plex::OwnedScanPlex;
 use crate::app::types::OwnedMsg;
 
+// v1 sidecars contain franchise prefixes and synthetic years indistinguishable from real titles.
+pub(super) const ALL_SIDECAR: &str = "owned_all_v2.txt";
+pub(super) const HD_SIDECAR: &str = "owned_hd_v2.txt";
+
 impl crate::app::PexApp {
     /// Kick off a non-blocking owned scan against the Plex library database.
-    pub(crate) fn start_owned_scan(&mut self) {
-        if self.owned_rx.is_some() {
+    pub(crate) fn start_owned_scan(&mut self, force_copy: bool) {
+        if self.owned_scan_in_progress {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
@@ -25,7 +29,7 @@ impl crate::app::PexApp {
         self.set_status(
             "Stage 3/4 - Loading owned titles from Plex (marks Owned titles and HD upgrades).",
         );
-        OwnedScanPlex::spawn_scan(tx);
+        OwnedScanPlex::spawn_scan(tx, force_copy);
     }
 
     /// Apply the owned flags using the computed key set (no-ops if not ready).
@@ -39,77 +43,86 @@ impl crate::app::PexApp {
         let guid_modified = self.owned_guid_modified.as_ref();
         let modified = self.owned_modified.as_ref();
         for row in &mut self.rows {
-            let base_key = row.owned_key.clone();
-            let mut matched_key: Option<String> = None;
-            let matched_guid = row
+            let guid = row
                 .guid
                 .as_deref()
                 .and_then(crate::app::utils::canonicalize_guid)
                 .filter(|guid| owned_guids.is_some_and(|set| set.contains(guid)));
-
-            for candidate in Self::owned_key_variants(&row.title, row.year) {
-                if keys.contains(&candidate) {
-                    matched_key = Some(candidate);
-                    break;
-                }
-            }
-
-            if matched_key.is_none() && keys.contains(&base_key) {
-                matched_key = Some(base_key.clone());
-            }
-
-            if let Some(found) = matched_key {
+            if let Some(guid) = guid {
                 row.owned = true;
-                row.owned_key = found.clone();
-                row.owned_modified = modified.and_then(|m| m.get(&found)).and_then(|v| *v);
-                self.owned_match_stats.by_key += 1;
-            } else if let Some(guid) = matched_guid {
-                row.owned = true;
-                row.owned_key = base_key;
-                row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).and_then(|v| *v);
+                row.owned_hd = self
+                    .owned_hd_guids
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&guid));
+                row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).copied().flatten();
                 self.owned_match_stats.by_guid += 1;
+            } else if let Some(key) = Self::match_owned_title(&row.title, row.year, keys) {
+                row.owned = true;
+                row.owned_hd = self
+                    .owned_hd_keys
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&key));
+                row.owned_modified = modified.and_then(|m| m.get(&key)).copied().flatten();
+                self.owned_match_stats.by_key += 1;
             } else {
                 row.owned = false;
-                row.owned_key = base_key;
+                row.owned_hd = false;
                 row.owned_modified = None;
                 self.owned_match_stats.misses += 1;
             }
         }
     }
 
-    pub(crate) fn owned_key_variants(title: &str, year: Option<i32>) -> Vec<String> {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut variants: Vec<String> = Vec::new();
+    // The library records the real year. Only a lookup may try adjacent years.
+    fn library_title_keys(title: &str, year: Option<i32>) -> Vec<String> {
+        let mut keys = Vec::new();
+        let suffix = year.map_or_else(|| "undated".to_string(), |y| y.to_string());
+        for name in Self::owned_title_variants(title) {
+            keys.push(format!("{name}:any"));
+            keys.push(format!("{name}:{suffix}"));
+        }
+        keys
+    }
 
-        let titles = Self::owned_title_variants(title);
-        let mut year_candidates: Vec<Option<i32>> = Vec::new();
-        if let Some(y) = year {
-            for offset in [0, -1, 1] {
-                let candidate = y.saturating_add(offset);
-                if candidate > 0 {
-                    year_candidates.push(Some(candidate));
-                }
+    fn match_owned_title(title: &str, year: Option<i32>, keys: &HashSet<String>) -> Option<String> {
+        let year = year.or_else(|| Self::trailing_title_year(title).map(|(_, year)| year));
+        let names = Self::owned_title_variants(title);
+        let find = |suffix: &str| {
+            names
+                .iter()
+                .map(|name| format!("{name}:{suffix}"))
+                .find(|key| keys.contains(key))
+        };
+        let Some(year) = year else {
+            return find("any");
+        };
+        for candidate in [Some(year), year.checked_sub(1), year.checked_add(1)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(key) = find(&candidate.to_string()) {
+                return Some(key);
             }
         }
-        year_candidates.push(None);
 
-        for variant_title in titles {
-            for candidate_year in &year_candidates {
-                let key = Self::make_owned_key(&variant_title, *candidate_year);
-                if seen.insert(key.clone()) {
-                    variants.push(key);
-                }
-            }
+        // One source may omit a subtitle. Require the same year and a bare title on
+        // one side, so two different subtitled films never meet through a prefix.
+        let (kind, name) = match title.split_once(':') {
+            Some((head, _)) => ("bare", head),
+            None => ("prefix", title),
+        };
+        let short_key = Self::short_title_key(kind, name, year);
+        if keys.contains(&short_key) {
+            return Some(short_key);
         }
+        find("undated")
+    }
 
-        if variants.is_empty() {
-            let key = Self::make_owned_key(title, year);
-            if seen.insert(key.clone()) {
-                variants.push(key);
-            }
-        }
-
-        variants
+    fn short_title_key(kind: &str, title: &str, year: i32) -> String {
+        format!(
+            "{kind}:{}:{year}",
+            crate::app::utils::normalize_title(title)
+        )
     }
 
     fn owned_title_variants(title: &str) -> Vec<String> {
@@ -120,13 +133,6 @@ impl crate::app::PexApp {
 
         let mut titles = Vec::new();
         titles.push(trimmed.to_string());
-
-        if let Some(idx) = trimmed.find(':') {
-            let head = trimmed[..idx].trim();
-            if !head.is_empty() && head != trimmed {
-                titles.push(head.to_string());
-            }
-        }
 
         // Handle possessive prefixes like "Lemony Snicket's A Series of ..."
         // so we also match library entries that drop the leading proper name.
@@ -159,8 +165,8 @@ impl crate::app::PexApp {
             if let Some(candidate) = Self::variant_drop_g_suffix(existing) {
                 extra.push(candidate);
             }
-            if let Some(candidate) = Self::variant_strip_trailing_year(existing) {
-                extra.push(candidate);
+            if let Some((candidate, _)) = Self::trailing_title_year(existing) {
+                extra.push(candidate.to_string());
             }
             if let Some(candidate) = Self::variant_swap_word(existing, "thru", "through") {
                 extra.push(candidate);
@@ -170,9 +176,12 @@ impl crate::app::PexApp {
             }
         }
         titles.extend(extra);
-        titles.sort();
-        titles.dedup();
+        let mut seen = HashSet::new();
         titles
+            .into_iter()
+            .map(|title| crate::app::utils::normalize_title(&title))
+            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+            .collect()
     }
 
     fn variant_drop_g_suffix(input: &str) -> Option<String> {
@@ -212,21 +221,13 @@ impl crate::app::PexApp {
         changed.then(|| words.join(" "))
     }
 
-    fn variant_strip_trailing_year(input: &str) -> Option<String> {
-        let trimmed = input.trim();
-        if trimmed.ends_with(')') {
-            if let Some(open) = trimmed.rfind('(') {
-                let candidate = trimmed[..open].trim_end();
-                let year_part = &trimmed[open + 1..trimmed.len() - 1];
-                if year_part.len() == 4
-                    && year_part.chars().all(|c| c.is_ascii_digit())
-                    && !candidate.is_empty()
-                {
-                    return Some(candidate.to_string());
-                }
-            }
+    fn trailing_title_year(title: &str) -> Option<(&str, i32)> {
+        let (name, digits) = title.trim().strip_suffix(')')?.rsplit_once('(')?;
+        let name = name.trim_end();
+        if name.is_empty() || digits.len() != 4 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
         }
-        None
+        Some((name, digits.parse().ok()?))
     }
 
     /// Drain owned-scan messages without blocking the UI thread.
@@ -243,6 +244,7 @@ impl crate::app::PexApp {
                     Ok(m) => m,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.owned_rx = None;
                         self.owned_scan_in_progress = false;
                         self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                         if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
@@ -259,6 +261,16 @@ impl crate::app::PexApp {
                     self.owned_scan_in_progress = true;
                     self.set_status(s);
                 }
+                OwnedMsg::Scheduled(result) => match result {
+                    Ok(index) => {
+                        self.scheduled_index = (!index.is_empty()).then_some(index);
+                        self.apply_scheduled_flags();
+                        self.mark_dirty();
+                    }
+                    Err(err) => self.record_owned_message(format!(
+                        "Loading scheduled recordings failed: {err}"
+                    )),
+                },
                 Error(e) => {
                     let msg = format!("Owned scan error: {e}");
                     self.record_owned_message(msg.clone());
@@ -295,6 +307,7 @@ impl crate::app::PexApp {
                     let crate::app::types::OwnedDone {
                         keys,
                         guids,
+                        hd_keys,
                         hd_guids,
                         guid_modified,
                         modified,
@@ -348,6 +361,12 @@ impl crate::app::PexApp {
                         if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                             self.boot_phase = crate::app::BootPhase::Ready;
                         }
+                        if self.owned_retry_next.is_none() {
+                            self.owned_hd_keys = Some(hd_keys);
+                            self.owned_modified = Some(modified);
+                            self.apply_owned_flags();
+                            self.mark_dirty();
+                        }
                         continue;
                     }
 
@@ -357,7 +376,7 @@ impl crate::app::PexApp {
                     let count = keys.len();
                     self.owned_keys = Some(keys);
                     self.owned_guids = Some(guids);
-                    self.owned_hd_keys = Self::load_owned_hd_sidecar();
+                    self.owned_hd_keys = Some(hd_keys);
                     self.owned_hd_guids = Some(hd_guids);
                     self.owned_guid_modified = Some(guid_modified);
                     self.owned_modified = Some(modified);

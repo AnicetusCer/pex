@@ -160,7 +160,7 @@ impl crate::app::PexApp {
 
                                             // --- Compute statuses (needed for badges & dimming) ---
                                             let broadcast_hd = Self::row_broadcast_hd(row);
-                                            let owned_is_hd = self.row_owned_is_hd(row);
+                                            let owned_is_hd = row.owned_hd;
                                             let better_hd_available =
                                                 row.owned && !owned_is_hd && broadcast_hd;
 

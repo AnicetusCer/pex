@@ -17,6 +17,7 @@ static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug, Default)]
 pub struct AppConfig {
+    pub log_level: Option<String>,
     pub cache_dir: Option<PathBuf>,
     pub plex_epg_db_source: Option<PathBuf>,
     pub plex_library_db_source: Option<PathBuf>,
@@ -25,6 +26,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+    log_level: Option<String>,
     cache_dir: Option<String>,
     #[serde(alias = "plex_db_source")]
     plex_epg_db_source: Option<String>,
@@ -138,6 +140,7 @@ pub fn load_config() -> AppConfig {
     if let Some((path, raw)) = read_config_source() {
         match serde_json::from_str::<RawConfig>(&raw) {
             Ok(mut parsed) => {
+                cfg.log_level = parsed.log_level;
                 if let Some(cache_dir) = parsed.cache_dir.take() {
                     let trimmed = cache_dir.trim();
                     if !trimmed.is_empty() {

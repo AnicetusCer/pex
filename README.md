@@ -2,7 +2,7 @@
 
 ![Film discovery grid](src/assets/PEXFilmEPG.png)
 
-If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this project is for you. Pex is as my personal way to dig through two weeks of Plex DVR listings, decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
+If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this project is for you. Pex is my personal way to dig through two weeks of Plex DVR listings, decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
 
 Pex helps you:
 - Browse up to 14 days of film listings in the Plex EPG with a poster-forward layout.
@@ -30,8 +30,8 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 
 - Releases live on the [GitHub Releases page](https://github.com/AnicetusCer/pex/releases); each tagged version includes portable bundles.
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
-- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.3` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
-- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.3` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
+- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.4` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
+- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.4` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
 - Release helpers also upload `checksums-<platform>-<tag>.txt` so each zip can be verified after download.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
 
@@ -48,8 +48,8 @@ Verify the zip against the published checksum file before running.
 ### Windows (PowerShell)
 
 ```powershell
-$zip = "pex-portable-windows-x86_64-v1.2.3.zip"
-$checksums = "checksums-windows-x86_64-v1.2.3.txt"
+$zip = "pex-portable-windows-x86_64-v1.2.4.zip"
+$checksums = "checksums-windows-x86_64-v1.2.4.txt"
 
 $line = Get-Content $checksums | Where-Object { $_ -like "*`*$zip" } | Select-Object -First 1
 if (-not $line) { throw "No checksum entry found for $zip" }
@@ -62,7 +62,7 @@ if ($expected -eq $actual) { "OK: checksum matches." } else { "ERROR: checksum m
 ### Linux
 
 ```bash
-sha256sum -c checksums-linux-x86_64-v1.2.3.txt
+sha256sum -c checksums-linux-x86_64-v1.2.4.txt
 ```
 
 Expected output: `...zip: OK`
@@ -92,7 +92,7 @@ Highlights:
 demand, keeping the UI responsive even on large guides.
 - 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
 and genre selectors, plus multiple sort orders.
-- ?? **Owned library awareness** - mirrored Plex library data feeds owned/HD badges and "recorded on" timestamps directly into the grid.
+- **Owned library awareness** - mirrored Plex library data feeds owned/HD badges and "recorded on" timestamps directly into the grid.
 - 🎯 **DVR awareness** – scheduled recordings show a red *REC* badge and detail call-out pulled from the Plex library database.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional TMDb ratings, and formatted descriptions.
@@ -107,7 +107,7 @@ Pex runs on Windows, macOS, and Linux (including WSL) using
 
 - `src/`
   - `main.rs` / `lib.rs` – launch the egui app and wire tracing.
-  - `config.rs` – parses `pex-config.json` (or `~/.pex-config.json`), owns `OwnedSourceKind`, and exposes helper paths for the copied databases.
+  - `config.rs` – parses `pex-config.json` (or `~/.pex-config.json`), and exposes helper paths for the copied databases.
   - `app/`
     - `mod.rs` – central application state, message pump, advanced actions, and egui integration.
     - `prep.rs` – copies the Plex databases (daily freshness), queries poster rows, and emits `PrepMsg`.
@@ -142,8 +142,7 @@ the accompanying WAL/SHM files) exist on disk.
 - Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or point `plex_epg_db_source` at the live Plex database so Pex pulls in a fresh copy once per day.
 
 ### Toolchain
-- Rust toolchain **1.74 or newer** (`rustup toolchain install stable`)
-- Cargo (bundled with Rust)
+- Rust toolchain with Cargo (the 1.2.4 builds use Rust 1.94)
 - Git (to clone the repository)
 
 ### External services
@@ -161,7 +160,7 @@ the accompanying WAL/SHM files) exist on disk.
    ```
 
 2. **Populate the database folder**
-   - Copy your Plex EPG SQLite file into `db/plex_epg.db`, *or*
+   - Copy your Plex EPG SQLite file into `db/plex_epg.db` beside the executable (for a release build from source, `target/release/db/plex_epg.db`), *or*
    - Set `plex_epg_db_source` in `pex-config.json` to the path of Plex’s live DB so Pex can refresh `db/plex_epg.db` automatically.
    - Do the same for your Plex library database: copy it into `db/plex_library.db` or set `plex_library_db_source` and let Pex maintain the mirror. Owned detection relies on this copy so you don’t have to crawl your filesystem.
 
@@ -169,7 +168,7 @@ the accompanying WAL/SHM files) exist on disk.
 
 4. **Build and run the app**
    ```bash
-   cargo run --release
+   cargo run --release --locked
    ```
    The first launch will
    - copy the Plex database if `plex_epg_db_source` is set,
@@ -191,7 +190,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
 | `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
-| `log_level` | string | `info` | Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
+| `log_level` | string | `info` | Sets the default tracing level when `RUST_LOG` is unset. Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
 
 Example configuration:
 
@@ -230,7 +229,7 @@ Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Ple
 
 ### Other useful keys
 
-- `cache_dir` – move the poster/owned/UI cache elsewhere; relative paths are resolved relative to the repo root.
+- `cache_dir` – move the poster/owned/UI cache elsewhere; relative paths are resolved from the executable directory (or `PEX_BASE_DIR` when set).
 - `tmdb_api_key` – add your TMDb V3 API key to enable the on-demand rating button.
 - `log_level` – override the default tracing verbosity (`trace` → most verbose).
 
@@ -270,12 +269,11 @@ the status bar). Large libraries may take several minutes.
 - If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
   day whether the respective database copy needs refreshing.
 - Scheduled recordings sync automatically after poster prep; queued movies show a red *REC* badge in the grid and detail panel.
-- Owned and HD badges stay up-to-date thanks to incremental scanning of the mirrored Plex library database.
+- Owned and HD badges stay up-to-date thanks to scanning the mirrored Plex library database.
 
 ### Keeping the owned cache fresh
 - Use **Advanced ▸ Refresh owned scan** after adding/removing many files.
-- Use **Advanced ▸ Clear owned cache** only when you want a full rescan from
-  scratch (e.g., after reorganising folder structures).
+- On the first run after upgrading from 1.2.3, Pex scans the library and writes a new owned cache automatically.
 
 ### Poster cache maintenance
 - **Advanced ▸ Clear & rebuild poster cache** wipes cached artwork and immediately restarts prefetching.

@@ -16,22 +16,20 @@ static POSTER_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static CHANNEL_ICON_DIR_ONCE: OnceLock<PathBuf> = OnceLock::new();
 static POSTER_PRUNE_ONCE: Once = Once::new();
 
+// Limit format negotiation to artwork this build can decode.
+const POSTER_ACCEPT: &str = "image/webp,image/jpeg,image/png";
 const POSTER_RETENTION_DAYS: u64 = 14;
 const POSTER_RETENTION_SECS: u64 = POSTER_RETENTION_DAYS * 24 * 60 * 60;
 
 pub fn cache_dir() -> PathBuf {
     CACHE_DIR_ONCE
         .get_or_init(|| {
-            let cfg = load_config();
-            let mut path = normalize_dir(
-                cfg.cache_dir
-                    .unwrap_or_else(|| resolve_relative_path(".pex_cache")),
-            );
+            let mut path = preferred_cache_dir(load_config().cache_dir);
 
             if let Err(e) = fs::create_dir_all(&path) {
                 warn!("failed to create cache dir {}: {e}", path.display());
                 // Fall back to local folder if creation failed
-                path = normalize_dir(resolve_relative_path(".pex_cache"));
+                path = preferred_cache_dir(None);
                 let _ = fs::create_dir_all(&path);
             }
             path
@@ -52,7 +50,7 @@ pub fn poster_cache_dir() -> PathBuf {
     POSTER_PRUNE_ONCE.call_once({
         let path = dir.clone();
         move || {
-            if let Err(err) = prune_poster_cache_in_dir(&path) {
+            if let Err(err) = prune_poster_cache_in_dir(&path, path == cache_dir()) {
                 warn!("poster cache prune failed: {err}");
             }
         }
@@ -63,10 +61,54 @@ pub fn poster_cache_dir() -> PathBuf {
 
 fn prune_poster_cache_if_needed() -> std::io::Result<usize> {
     let dir = poster_cache_dir();
-    prune_poster_cache_in_dir(&dir)
+    prune_poster_cache_in_dir(&dir, dir == cache_dir())
 }
 
-fn prune_poster_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
+pub(crate) fn clear_poster_cache() -> std::io::Result<usize> {
+    clear_poster_files(&poster_cache_dir(), &super::prefs::hotset_manifest_path())
+}
+
+fn clear_poster_files(poster_dir: &Path, hotset: &Path) -> std::io::Result<usize> {
+    let mut removed = 0;
+    for entry in fs::read_dir(poster_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+        if !matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "rgba"
+        ) {
+            continue;
+        }
+        // If posters/ could not be created, cached posters live alongside the user's files.
+        if hotset.parent() == Some(poster_dir) && !has_poster_key(&path) {
+            continue;
+        }
+        fs::remove_file(path)?;
+        removed += 1;
+    }
+    match fs::remove_file(hotset) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    Ok(removed)
+}
+
+fn has_poster_key(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("");
+    let stem = stem.strip_prefix("rgba_").unwrap_or(stem);
+    let digest = stem.strip_suffix("__s").unwrap_or(stem);
+    digest.len() == 32 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn prune_poster_cache_in_dir(dir: &Path, shared_dir: bool) -> std::io::Result<usize> {
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs(POSTER_RETENTION_SECS))
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -77,18 +119,30 @@ fn prune_poster_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
             continue;
         }
         let path = entry.path();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let ext = ext.to_ascii_lowercase();
-            if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba") {
-                continue;
-            }
-        } else {
+        if shared_dir && !has_poster_key(&path) {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "rgba") {
             continue;
         }
         let metadata = entry.metadata()?;
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        if modified < cutoff {
-            let _ = fs::remove_file(&path);
+        let broken_rgba = ext == "rgba"
+            && fs::File::open(&path)
+                .and_then(|mut file| rgba_dimensions(&mut file))
+                .is_err_and(|err| {
+                    matches!(
+                        err.kind(),
+                        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                    )
+                });
+        if modified < cutoff || broken_rgba || metadata.len() == 0 {
+            fs::remove_file(&path)?;
             removed += 1;
         }
     }
@@ -97,6 +151,29 @@ fn prune_poster_cache_in_dir(dir: &Path) -> std::io::Result<usize> {
 
 pub fn url_to_cache_key(url: &str) -> String {
     format!("{:x}", md5::compute(url.as_bytes()))
+}
+
+fn rgba_byte_count(width: u32, height: u32) -> Option<u64> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    (u64::from(width) * u64::from(height)).checked_mul(4)
+}
+
+fn rgba_dimensions(file: &mut fs::File) -> std::io::Result<(u32, u32)> {
+    let mut width = [0; 4];
+    let mut height = [0; 4];
+    file.read_exact(&mut width)?;
+    file.read_exact(&mut height)?;
+    let (w, h) = (u32::from_le_bytes(width), u32::from_le_bytes(height));
+    let payload_len = file.metadata()?.len().checked_sub(8);
+    if payload_len.is_none() || rgba_byte_count(w, h) != payload_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "RGBA dimensions do not match the file length",
+        ));
+    }
+    Ok((w, h))
 }
 
 /// Return (width, height, RGBA8 bytes) from either an image file (.png/.jpg/.jpeg/.webp)
@@ -113,14 +190,13 @@ pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String>
     {
         if ext == "rgba" {
             let mut f = fs::File::open(p).map_err(|e| format!("open rgba: {e}"))?;
-            let mut header = [0u8; 8];
-            f.read_exact(&mut header)
-                .map_err(|e| format!("read header: {e}"))?;
-            let w = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
-            let h = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+            let (w, h) = rgba_dimensions(&mut f).map_err(|e| format!("invalid rgba: {e}"))?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)
                 .map_err(|e| format!("read body: {e}"))?;
+            if Some(buf.len() as u64) != rgba_byte_count(w, h) {
+                return Err("RGBA payload length changed while reading".into());
+            }
             return Ok((w, h, buf));
         }
     }
@@ -155,7 +231,7 @@ pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
     None
 }
 
-/// Download, normalize to PNG or RGBA and store in cache. Returns the stored path.
+/// Download, normalize to PNG and store in cache. Returns the stored path.
 pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -164,6 +240,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
 
     let resp = client
         .get(url)
+        .header(reqwest::header::ACCEPT, POSTER_ACCEPT)
         .send()
         .map_err(|e| format!("GET {url}: {e}"))?;
     if !resp.status().is_success() {
@@ -174,38 +251,15 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("read body: {e}"))?
         .to_vec();
 
-    // Try decode with image crate
-    match image::load_from_memory(&body) {
-        Ok(img) => {
-            let out = poster_cache_dir().join(format!("{key}.png"));
-            let mut f =
-                fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-            let mut png_bytes: Vec<u8> = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
-                .map_err(|e| format!("encode png: {e}"))?;
-            f.write_all(&png_bytes)
-                .map_err(|e| format!("write {}: {e}", out.display()))?;
-            let _ = prune_poster_cache_if_needed();
-            Ok(out)
-        }
-        Err(e) => {
-            warn!("image decode failed for {url}: {e}; storing raw");
-            // Store as rgba with w/h header if we really fail (rare)
-            let out = poster_cache_dir().join(format!("{key}.rgba"));
-            let mut f =
-                fs::File::create(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
-            // We don't know w/h here; write zeros so loader will reject gracefully
-            f.write_all(&0u32.to_le_bytes())
-                .map_err(|e| format!("write hdr: {e}"))?;
-            f.write_all(&0u32.to_le_bytes())
-                .map_err(|e| format!("write hdr: {e}"))?;
-            f.write_all(&body)
-                .map_err(|e| format!("write {}: {e}", out.display()))?;
-            let _ = prune_poster_cache_if_needed();
-            Ok(out)
-        }
-    }
+    let img = image::load_from_memory(&body).map_err(|e| format!("decode poster: {e}"))?;
+    let mut png_bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .map_err(|e| format!("encode png: {e}"))?;
+    let out = poster_cache_dir().join(format!("{key}.png"));
+    fs::write(&out, png_bytes).map_err(|e| format!("write {}: {e}", out.display()))?;
+    Ok(out)
 }
+
 /// Download an image, resize to `max_width` (keeping aspect), and store as JPEG with `quality`.
 ///
 /// Returns the on-disk path. Falls back to `download_and_store` if decode/resize fails.
@@ -235,6 +289,7 @@ pub fn download_and_store_resized(
 
     let bytes = client
         .get(url)
+        .header(reqwest::header::ACCEPT, POSTER_ACCEPT)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
@@ -282,7 +337,6 @@ pub fn download_and_store_resized(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
-    let _ = prune_poster_cache_if_needed();
     Ok(dest)
 }
 
@@ -296,6 +350,7 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
         return Ok(0);
     }
 
+    let shared_dir = dir == cache_dir();
     let mut removed = 0usize;
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
@@ -304,6 +359,9 @@ pub fn refresh_poster_cache_light() -> std::io::Result<usize> {
             continue;
         }
 
+        if shared_dir && !has_poster_key(&path) {
+            continue;
+        }
         let metadata = entry.metadata()?;
         let ext = path
             .extension()
@@ -366,6 +424,7 @@ pub fn ensure_channel_icon(url: &str) -> Result<PathBuf, String> {
 
     let bytes = client
         .get(url)
+        .header(reqwest::header::ACCEPT, POSTER_ACCEPT)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
@@ -419,19 +478,13 @@ pub fn download_and_store_resized_with_client(
     // Download bytes using shared client
     let bytes = client
         .get(url)
+        .header(reqwest::header::ACCEPT, POSTER_ACCEPT)
         .send()
         .and_then(|r| r.error_for_status())
         .and_then(|r| r.bytes())
         .map_err(|e| format!("download bytes: {e}"))?;
 
-    // Try to decode the image
-    let img = match image::load_from_memory(&bytes) {
-        Ok(img) => img,
-        Err(_) => {
-            // Fallback to original path via existing helper
-            return download_and_store(url, key);
-        }
-    };
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("decode poster: {e}"))?;
 
     // Resize if needed, keep aspect
     let (w, h) = img.dimensions();
@@ -466,21 +519,70 @@ pub fn download_and_store_resized_with_client(
     }
     fs::rename(&tmp, &dest).map_err(|e| format!("rename: {e}"))?;
 
-    let _ = prune_poster_cache_if_needed();
     Ok(dest)
 }
 
-#[allow(clippy::missing_const_for_fn)]
-fn normalize_dir(p: PathBuf) -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let s = p.to_string_lossy();
-        let fixed = s.replace('/', "\\").replace("\\\\", "\\");
-        PathBuf::from(fixed)
+fn preferred_cache_dir(configured: Option<PathBuf>) -> PathBuf {
+    configured.unwrap_or_else(|| resolve_relative_path(".pex_cache"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn cache_directory_preserves_unc_share_and_verbatim_prefix() {
+        for share in [
+            r"\\media-server\cache\pex",
+            r"\\?\UNC\media-server\cache\pex",
+        ] {
+            let path = preferred_cache_dir(Some(PathBuf::from(share)));
+            assert!(path.is_absolute());
+            assert_eq!(path.as_os_str(), std::ffi::OsStr::new(share));
+        }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        p
+    #[test]
+    fn rebuild_clears_posters_and_hotset_but_preserves_other_cache_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let posters = root.join("posters");
+        fs::create_dir(&posters).unwrap();
+        let poster = posters.join("movie.jpg");
+        let hotset = root.join("hotset.txt");
+        let owned = root.join("owned_all.txt");
+        let unrelated = root.join("photo.png");
+        for file in [&poster, &hotset, &owned, &unrelated] {
+            fs::write(file, b"fixture").unwrap();
+        }
+        assert_eq!(clear_poster_files(&posters, &hotset).unwrap(), 1);
+        assert!(!poster.exists() && !hotset.exists());
+        assert!(owned.exists() && unrelated.exists());
+
+        let fallback_poster = root.join("00001111222233334444555566667777__s.jpg");
+        fs::write(&fallback_poster, b"fixture").unwrap();
+        assert_eq!(clear_poster_files(root, &hotset).unwrap(), 1);
+        assert!(!fallback_poster.exists());
+        assert!(owned.exists() && unrelated.exists());
+    }
+
+    #[test]
+    fn prune_discards_unusable_raw_artwork_and_keeps_valid_rgba() {
+        let tmp = tempfile::tempdir().unwrap();
+        let valid = tmp.path().join("ok.rgba");
+        let zero = tmp.path().join("http-error.rgba");
+        let short = tmp.path().join("short.rgba");
+        let mut payload = [2u32.to_le_bytes(), 3u32.to_le_bytes()].concat();
+        payload.extend([0; 24]);
+        fs::write(&valid, &payload).unwrap();
+        fs::write(&short, &payload[..16]).unwrap();
+        fs::write(&zero, [0; 20]).unwrap();
+        assert!(load_rgba_raw_or_image(short.to_str().unwrap()).is_err());
+        assert!(load_rgba_raw_or_image(zero.to_str().unwrap()).is_err());
+        assert_eq!(prune_poster_cache_in_dir(tmp.path(), false).unwrap(), 2);
+        assert!(!zero.exists() && !short.exists());
+        let (w, h, pixels) = load_rgba_raw_or_image(valid.to_str().unwrap()).unwrap();
+        assert_eq!((w, h, pixels.len()), (2, 3, 24));
     }
 }

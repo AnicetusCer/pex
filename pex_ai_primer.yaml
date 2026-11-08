@@ -61,7 +61,7 @@ project:
     Cargo.toml
   tips_for_new_work:
     - "Start from `src/app/mod.rs` to understand app state transitions; it wires prep, owned, filters, and UI."
-    - "`PosterRow` carries precomputed `owned_key` + `broadcast_hd`; prefer using those instead of recomputing."
+    - "`PosterRow` carries precomputed `owned_hd` + `broadcast_hd`; prefer using those instead of recomputing."
     - "Any new UI lives under `src/app/ui/`; keep expensive work off the paint path and return early when splash is active."
     - "Reuse helpers in `utils.rs` for date/ordinal logic and channel normalization."
     - "When touching caching logic, review `cache.rs` + `prefs.rs` to keep sidecars/prefs consistent."
@@ -98,7 +98,7 @@ runtime_model:
     - Prep thread: app::prep::spawn_poster_prep(tx).
     - Owned-scan thread: reads Plex library metadata, hydrates owned_all / owned_hd sidecars, and records modified timestamps.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
-    - Scheduled loader: synchronous read of Plex library DB (`app::scheduled::load_scheduled_index`) triggered after prep and when refreshing owned caches.
+    - Scheduled loader: read of the local mirror on the owned worker after library refresh (`app::scheduled::load_scheduled_index`).
   messages:
     - PrepMsg:
         - Info(String)
@@ -128,7 +128,7 @@ runtime_model:
 flow:
   first_frame:
     - load_prefs() from "<cache_dir>/ui_prefs.txt"
-    - Load owned sidecars (owned_all/owned_hd) and modified timestamps if present
+    - Load owned and HD sidecars if present; the scan supplies modified timestamps
     - start_owned_scan() (mirrors the Plex library DB and refreshes owned sidecars)
     - start_poster_prep()
     - Show splash with status heartbeat
@@ -138,7 +138,7 @@ flow:
     - Try find_any_by_key(small_key) to attach cached path
     - Load "hotset.txt", attach known paths, prewarm textures
     - Kick channel icon prefetch for unseen URLs
-    - refresh_scheduled_index() to merge DVR metadata from Plex library DB
+    - apply scheduled flags when the library worker supplies its index
     - apply_owned_flags() if owned data ready (GUID-first owned matching, then title/year key fallback; sets owned flags + recorded dates)
     - start_prefetch(ctx)
     - prewarm_first_screen(ctx)
@@ -181,8 +181,8 @@ config:
       - detail_w: "persisted detail panel width"
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-    owned_hd_sidecar: "<cache_dir>/owned_hd.txt"
-    owned_all_sidecar: "<cache_dir>/owned_all.txt"
+    owned_hd_sidecar: "<cache_dir>/owned_hd_v2.txt"
+    owned_all_sidecar: "<cache_dir>/owned_all_v2.txt"
     owned_modified: "in-memory map keyed by owned key (timestamp from Plex library)"
   env_flags:
     - PEX_DISABLE_PREFETCH=1
@@ -266,7 +266,7 @@ hd_logic:
   broadcast_hd_inference:
     fn: "utils::infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool"
   owned_hd_inference:
-    stored in owned_hd.txt, recorded during owned scan (positive HD detections)
+    stored in owned_hd_v2.txt, recorded during owned scan (positive HD detections)
   better_hd_available_rule:
     definition: "row.owned && !owned_is_hd && broadcast_hd"
     effects:

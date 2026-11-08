@@ -40,7 +40,7 @@ impl crate::app::PexApp {
                 };
 
                 let broadcast_hd = Self::row_broadcast_hd(row);
-                let owned_is_hd = self.row_owned_is_hd(row);
+                let owned_is_hd = row.owned_hd;
 
                 // Snapshot values so we can release the immutable borrow on self.rows
                 let poster_tex = row.tex.clone();

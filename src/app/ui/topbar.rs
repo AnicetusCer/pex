@@ -544,11 +544,16 @@ impl crate::app::PexApp {
             eg::RichText::new("Posters older than 14 days are pruned automatically on startup.")
                 .weak(),
         );
-        let ctx_clone = ctx.clone();
-        if ui.button("Clear & rebuild poster cache").clicked() {
-            match self.clear_poster_cache_files() {
+        // Finish active writes before removing the files and starting a fresh queue.
+        let can_clear = self.in_flight() == 0;
+        if ui
+            .add_enabled(can_clear, eg::Button::new("Clear & rebuild poster cache"))
+            .on_disabled_hover_text("Available when poster downloads finish")
+            .clicked()
+        {
+            match crate::app::cache::clear_poster_cache() {
                 Ok(removed) => {
-                    self.restart_poster_pipeline(&ctx_clone);
+                    self.restart_poster_pipeline(ctx);
                     self.advanced_feedback = Some(format!(
                         "Poster cache cleared (removed {removed} files) and prefetch restarting."
                     ));
@@ -565,7 +570,13 @@ impl crate::app::PexApp {
 
     fn advanced_owned_controls(&mut self, ui: &mut eg::Ui) {
         ui.label(eg::RichText::new("Owned library cache").strong());
-        if ui.button("Refresh owned scan").clicked() {
+        if ui
+            .add_enabled(
+                !self.owned_scan_in_progress,
+                eg::Button::new("Refresh owned scan"),
+            )
+            .clicked()
+        {
             self.refresh_owned_scan();
             self.advanced_feedback = Some("Owned scan refresh started (incremental).".into());
             self.set_status("Refreshing owned library.");
