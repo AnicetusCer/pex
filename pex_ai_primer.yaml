@@ -160,6 +160,7 @@ config:
   keys:
     - plex_epg_db_source: "Optional source DB copied into db/plex_epg.db once per day"
     - plex_library_db_source: "Optional library DB copied into db/plex_library.db for owned + DVR state"
+    - library_snapshot_dir: "Optional folder of completed Plex backups or PEX exports used instead of copying the live library"
     - cache_dir: "Poster/owned/UI cache root"
     - tmdb_api_key: "Optional TMDb V3 key for vote-average ratings"
     - log_level: "Set tracing verbosity (trace|debug|info|warn|error)"

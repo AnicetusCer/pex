@@ -156,7 +156,7 @@ For a portable download, extract into a writable folder and launch `pex.exe` on 
 
 If Plex is busy, the owned scan retries the consistent live copy up to three times. It keeps a usable local mirror. On a first scan without a usable mirror, it tries completed date-stamped Plex library backups in newest-first order, validating stability, SQLite integrity and library schema before installing a local snapshot. The guide retains the snapshot filename/date or an actionable error with **Retry owned scan**. The live source remains configured, and a fallback does not advance the live-refresh marker.
 
-Read the [README bundled in the ZIP](make_portable/README.md) for the complete first-run and recovery instructions.
+For a busy or remote server, choose **Completed snapshots** in **Connect to Plex** and select the directory where Plex writes its dated library backups. PEX checks for a new backup on refresh and reuses the local database when the snapshot is unchanged. For fresher copies, the optional Python exporter runs on the Plex host while the server is active. Both modes work with local folders and shares visible to PEX. [Portable setup and exporter instructions](make_portable/README.md#refresh-from-completed-snapshots)
 
 For development:
 
@@ -177,6 +177,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | --- | --- | --- | --- |
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
 | `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
+| `library_snapshot_dir` | string or `null` | `null` | Use completed Plex backups or PEX exports from this directory for owned/recording badges. The live library path can stay configured. |
 | `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
 | `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
@@ -210,12 +211,13 @@ You can locate these files by:
 | Platform | Default location |
 | --- | --- |
 | **Windows (desktop)** | `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases\` |
-| **Windows (service mode)** | `%PROGRAMDATA%\Plex Media Server\Plug-in Support\Databases\` |
+| **Windows (service account)** | Check the configured Plex data folder for the account running the server. |
+| **macOS** | `~/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
 | **Linux** | `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
-| **Synology** | `/var/packages/Plex Media Server/target/Plex Media Server/Plug-in Support/Databases/` |
+| **NAS appliances** | Use the Plex data directory for the installed package and DSM/OS version, then open `Plug-in Support/Databases`. |
 | **Docker** | Whatever host path you bind to `/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
 
-Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Plex is stopped, or let Pex copy from the live path on each start.
+Map the server path to a readable client path when PEX runs on another machine. A custom Plex backup directory can be shared independently from the guide directory. [Plex data directory locations](https://support.plex.tv/articles/202915258-where-is-the-plex-media-server-data-directory-located/)
 
 ### Other useful keys
 
@@ -234,8 +236,7 @@ Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Ple
 
 - `db/plex_epg.db` — working copy of the Plex EPG database (plus WAL/SHM files
   created on demand).
-- `db/plex_library.db` — optional working copy of Plex’s library database,
-  copied when `plex_library_db_source` is configured.
+- `db/plex_library.db` — optional working copy of Plex’s library database, populated from the selected live library or snapshot folder.
 - DVR metadata (`media_grabs`, `media_subscriptions`, `metadata_subscription_desired_items`) is read from `db/plex_library.db` to drive the *REC* badge and owned detection.
 - `.pex_cache/` — posters, channel icons, owned sidecars, and UI
   preference files. Poster images older than 14 days are pruned automatically
@@ -278,7 +279,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 
 - **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
   `plex_library_db_source` paths are reachable and readable.
-- **Owned scan never completes:** check the Advanced panel log for the most recent message, ensure `plex_library_db_source` is set correctly, and confirm the copied `db/plex_library.db` contains your movie metadata.
+- **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup or export. In live mode, verify the configured library path.
 - **REC badge missing:** confirm `plex_library_db_source` is configured, the copied `db/plex_library.db` contains up-to-date `media_subscriptions` rows, and you restarted after scheduling the recording.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days

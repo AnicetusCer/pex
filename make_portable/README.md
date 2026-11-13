@@ -12,7 +12,35 @@ Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed
 
 Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the executable. Keep this portable folder writable. Use **Connect to Plex** in the guide to change the connection later; saving is available after active scans and downloads finish.
 
-## When Plex is busy
+## Refresh from completed snapshots
+
+In **Connect to Plex**, choose your guide, clear **Guide only**, and select **Completed snapshots**. Use Plex's Databases folder if it holds the backups, or select the backup folder as it appears on the **computer running PEX**. This can be a local directory, a Windows UNC path, or a mounted share. Save the connection.
+
+The simplest source is Plex's **Settings → Server → Scheduled Tasks** option to back up the database every three days. PEX recognizes completed files named `com.plexapp.plugins.library.db-YYYY-MM-DD`. Plex also supports a custom backup location. The first backup may take several days to appear. [Plex scheduled tasks](https://support.plex.tv/articles/201553286-scheduled-tasks/)
+
+Use **Refresh owned scan** to check the folder. PEX copies and validates a new snapshot locally. If the same snapshot is already installed and usable, PEX reads it locally and skips the full database transfer. The date shown in PEX tells you how current the owned and recording badges are. The programme guide keeps its own source. Select **Live library** to return to live copies.
+
+### Create a fresher snapshot while Plex runs
+
+If you administer the Plex server, the ZIP includes an optional `pex_snapshot.py` exporter. It needs Python 3.8 or later with the standard `sqlite3` module **on the Plex host**. Run it when you need a fresh copy, or schedule the same command with your server's task scheduler. Each run takes a consistent SQLite snapshot and publishes one timestamped database. [SQLite online backup](https://sqlite.org/backup.html)
+
+Pass the full **server-local** library file and a dedicated output folder on local storage. From the directory containing the script, run the command for your host.
+
+```powershell
+# Windows Plex server (PowerShell)
+py -3 .\pex_snapshot.py "$env:LOCALAPPDATA\Plex Media Server\Plug-in Support\Databases\com.plexapp.plugins.library.db" "D:\PEX snapshots"
+```
+
+```sh
+# Linux, macOS or NAS; replace the two paths for your installation
+python3 pex_snapshot.py "/path/to/Databases/com.plexapp.plugins.library.db" "/path/to/PEX snapshots"
+```
+
+For Docker, run the command on the server with access to Plex's actual data volume. The exporter account needs access to the database and SQLite sidecars and permission to create files in the output directory. Make the completed exports readable to the PEX client, then select that folder under **Completed snapshots**. On appliances where you cannot run Python, use Plex's scheduled backups. [Plex data locations by platform](https://support.plex.tv/articles/202915258-where-is-the-plex-media-server-data-directory-located/)
+
+Each export uses roughly one library database's worth of disk space. When scheduling exports, set up retention for this dedicated folder and allow space for the next export. The helper leaves older snapshots in place. On Linux, macOS and NAS systems, choose an output filesystem that supports hard links so a completed export can appear atomically. Keep the server and client clocks in sync.
+
+## When the live library is busy
 
 The guide can load while the owned library is copied and scanned in the background. PEX makes up to three attempts to copy the live library, checking that its database and WAL have not changed during the copy. It rebuilds SQLite state and validates the copy locally; it never opens SQLite against your server's files.
 
@@ -39,6 +67,7 @@ When you save a connection, PEX preserves other keys, including your cache direc
 | --- | --- |
 | `plex_epg_db_source` | Live guide database path, filled in by setup. |
 | `plex_library_db_source` | Live library database path, filled in by setup; optional. |
+| `library_snapshot_dir` | Folder of completed library snapshots as seen by PEX. When set, owned refreshes use this folder. |
 | `guide_only` | `true` skips the owned scan and recording badges, including existing library mirrors. Default `false`. |
 | `cache_dir` | Cache location; relative paths resolve beside the executable. Default `.pex_cache`. |
 | `tmdb_api_key` | Optional personal TMDb V3 key for on-demand ratings. |
@@ -55,6 +84,6 @@ For manual JSON edits, escape Windows backslashes or use forward slashes. `confi
 - **No films:** try a wider day range and clear filters. Your Plex guide may need refreshing on the server.
 - **No posters:** check internet access. Use **Advanced → Clear & rebuild poster cache** after downloads finish.
 
-The portable bundle contains the executable, empty starter config, README, sample configs, LICENSE and NOTICE. PEX reads Plex data and does not schedule recordings or modify the server.
+The portable bundle contains the executable, empty starter config, README, sample configs, optional snapshot exporter, LICENSE and NOTICE.
 
 [Full project documentation](https://github.com/AnicetusCer/pex#readme)
