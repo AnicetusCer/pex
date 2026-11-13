@@ -175,14 +175,50 @@ fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
     copy_validated_snapshot(src, dst, false, false)
 }
 
-fn validate_snapshot(db: &Connection, library: bool) -> io::Result<()> {
-    let check: String = db
-        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+// Stock SQLite cannot open Plex's ICU/naturalsort indexes or its FTS4 tokenizer.
+// Walk the underlying table and index pages, decode the records PEX reads, and
+// check the schema and freelist without invoking Plex's search extensions.
+fn check_plex_pages(db: &Connection, library: bool) -> io::Result<String> {
+    let damaged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.dbstat('main') WHERE pagetype = 'corrupted')",
+            [],
+            |r| r.get(0),
+        )
         .map_err(io::Error::other)?;
+    if damaged {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SQLite B-tree contains a damaged page",
+        ));
+    }
+    let tables: &[&str] = if library {
+        &["metadata_items", "media_items", "media_parts"]
+    } else {
+        &["metadata_items", "media_items"]
+    };
+    for table in tables {
+        let mut statement = db
+            .prepare(&format!("SELECT * FROM main.{table} NOT INDEXED"))
+            .map_err(io::Error::other)?;
+        let mut rows = statement.query([]).map_err(io::Error::other)?;
+        while rows.next().map_err(io::Error::other)?.is_some() {}
+    }
+    db.query_row("PRAGMA main.quick_check(sqlite_schema)", [], |r| r.get(0))
+        .map_err(io::Error::other)
+}
+
+fn validate_snapshot(db: &Connection, library: bool) -> io::Result<()> {
+    let check: String = match db.query_row("PRAGMA main.quick_check", [], |r| r.get(0)) {
+        Ok(check) => check,
+        Err(err) if missing_plex_extension(&err) => check_plex_pages(db, library)?,
+        Err(err) => return Err(io::Error::other(err)),
+    };
     if check != "ok" {
-        return Err(io::Error::other(format!(
-            "SQLite validation failed: {check}"
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SQLite validation failed: {check}"),
+        ));
     }
     db.prepare("SELECT m.id, mi.id FROM metadata_items m, media_items mi LIMIT 0")
         .map_err(io::Error::other)?;
@@ -196,6 +232,12 @@ fn validate_snapshot(db: &Connection, library: bool) -> io::Result<()> {
         .map_err(io::Error::other)?;
     }
     Ok(())
+}
+
+fn missing_plex_extension(err: &rusqlite::Error) -> bool {
+    let message = err.to_string();
+    message.starts_with("no such collation sequence: ")
+        || message.starts_with("unknown tokenizer: ")
 }
 
 fn usable_library(path: &Path) -> bool {
@@ -259,49 +301,43 @@ fn copy_snapshot_with_hook(
     .map_err(io::Error::other)?;
     db.pragma_update(None, "journal_mode", "DELETE")
         .map_err(io::Error::other)?;
-    let destination_valid = Connection::open_with_flags(dst, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .ok()
-        .is_some_and(|local| validate_snapshot(&local, library).is_ok());
-    if dst.exists() && !destination_valid {
-        // A corrupt mirror cannot be restored with SQLite's backup API. Only after
-        // validating the new snapshot, quarantine the unusable generation locally.
-        // Restore every renamed file if installation fails.
+    if !dst.try_exists()? && !has_sidecars(dst)? {
         drop(db);
-        let mut moved = Vec::new();
-        let mut paths = vec![dst.to_path_buf()];
-        paths.extend(["wal", "shm", "journal"].map(|suffix| sqlite_sidecar_path(dst, suffix)));
-        let install = (|| -> io::Result<()> {
-            for (i, path) in paths.into_iter().enumerate() {
-                if path.exists() {
-                    let old = scratch.path().join(format!("unusable-{i}"));
-                    fs::rename(&path, &old)?;
-                    moved.push((path, old));
-                }
+        return staged.persist_noclobber(dst).map_err(|err| err.error);
+    }
+    // SQLite serializes installation with readers and writers, including WAL readers.
+    // Only a confirmed corrupt standalone destination needs filesystem replacement.
+    match db.backup(rusqlite::DatabaseName::Main, dst, None) {
+        Ok(()) => Ok(()),
+        Err(e) if is_corruption(&e) && !has_sidecars(dst)? => {
+            let probe = Connection::open_with_flags(dst, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|local| {
+                    local.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
+                });
+            if !probe.is_err_and(|err| is_corruption(&err)) {
+                return Err(io::Error::other(e));
             }
-            staged.persist_noclobber(dst).map_err(|e| e.error)?;
-            Ok(())
-        })();
-        if install.is_err() {
-            for (path, old) in moved.into_iter().rev() {
-                fs::rename(old, path)?;
-            }
+            drop(db);
+            staged.persist(dst).map_err(|err| err.error)
         }
-        return install;
+        Err(e) => Err(io::Error::other(e)),
     }
-    if dst.exists()
-        || ["wal", "shm", "journal"]
-            .iter()
-            .any(|suffix| sqlite_sidecar_path(dst, suffix).exists())
-    {
-        // Restore transactionally into legacy mirrors, including existing local WALs.
-        // An error rolls back without exposing mismatched generations of DB and WAL.
-        db.backup(rusqlite::DatabaseName::Main, dst, None)
-            .map_err(io::Error::other)?;
-    } else {
-        drop(db);
-        staged.persist_noclobber(dst).map_err(|err| err.error)?;
+}
+
+fn has_sidecars(path: &Path) -> io::Result<bool> {
+    for suffix in ["wal", "shm", "journal"] {
+        if sqlite_sidecar_path(path, suffix).try_exists()? {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn is_corruption(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
 }
 
 fn sync_mirror(src: &Path, dst: &Path, force: bool) -> io::Result<bool> {
@@ -378,8 +414,7 @@ fn recover_library(
     delay: Duration,
     report: impl Fn(String),
 ) -> Result<String, String> {
-    let usable = usable_library(dst);
-    if !force && usable && !mirror_due(dst) {
+    if !force && !mirror_due(dst) && usable_library(dst) {
         return Ok(fs::read_to_string(provenance_path(dst))
             .ok()
             .and_then(|s| serde_json::from_str::<String>(&s).ok())
@@ -409,7 +444,7 @@ fn recover_library(
             std::thread::sleep(delay);
         }
     }
-    if usable {
+    if usable_library(dst) {
         let previous = fs::read_to_string(provenance_path(dst))
             .ok()
             .and_then(|s| serde_json::from_str::<String>(&s).ok())
@@ -936,6 +971,92 @@ mod mirror_tests {
         crate::app::test_fixtures::database(path);
     }
 
+    fn plex_search_schema(path: &Path, collation: &str, tokenizer: bool) {
+        library(path);
+        let db = Connection::open(path).unwrap();
+        db.execute_batch(
+            "CREATE INDEX title_sort ON metadata_items(title COLLATE NOCASE);
+             PRAGMA writable_schema=ON;",
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE sqlite_schema SET sql=replace(sql, 'NOCASE', ?1) WHERE name='title_sort'",
+            [collation],
+        )
+        .unwrap();
+        if tokenizer {
+            // Build the real FTS shadow tables before simulating the tokenizer
+            // Plex used when it created this file on another machine.
+            db.execute_batch(
+                "CREATE VIRTUAL TABLE fts4_metadata_titles_icu USING fts4(title, tokenize=simple);
+                 UPDATE sqlite_schema SET sql=replace(sql, 'tokenize=simple', 'tokenize=collating')
+                   WHERE name='fts4_metadata_titles_icu';",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn plex_search_extensions_allow_both_live_and_completed_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        for (collation, tokenizer) in [
+            ("naturalsort", false),
+            ("icu_root", false),
+            ("icu_root", true),
+        ] {
+            let src = dir
+                .path()
+                .join(format!("source-{collation}-{tokenizer}.db"));
+            let dst = dir
+                .path()
+                .join(format!("mirror-{collation}-{tokenizer}.db"));
+            plex_search_schema(&src, collation, tokenizer);
+            let db = Connection::open(&src).unwrap();
+            let err = db
+                .query_row::<String, _, _>("PRAGMA quick_check", [], |r| r.get(0))
+                .unwrap_err();
+            assert!(missing_plex_extension(&err), "{err}");
+            drop(db);
+            copy_validated_snapshot(&src, &dst, true, tokenizer).unwrap();
+            assert!(usable_library(&dst));
+            let db = Connection::open(&dst).unwrap();
+            let title: String = db
+                .query_row("SELECT title FROM metadata_items WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(title, "Fixture Movie");
+        }
+    }
+
+    #[test]
+    fn damaged_index_page_in_plex_snapshot_preserves_the_existing_mirror() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("local.db");
+        plex_search_schema(&src, "icu_root", true);
+        library(&dst);
+        let previous = fs::read(&dst).unwrap();
+        let db = Connection::open(&src).unwrap();
+        let root: u64 = db
+            .query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE name='title_sort'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let page_size: u64 = db.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        drop(db);
+        let mut file = fs::OpenOptions::new().write(true).open(&src).unwrap();
+        file.seek(SeekFrom::Start((root - 1) * page_size)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        drop(file);
+
+        assert!(copy_validated_snapshot(&src, &dst, true, true).is_err());
+        assert_eq!(fs::read(&dst).unwrap(), previous);
+    }
+
     #[test]
     fn busy_first_scan_uses_newest_valid_completed_backup_then_returns_to_live() {
         let dir = tempfile::tempdir().unwrap();
@@ -1008,6 +1129,31 @@ mod mirror_tests {
         fs::write(&dst, b"corrupt old mirror").unwrap();
         recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap();
         assert!(usable_library(&dst));
+    }
+
+    #[test]
+    fn locked_local_mirror_keeps_its_committed_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("mirror.db");
+        library(&src);
+        library(&dst);
+        let writer = Connection::open(&dst).unwrap();
+        writer
+            .execute_batch(
+                "UPDATE metadata_items SET title='Original mirror';
+             BEGIN EXCLUSIVE;
+             UPDATE metadata_items SET title='Uncommitted';",
+            )
+            .unwrap();
+        assert!(copy_validated_snapshot(&src, &dst, true, false).is_err());
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        let mirror = Connection::open(&dst).unwrap();
+        let title: String = mirror
+            .query_row("SELECT title FROM metadata_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(title, "Original mirror");
     }
 
     #[test]
