@@ -575,7 +575,7 @@ impl crate::app::PexApp {
         ui.label(eg::RichText::new("Owned library cache").strong());
         if ui
             .add_enabled(
-                !self.owned_scan_in_progress,
+                self.owned_scan_available && !self.owned_scan_in_progress,
                 eg::Button::new("Refresh owned scan"),
             )
             .clicked()

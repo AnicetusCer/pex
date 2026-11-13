@@ -306,11 +306,13 @@ impl PexApp {
             if ui.add_enabled(can_save, eg::Button::new("Save and load guide")).clicked() {
                 self.save_selected_connection(ctx);
             }
-            if ui.button("Retry saved configuration").clicked() {
+            if ui.add_enabled(!self.owned_scan_in_progress && self.prep_rx.is_none() && self.in_flight() == 0,
+                eg::Button::new("Retry saved configuration")).clicked() {
                 self.setup_checked = false;
+                self.connection.checks = None;
                 self.run_setup_checks();
                 self.connection.open = false;
-                if self.did_init { self.restart_poster_pipeline(ctx); }
+                if self.did_init { self.restart_poster_pipeline(ctx); self.start_owned_scan(true); }
             }
             if self.did_init && ui.button("Back to guide").clicked() { self.connection.open = false; }
             ui.label("No TMDb key is required. Choose a writable portable folder; your settings and local copies stay beside PEX.");
@@ -328,6 +330,8 @@ impl PexApp {
                 self.connection.open = false;
                 self.setup_errors.clear();
                 self.setup_checked = false;
+                self.connection.checks = None;
+                self.setup_warnings.clear();
                 let _ = std::fs::remove_file(format!(
                     "{}.last_sync",
                     config::local_db_path().display()

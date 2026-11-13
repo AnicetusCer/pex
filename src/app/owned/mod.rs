@@ -22,12 +22,16 @@ impl crate::app::PexApp {
             || (cfg.plex_library_db_source.is_none()
                 && !crate::config::local_library_db_path().exists())
         {
+            self.owned_scan_available = false;
             self.owned_notice = Some("Guide only: owned and recording badges are disabled. Use Connect to Plex to enable them.".into());
             self.owned_keys = None;
             self.owned_hd_keys = None;
             self.scheduled_index = None;
+            self.apply_owned_flags();
+            self.apply_scheduled_flags();
             return;
         }
+        self.owned_scan_available = true;
         self.owned_notice = None;
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
         self.owned_rx = Some(rx);
@@ -43,10 +47,15 @@ impl crate::app::PexApp {
         OwnedScanPlex::spawn_scan(tx, force_copy);
     }
 
-    /// Apply the owned flags using the computed key set (no-ops if not ready).
+    /// Apply owned flags, clearing them when the scan is disabled or unavailable.
     pub(crate) fn apply_owned_flags(&mut self) {
         let Some(keys) = &self.owned_keys else {
             self.owned_match_stats = crate::app::OwnedMatchStats::default();
+            for row in &mut self.rows {
+                row.owned = false;
+                row.owned_hd = false;
+                row.owned_modified = None;
+            }
             return;
         };
         self.owned_match_stats = crate::app::OwnedMatchStats::default();

@@ -136,6 +136,7 @@ pub struct PexApp {
     owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
+    owned_scan_available: bool,
     owned_scan_messages: VecDeque<String>,
     rating_tx: Option<Sender<RatingMsg>>,
     rating_rx: Option<Receiver<RatingMsg>>,
@@ -237,6 +238,7 @@ impl Default for PexApp {
             owned_modified: None,
             owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
+            owned_scan_available: false,
             owned_scan_messages: VecDeque::new(),
             rating_tx: None,
             rating_rx: None,
@@ -967,12 +969,12 @@ impl PexApp {
         // Keep frames moving so Windows never flags "Not Responding"
         ctx.request_repaint();
 
+        if !self.setup_checked {
+            self.run_setup_checks();
+        }
+
         // First frame
         if !self.did_init {
-            if !self.setup_checked {
-                self.run_setup_checks();
-            }
-
             if !self.setup_checked || !self.setup_errors.is_empty() {
                 self.render_setup_gate(ctx);
                 return;
@@ -1054,12 +1056,13 @@ impl PexApp {
             if let Some(notice) = self.owned_notice.clone() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(notice);
-                    if ui
-                        .add_enabled(
-                            !self.owned_scan_in_progress,
-                            eg::Button::new("Retry owned scan"),
-                        )
-                        .clicked()
+                    if self.owned_scan_available
+                        && ui
+                            .add_enabled(
+                                !self.owned_scan_in_progress,
+                                eg::Button::new("Retry owned scan"),
+                            )
+                            .clicked()
                     {
                         self.refresh_owned_scan();
                     }
