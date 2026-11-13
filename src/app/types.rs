@@ -8,6 +8,7 @@ use std::time::SystemTime;
 // ---- cross-thread messages / data ----
 pub enum OwnedMsg {
     Info(String),
+    Snapshot(String),
     Scheduled(Result<super::scheduled::ScheduledIndex, String>),
     Done(Box<OwnedDone>),
     Error(String),

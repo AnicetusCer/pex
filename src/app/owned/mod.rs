@@ -18,6 +18,18 @@ impl crate::app::PexApp {
         if self.owned_scan_in_progress {
             return;
         }
+        let cfg = crate::config::load_config();
+        if cfg.guide_only
+            || (cfg.plex_library_db_source.is_none()
+                && !crate::config::local_library_db_path().exists())
+        {
+            self.owned_notice = Some("Guide only: owned and recording badges are disabled. Use Connect to Plex to enable them.".into());
+            self.owned_keys = None;
+            self.owned_hd_keys = None;
+            self.scheduled_index = None;
+            return;
+        }
+        self.owned_notice = None;
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
         self.owned_rx = Some(rx);
 
@@ -256,6 +268,10 @@ impl crate::app::PexApp {
             };
 
             match msg {
+                OwnedMsg::Snapshot(s) => {
+                    self.owned_notice = Some(s.clone());
+                    self.record_owned_message(s);
+                }
                 Info(s) => {
                     self.record_owned_message(s.clone());
                     self.owned_scan_in_progress = true;
@@ -273,32 +289,12 @@ impl crate::app::PexApp {
                 },
                 Error(e) => {
                     let msg = format!("Owned scan error: {e}");
+                    self.owned_notice = Some(msg.clone());
                     self.record_owned_message(msg.clone());
                     self.owned_scan_in_progress = false;
                     self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     self.set_status(msg);
-                    let should_retry =
-                        if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
-                            let lowered = e.to_ascii_lowercase();
-                            lowered.contains("unable to open database")
-                                || lowered.contains("database is locked")
-                                || lowered.contains("busy")
-                        } else {
-                            false
-                        };
-
-                    if should_retry {
-                        self.owned_retry_attempts = self.owned_retry_attempts.saturating_add(1);
-                        let attempt = self.owned_retry_attempts;
-                        self.owned_retry_next = Some(Instant::now() + Duration::from_secs(3));
-                        self.record_owned_message(format!(
-                            "Owned scan error; retry {attempt}/{} scheduled…",
-                            crate::app::OWNED_AUTO_RETRY_MAX
-                        ));
-                    } else {
-                        self.owned_retry_next = None;
-                    }
-
+                    self.owned_retry_next = None;
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }

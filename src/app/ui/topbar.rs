@@ -208,6 +208,9 @@ impl crate::app::PexApp {
             if ui.button("Advanced.").clicked() {
                 self.show_advanced_popup = true;
             }
+            if ui.button("Connect to Plex").clicked() {
+                self.connection.open = true;
+            }
 
             ui.separator();
 
@@ -593,7 +596,10 @@ impl crate::app::PexApp {
                 ui.label("Owned scan in progress.");
             });
         } else {
-            ui.label(eg::RichText::new("Owned scan idle.").weak());
+            ui.label(
+                eg::RichText::new(self.owned_notice.as_deref().unwrap_or("Owned scan ready."))
+                    .weak(),
+            );
         }
         for (idx, msg) in owned_messages.iter().enumerate() {
             let text = if idx == 0 {

@@ -172,6 +172,44 @@ fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_validated_snapshot(src, dst, false, false)
+}
+
+fn validate_snapshot(db: &Connection, library: bool) -> io::Result<()> {
+    let check: String = db
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .map_err(io::Error::other)?;
+    if check != "ok" {
+        return Err(io::Error::other(format!(
+            "SQLite validation failed: {check}"
+        )));
+    }
+    db.prepare("SELECT m.id, mi.id FROM metadata_items m, media_items mi LIMIT 0")
+        .map_err(io::Error::other)?;
+    if library {
+        db.prepare(
+            "SELECT m.id, m.guid, m.title, m.original_title, m.year, m.updated_at, m.added_at,
+            mi.id, mi.width, mi.height, mi.updated_at, mp.id, mp.file, mp.size, mp.updated_at
+            FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id=m.id
+            JOIN media_parts mp ON mp.media_item_id=mi.id WHERE m.metadata_type=1 LIMIT 0",
+        )
+        .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+fn usable_library(path: &Path) -> bool {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()
+        .is_some_and(|db| validate_snapshot(&db, true).is_ok())
+}
+
+fn copy_validated_snapshot(
+    src: &Path,
+    dst: &Path,
+    library: bool,
+    completed_backup: bool,
+) -> io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     if dst.exists() && fs::canonicalize(src)? == fs::canonicalize(dst)? {
@@ -183,6 +221,9 @@ fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
     let staged = tempfile::NamedTempFile::new_in(scratch.path())?.into_temp_path();
     let staged_path: &Path = staged.as_ref();
     let before = source_state(src)?;
+    if completed_backup && before.1.as_ref().is_some_and(|wal| wal.len > 0) {
+        return Err(io::Error::other("backup still has an active WAL"));
+    }
     copy_contents(src, staged_path)?;
     if before.1.is_some() {
         copy_contents(
@@ -192,12 +233,13 @@ fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
     }
     if before != source_state(src)? {
         return Err(io::Error::other(
-            "source changed during copy; keeping previous snapshot",
+            "source changed during copy; no new snapshot installed",
         ));
     }
     // Rebuild SHM locally, validate the guide/library schema and let SQLite replay
     // committed WAL frames. Never copy a live SHM file or touch SQLite on the NAS.
     let db = Connection::open(staged_path).map_err(io::Error::other)?;
+    validate_snapshot(&db, library)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM metadata_items), EXISTS(SELECT 1 FROM media_items)",
         [],
@@ -232,12 +274,129 @@ fn sync_mirror(src: &Path, dst: &Path, force: bool) -> io::Result<bool> {
     Ok(true)
 }
 
-pub(crate) fn sync_library_db_from_source(force: bool) -> Result<bool, String> {
+pub(crate) fn sync_library_db_from_source(
+    force: bool,
+    report: impl Fn(String),
+) -> Result<String, String> {
     let Some(src) = load_config().plex_library_db_source else {
-        return Ok(false);
+        return Ok("Using the manually supplied local library snapshot.".into());
     };
-    sync_mirror(&src, &local_library_db_path(), force)
-        .map_err(|e| format!("Copying Plex library from {} failed: {e}", src.display()))
+    recover_library(
+        &src,
+        &local_library_db_path(),
+        force,
+        Duration::from_millis(750),
+        report,
+    )
+}
+
+fn provenance_path(dst: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.snapshot.json", dst.display()))
+}
+
+fn backup_candidates(src: &Path) -> io::Result<Vec<(String, PathBuf)>> {
+    let Some(parent) = src.parent() else {
+        return Ok(Vec::new());
+    };
+    let mut candidates = Vec::new();
+    let prefix = format!("{}-", src.file_name().unwrap_or_default().to_string_lossy());
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(date) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Ok(parsed) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+            continue;
+        };
+        if parsed.format("%Y-%m-%d").to_string() != date
+            || parsed > chrono::Local::now().date_naive()
+        {
+            continue;
+        }
+        // Completed Plex backups have an exact date suffix, and no active SQLite journal.
+        if ["wal", "journal"].iter().any(|suffix| {
+            match fs::metadata(sqlite_sidecar_path(&entry.path(), suffix)) {
+                Ok(m) => m.len() > 0,
+                Err(e) => e.kind() != io::ErrorKind::NotFound,
+            }
+        }) {
+            continue;
+        }
+        candidates.push((date.to_string(), entry.path()));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(candidates)
+}
+
+/// Bounded retries use the same staging and consistency checks as ordinary copies.
+/// A backup never advances the live-source freshness marker.
+fn recover_library(
+    src: &Path,
+    dst: &Path,
+    force: bool,
+    delay: Duration,
+    report: impl Fn(String),
+) -> Result<String, String> {
+    let usable = usable_library(dst);
+    if !force && usable && !mirror_due(dst) {
+        return Ok(fs::read_to_string(provenance_path(dst))
+            .ok()
+            .and_then(|s| serde_json::from_str::<String>(&s).ok())
+            .unwrap_or_else(|| {
+                "Using the local library snapshot (last successful live refresh).".into()
+            }));
+    }
+    let mut failure = String::new();
+    for attempt in 1..=3 {
+        report(format!(
+            "Copying live Plex library (attempt {attempt}/3)..."
+        ));
+        match copy_validated_snapshot(src, dst, true, false) {
+            Ok(()) => {
+                let message = format!(
+                    "Library snapshot: live source {}, copied {}.",
+                    src.display(),
+                    chrono::Local::now().format("%Y-%m-%d %H:%M")
+                );
+                let _ = fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
+                let _ = fs::write(last_sync_marker_path(dst), b"ok");
+                return Ok(message);
+            }
+            Err(e) => failure = e.to_string(),
+        }
+        if attempt < 3 {
+            std::thread::sleep(delay);
+        }
+    }
+    if usable {
+        let previous = fs::read_to_string(provenance_path(dst))
+            .ok()
+            .and_then(|s| serde_json::from_str::<String>(&s).ok())
+            .unwrap_or_else(|| "Previous local library snapshot (date unknown).".into());
+        return Ok(format!("Live library unavailable ({failure}). Keeping {previous} Use Retry owned scan when Plex is idle."));
+    }
+    report("Live copy unavailable; checking completed dated Plex library backups...".into());
+    let mut rejected = Vec::new();
+    match backup_candidates(src) {
+        Ok(candidates) => {
+            for (date, backup) in candidates {
+                match copy_validated_snapshot(&backup, dst, true, true) {
+                    Ok(()) => {
+                        let message = format!("Library snapshot: Plex backup dated {date}, {}. Owned and recording badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
+                        // Keep this mirror due so the next launch tries the live source again.
+                        let _ = fs::remove_file(last_sync_marker_path(dst));
+                        let _ =
+                            fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
+                        return Ok(message);
+                    }
+                    Err(e) => rejected.push(format!("{}: {e}", backup.display())),
+                }
+            }
+        }
+        Err(e) => rejected.push(e.to_string()),
+    }
+    Err(format!("No usable library snapshot. Live copy failed after 3 attempts: {failure}. No completed, valid dated backup was available. {} Connect the share or wait for Plex to finish its activity/backup, then use Retry owned scan. You can also choose Guide only in Connect to Plex.", rejected.join("; ")))
 }
 
 // Set to true if you want to synthesize a tiny fake list for debugging.
@@ -705,6 +864,8 @@ impl crate::app::PexApp {
                         seen_any = true;
                     }
                     Ok(crate::app::PrepMsg::Error(e)) => {
+                        self.setup_errors = vec![format!("Could not load the guide: {e}. Choose a Plex Databases folder below, or retry after checking the share.")];
+                        self.connection.open = true;
                         self.set_status(format!("Poster prep error: {e}"));
                         keep = None;
                         seen_any = true;

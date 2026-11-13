@@ -27,17 +27,15 @@ impl OwnedScanPlex {
             let db_path = local_library_db_path();
             // Refresh and read the same mirror on one worker. The UI remains
             // usable during a slow NAS copy, including an explicit refresh.
-            match crate::app::prep::sync_library_db_from_source(force_copy) {
-                Ok(true) => {
-                    let _ = tx.send(Info("Copied Plex library database.".into()));
+            match crate::app::prep::sync_library_db_from_source(force_copy, |s| {
+                let _ = tx.send(Info(s));
+            }) {
+                Ok(message) => {
+                    let _ = tx.send(OwnedMsg::Snapshot(message));
                 }
-                Ok(false) => {}
                 Err(err) => {
-                    let _ = tx.send(Info(err.clone()));
-                    if !db_path.is_file() {
-                        let _ = tx.send(Error(err));
-                        return;
-                    }
+                    let _ = tx.send(Error(err));
+                    return;
                 }
             }
             let _ = tx.send(OwnedMsg::Scheduled(

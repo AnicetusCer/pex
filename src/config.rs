@@ -17,6 +17,7 @@ static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug, Default)]
 pub struct AppConfig {
+    pub guide_only: bool,
     pub log_level: Option<String>,
     pub cache_dir: Option<PathBuf>,
     pub plex_epg_db_source: Option<PathBuf>,
@@ -26,6 +27,8 @@ pub struct AppConfig {
 
 #[derive(Debug, Deserialize)]
 struct RawConfig {
+    #[serde(default)]
+    guide_only: bool,
     log_level: Option<String>,
     cache_dir: Option<String>,
     #[serde(alias = "plex_db_source")]
@@ -140,6 +143,7 @@ pub fn load_config() -> AppConfig {
     if let Some((path, raw)) = read_config_source() {
         match serde_json::from_str::<RawConfig>(&raw) {
             Ok(mut parsed) => {
+                cfg.guide_only = parsed.guide_only;
                 cfg.log_level = parsed.log_level;
                 if let Some(cache_dir) = parsed.cache_dir.take() {
                     let trimmed = cache_dir.trim();
@@ -206,4 +210,95 @@ pub fn local_db_path() -> PathBuf {
 
 pub fn local_library_db_path() -> PathBuf {
     resolve_relative_path(Path::new(LOCAL_DB_DIR)).join(LOCAL_LIBRARY_DB_FILE)
+}
+
+/// Keep discovery as filesystem I/O: never open SQLite against the Plex share.
+pub fn discover_databases(folder: &Path) -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
+    let entries = fs::read_dir(folder).map_err(|e| {
+        format!(
+            "Cannot read {}: {e}. Check the share and Windows permissions, then try again.",
+            folder.display()
+        )
+    })?;
+    let mut guides = Vec::new();
+    let mut library = None;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("tv.plex.providers.epg.cloud") && name.ends_with(".db") {
+            readable_database(&entry.path())?;
+            guides.push(entry.path());
+        } else if name == "com.plexapp.plugins.library.db" {
+            library = Some(entry.path());
+        }
+    }
+    guides.sort();
+    Ok((guides, library))
+}
+
+pub fn readable_database(path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut header = [0; 16];
+    fs::File::open(path).and_then(|mut f| f.read_exact(&mut header))
+        .map_err(|e| format!("Cannot read {}: {e}. Connect the network share or choose another Databases folder.", path.display()))?;
+    if &header != b"SQLite format 3\0" {
+        return Err(format!(
+            "{} is not a SQLite database. Choose Plex's Databases folder.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn config_problem() -> Option<String> {
+    let path = discover_config_path()?;
+    fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str::<RawConfig>(&s).map_err(|e| e.to_string()))
+        .err()
+        .map(|e| {
+            format!(
+                "Cannot load {}: {e}. Repair this file and retry checks.",
+                path.display()
+            )
+        })
+}
+
+/// Update the effective config, retaining optional settings and unknown keys.
+pub fn save_connection(
+    epg: &Path,
+    library: Option<&Path>,
+    guide_only: bool,
+) -> Result<PathBuf, String> {
+    let path = discover_config_path().unwrap_or_else(|| {
+        env::var_os("PEX_CONFIG")
+            .map(|p| resolve_relative_path(PathBuf::from(p)))
+            .unwrap_or_else(|| base_dir().join(CONFIG_FILENAME))
+    });
+    let mut value = if path.exists() {
+        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|e| format!("Repair {} before saving: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let object = value
+        .as_object_mut()
+        .ok_or("Config must contain a JSON object")?;
+    object.remove("plex_db_source");
+    object.insert("plex_epg_db_source".into(), serde_json::json!(epg));
+    object.insert("plex_library_db_source".into(), serde_json::json!(library));
+    object.insert("guide_only".into(), serde_json::json!(guide_only));
+    let parent = path.parent().ok_or("Config has no parent directory")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    staged
+        .write_all(serde_json::to_string_pretty(&value).unwrap().as_bytes())
+        .map_err(|e| e.to_string())?;
+    staged.as_file().sync_all().map_err(|e| e.to_string())?;
+    staged
+        .persist(&path)
+        .map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
+    Ok(path)
 }

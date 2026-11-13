@@ -1,6 +1,6 @@
 {
-  "plex_epg_db_source": "REPLACE_ME_WITH_PATH/tv.plex.providers.epg.cloud-11111111-1111-1111-1111-111111111111.db",
-  "plex_library_db_source": "REPLACE_ME_WITH_PATH/com.plexapp.plugins.library.db",
+  "plex_epg_db_source": null,
+  "plex_library_db_source": null,
   "cache_dir": ".pex_cache",
-  "tmdb_api_key": "<  Your Own TMDB API Key Here  >"
+  "tmdb_api_key": null
 }

@@ -1,0 +1,26 @@
+name: First-run checks and Windows preview
+on:
+  workflow_dispatch:
+  push:
+    branches: [improve-first-run]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets --all-features -- -W clippy::all -W clippy::nursery
+      - run: cargo build --release --locked --bin pex
+      - shell: pwsh
+        run: ./make_portable/make_portable.ps1 -OutputDir dist/preview -Zip -ZipName pex-first-run-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pex-first-run-windows-x86_64
+          path: make_portable/dist/preview/pex-first-run-windows-x86_64.zip

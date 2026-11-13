@@ -19,9 +19,7 @@ use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
 use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
-use crate::config::{
-    discover_config_path, load_config, local_db_path, CONFIG_FILENAME, HOME_CONFIG_FILENAME,
-};
+use crate::config::load_config;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum NavDirection {
@@ -45,6 +43,9 @@ pub mod gfx;
 pub mod owned;
 pub mod prefetch;
 pub mod prefs;
+mod setup;
+#[cfg(test)]
+mod test_fixtures;
 #[path = "ui/uimod.rs"] // this is we don't have duplicate file names in within the workspace.
 pub mod ui;
 
@@ -162,6 +163,8 @@ pub struct PexApp {
     show_genre_filter_popup: bool,
     show_advanced_popup: bool,
     advanced_feedback: Option<String>,
+    connection: setup::ConnectionSetup,
+    owned_notice: Option<String>,
     setup_checked: bool,
     setup_errors: Vec<String>,
     setup_warnings: Vec<String>,
@@ -260,6 +263,8 @@ impl Default for PexApp {
             show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
+            connection: setup::ConnectionSetup::default(),
+            owned_notice: None,
             setup_checked: false,
             setup_errors: Vec::new(),
             setup_warnings: Vec::new(),
@@ -572,111 +577,6 @@ impl PexApp {
                 uploaded += 1;
             }
         }
-    }
-
-    fn run_setup_checks(&mut self) {
-        self.setup_checked = true;
-        self.setup_errors.clear();
-        self.setup_warnings.clear();
-        self.set_status("Stage 1/4 – Checking config & cache (validates Plex paths and tools).");
-
-        if discover_config_path().is_none() {
-            self.setup_warnings.push(
-                format!(
-                    "No config file found ({CONFIG_FILENAME} next to the app/current directory or {HOME_CONFIG_FILENAME} in your home directory); using built-in defaults."
-                ),
-            );
-        }
-
-        let cfg = load_config();
-        let local_db = local_db_path();
-        if !local_db.exists() {
-            if cfg.plex_epg_db_source.is_some() {
-                self.setup_warnings.push(format!(
-                    "Local Plex EPG database not found at {}; it will be copied from plex_epg_db_source on startup.",
-                    local_db.display()
-                ));
-            } else {
-                self.setup_errors.push(format!(
-                    "Local Plex EPG database not found at {}. Provide plex_epg_db_source in {CONFIG_FILENAME} or copy the DB into the db/ folder.",
-                    local_db.display()
-                ));
-            }
-        }
-
-        let tmdb_missing = cfg
-            .tmdb_api_key
-            .as_ref()
-            .is_none_or(|k| k.trim().is_empty());
-        if tmdb_missing {
-            self.setup_warnings
-                .push("tmdb_api_key not set; ratings button will be disabled.".into());
-        } else if cfg
-            .tmdb_api_key
-            .as_ref()
-            .is_some_and(|k| k.contains("REPLACE_ME") || k.contains("YOUR"))
-        {
-            self.setup_warnings.push(
-                "tmdb_api_key still uses the placeholder value; replace it with your TMDB V3 API key."
-                    .into(),
-            );
-        }
-
-        if !self.setup_errors.is_empty() {
-            if let Some(first) = self.setup_errors.first() {
-                self.set_status(format!("Setup required: {first}"));
-            }
-        } else if self.advanced_feedback.is_none() && !self.setup_warnings.is_empty() {
-            self.advanced_feedback = Some(self.setup_warnings.join("\n"));
-        }
-    }
-
-    fn render_setup_gate(&mut self, ctx: &eg::Context) {
-        eg::CentralPanel::default()
-            .frame(
-                eg::Frame::default()
-                    .inner_margin(eg::Margin::symmetric(16.0, 20.0))
-                    .fill(ctx.style().visuals.panel_fill),
-            )
-            .show(ctx, |ui| {
-                ui.heading("Pex setup required");
-                ui.add_space(8.0);
-                if !self.setup_errors.is_empty() {
-                    ui.label(
-                        eg::RichText::new("Fix these before Pex can start:")
-                            .strong()
-                            .color(eg::Color32::LIGHT_RED),
-                    );
-                    ui.add_space(6.0);
-                    for err in &self.setup_errors {
-                        ui.label(
-                            eg::RichText::new(format!("- {err}")).color(eg::Color32::LIGHT_RED),
-                        );
-                    }
-                }
-
-                if !self.setup_warnings.is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(
-                        eg::RichText::new(
-                            "Warnings (the app can run, but some features may be limited):",
-                        )
-                        .strong(),
-                    );
-                    ui.add_space(4.0);
-                    for warn in &self.setup_warnings {
-                        ui.label(format!("- {warn}"));
-                    }
-                }
-
-                ui.add_space(16.0);
-                if ui.button("Retry checks").clicked() {
-                    self.setup_checked = false;
-                }
-                ui.label(format!(
-                    "Edit {CONFIG_FILENAME} (or {HOME_CONFIG_FILENAME} in your home directory), then press Retry."
-                ));
-            });
     }
 
     fn set_status<S: Into<String>>(&mut self, s: S) {
@@ -1068,6 +968,15 @@ fn format_tmdb_rating(avg: f32, count: u32) -> RatingState {
 
 impl eframe::App for PexApp {
     fn update(&mut self, ctx: &eg::Context, _frame: &mut eframe::Frame) {
+        self.update_ui(ctx);
+    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_on_exit();
+    }
+}
+
+impl PexApp {
+    pub(crate) fn update_ui(&mut self, ctx: &eg::Context) {
         // Keep frames moving so Windows never flags "Not Responding"
         ctx.request_repaint();
 
@@ -1077,7 +986,7 @@ impl eframe::App for PexApp {
                 self.run_setup_checks();
             }
 
-            if !self.setup_errors.is_empty() {
+            if !self.setup_checked || !self.setup_errors.is_empty() {
                 self.render_setup_gate(ctx);
                 return;
             }
@@ -1109,6 +1018,10 @@ impl eframe::App for PexApp {
         }
 
         self.poll_rating_updates();
+        if self.connection.open {
+            self.render_setup_gate(ctx);
+            return;
+        }
 
         // If warm-up not finished, show calm splash and return
         if self.boot_phase != types::BootPhase::Ready {
@@ -1165,6 +1078,23 @@ impl eframe::App for PexApp {
         eg::CentralPanel::default().show(ctx, |ui| {
             // Top bar (range/search/sort/workers/owned)
             self.ui_render_topbar(ui);
+            if let Some(notice) = self.owned_notice.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(notice);
+                    if ui
+                        .add_enabled(
+                            !self.owned_scan_in_progress,
+                            eg::Button::new("Retry owned scan"),
+                        )
+                        .clicked()
+                    {
+                        self.refresh_owned_scan();
+                    }
+                });
+            }
+            for warning in &self.setup_warnings {
+                ui.label(warning);
+            }
 
             // Channel & genre filter popups (separate windows)
             self.ui_render_channel_filter_popup(ctx);
@@ -1221,7 +1151,7 @@ impl eframe::App for PexApp {
         self.maybe_save_prefs();
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn persist_on_exit(&mut self) {
         let _ = self.save_hotset_manifest(180); // remember ~a couple of screens
         if let Err(err) = self.save_prefs() {
             warn!("Failed to persist UI preferences on exit: {err}");

@@ -1,126 +1,58 @@
-﻿# Pex (Plex EPG Explorer)
+# PEX – Plex EPG Explorer (portable)
 
-If you're old-fashioned like me and still enjoy flicking through the next week of TV films, this app is for you. Pex is my personal way to dig through two weeks of Plex DVR listings and decide what to record, and—most importantly—see which airings I already own in Plex, all in a super-visual grid.
+## First launch on Windows
 
-Pex helps you browse upcoming film broacasts in a more advanced way:
-- Browse up to 14 days of film listings in the Plex EPG with a poster-forward layout.
-- Choose to visually dim movies you already own or hide them from the grid entirely.
-- Spot HD airings, including HD upgrades for titles you currently only have in SD.
-- See at a glance which films are already scheduled to record in Plex (does not support schedualling, i want to keep the app focused on browsing)
-- Bring channel art, genre groupings, and on-demand TMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
+1. Extract the ZIP into a new folder where you have write access. Extract it fully before launching `pex.exe`. SQLite is included; you do not need to install SQLite or copy a config from another PC.
+2. Double-click `pex.exe`. **Connect to Plex** opens when the guide has not been configured.
+3. Choose **Browse...** and select your Plex server's `Plug-in Support/Databases` folder. For a NAS, you can paste a Windows network path such as `\\NAS\PlexMediaServer\AppData\Plex Media Server\Plug-in Support\Databases` and click **Find databases**. Connect/authenticate the share in File Explorer first if Windows requires credentials. Enter paths normally; no JSON escaping is needed in the app.
+4. PEX lists `tv.plex.providers.epg.cloud*.db` guide databases. If several are listed, choose the one for your DVR guide. PEX also finds `com.plexapp.plugins.library.db` in the same folder.
+5. Leave **Guide only** checked if you just want listings, or uncheck it to enable owned/HD and scheduled recording badges. Click **Save and load guide**.
 
-If you downloaded this release bundle from the main repo, all you need to do is fill in `config.json`. Point the entries at your Plex EPG and library databases and you’re done—Pex mirrors Plex’s own data to decide what you already own, so there’s no filesystem crawl to configure.
+Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed. Poster downloads need internet access; listings and local caches remain usable without it.
 
-Portable builds are available for x86-64 Windows and Linux. It’s easy to tweak too—grab the source, point your favourite AI at the primer file I included, and you’ll have a head start on customising the code for your setup. The most likely change people will make is adapting the title parsing if their files don’t follow the `Title (Year)` pattern the app expects today.
+Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the executable. Keep this portable folder writable. Use **Connect to Plex** in the guide to change the connection later; saving is available after active scans and downloads finish.
 
-Need a head start on the paths? See `config_example.windows` and `config_example.linux` in this folder for realistic sample values covering common Plex installations and multi-library layouts.
+## When Plex is busy
 
----
+The guide can load while the owned library is copied and scanned in the background. PEX makes up to three attempts to copy the live library, checking that its database and WAL have not changed during the copy. It rebuilds SQLite state and validates the copy locally; it never opens SQLite against your server's files.
 
-## What’s inside?
+If the live copy fails:
 
-- `pex.exe` (Windows) or `pex` (Linux) – the application binary.
-- `config.json` – edit this to match your Plex setup and movie library.
-- `README.md` – this guide.
-- `db/` (created on first run) – Pex will copy your Plex EPG database here.
-- `.pex_cache/` (created on first run) – stores posters, owned sidecars, and UI preferences.
+- A usable previous local mirror is retained.
+- If there is no usable local mirror, PEX looks for completed Plex backups alongside the configured live library, named exactly `com.plexapp.plugins.library.db-YYYY-MM-DD`. Newest dates are tried first. Files with active WAL/journal data, invalid dates, invalid SQLite contents, or an incompatible library schema are rejected.
+- When a backup is used, the guide shows its filename and date. Owned and recording badges reflect that snapshot, so recent library additions or scheduling changes may be absent. Your **live library source remains configured** for future refreshes.
+- If no valid snapshot is available, an explanation stays visible above the guide with **Retry owned scan**. Check the share or wait for Plex to finish its activity/backup, then retry. You can also use **Connect to Plex → Guide only** and browse without owned or recording badges.
 
----
+A backup does not count as a successful daily live refresh. PEX tries the live source again on the next launch; **Retry owned scan** forces a live refresh immediately. **Advanced → Refresh owned scan** remains available.
 
-## Quick start
+## Existing portable installations
 
-1. **Unzip / extract the bundle** to a folder where you have write access. Pex
-   stores cache files alongside the executable.
+Keep your working settings. PEX retains the existing config search order: `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
 
-2. **Install prerequisites**
-   - Ensure Plex DVR/EPG is enabled so its SQLite database exists.
-   - No extra SQLite packages are required on Windows: the portable binary ships
-     with SQLite via `rusqlite`'s bundled driver. On Linux the portable build
-     also links SQLite statically; just make sure you're on a glibc-based
-     distro.
+When you save a connection, PEX updates the config it found (or creates `pex-config.json` when none exists), preserving other keys, including your cache directory and TMDb key. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
 
-3. **Edit `config.json`** – update the Plex database paths and optional settings so they match the machine you will run Pex on. Each key is described in detail in [Configuration keys](#configuration-keys) below.
+## Optional configuration
 
-4. **Launch the app**
-   - Windows: double-click `pex.exe` or run it from PowerShell.
-   - Linux/macOS: `chmod +x ./pex` (if needed) then run `./pex`.
-
-Pex will make local copies of your Plex databases to avoid any chance of disruption. The first start can take a few minutes while posters download and owned sidecars are generated, but subsequent launches reuse the cache and start quickly.
-General workflow:
-- Pex copies the Plex database from `plex_epg_db_source`.
-- It copies Plex’s library database if `plex_library_db_source` is set.
-- Owned titles are tagged straight from the mirrored library database.
-- It warms up posters into the grid.
-
-Subsequent launches load almost immediately.
-
----
-
-## Configuration keys
-
-| Key | Required? | Description | Where to find the value |
-| --- | --- | --- | --- |
-| `plex_epg_db_source` | ✅ | Absolute path to Plex's EPG database (`tv.plex.providers.epg.cloud*.db`). Pex copies it into `db/plex_epg.db` the first time you launch and refreshes the copy roughly once per day. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
-| `plex_library_db_source` | ✅ | Path to `com.plexapp.plugins.library.db`. Mirroring this database enables owned detection and the DVR *REC* badge. | See [Collecting Plex paths](#collecting-plex-paths) for examples. |
-| `cache_dir` | Optional | Relocates `.pex_cache/` (posters, owned sidecars, UI prefs). Relative paths are resolved next to the executable. | Pick a writable folder with enough free space. |
-| `tmdb_api_key` | Optional | TMDb V3 API key for vote-average ratings. | Generate your key at <https://www.themoviedb.org/settings/api>. |
-| `log_level` | Optional | Adjusts runtime logging (`trace`, `debug`, `info`, `warn`, `error`). | Set only if you need more verbose console output. |
-
-### Collecting Plex paths
-
-Plex stores its SQLite databases under “Plug-in Support/Databases”. Common locations:
-
-| Platform | Default path |
+| Key | Purpose |
 | --- | --- |
-| **Windows (desktop)** | `%LOCALAPPDATA%\Plex Media Server\Plug-in Support\Databases\` |
-| **Windows (service install)** | `%PROGRAMDATA%\Plex Media Server\Plug-in Support\Databases\` |
-| **Linux packages** | `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
-| **Synology package** | `/var/packages/Plex Media Server/target/Plex Media Server/Plug-in Support/Databases/` |
-| **Docker** | Host folder bound to `/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/` |
+| `plex_epg_db_source` | Live guide database path, filled in by setup. |
+| `plex_library_db_source` | Live library database path, filled in by setup; optional. |
+| `guide_only` | `true` skips the owned scan and recording badges, including existing library mirrors. Default `false`. |
+| `cache_dir` | Cache location; relative paths resolve beside the executable. Default `.pex_cache`. |
+| `tmdb_api_key` | Optional personal TMDb V3 key for on-demand ratings. |
+| `log_level` | Logging level, default `info`. |
 
-Look in that directory for:
-
-- `tv.plex.providers.epg.cloud.db`
-- `com.plexapp.plugins.library.db`
-
-Copy the full paths into `config.json`. Pex pulls in any companion journal data
-for you, so you only need the main `.db` path.
-
----
-
-## Where files are stored
-
-| Location | Purpose |
-| --- | --- |
-| `db/plex_epg.db` | Working copy of Plex's EPG database. |
-| `db/plex_library.db` | Working copy of Plex's library database (refreshed when configured). |
-| `.pex_cache/` | Posters, owned sidecars, and UI preferences. Poster images older than 14 days are removed automatically. |
-| `config.json` | Runtime configuration – edit before launching. |
-
-You can delete `.pex_cache/` if you want to reclaim space; Pex rebuilds it on
-the next run (expect another long initial scan while it repopulates).
-
----
-
-## Windows and Linux differences
-
-- **Paths** – stick to forward slashes in `config.json`. Windows backslashes
-  must be escaped (`"D:\\\\Media"`), so forward slashes are easier.
-- **Executable name** – Windows builds end with `.exe`; Linux builds are
-  just `pex`. The rest of the bundle layout is identical.
-
----
+For manual JSON edits, escape Windows backslashes or use forward slashes. `config_example.windows` and `config_example.linux` contain examples. The app accepts UNC paths directly in the folder field.
 
 ## Troubleshooting
 
-- **“Could not open Plex DB”** – check `plex_epg_db_source` or ensure
-  `db/plex_epg.db` exists and is readable.
-- **Owned scan never finishes** – ensure `plex_library_db_source` points at a readable Plex library database and that the mirrored `db/plex_library.db` is up to date.
-- **No posters or very slow start** – verify the machine has internet access and
-  that `.pex_cache/` is writable.
-- **HD badge seems wrong** – run the app, open **Advanced ▸ Refresh owned scan**, and let Pex rebuild the owned sidecars from the Plex library database.
+- **Folder cannot be read:** open the same share in File Explorer as the same Windows user, check permissions, and use **Find databases** again.
+- **No guide databases found:** select the `Databases` folder itself and ensure Plex DVR/EPG has been configured.
+- **Guide cannot load:** PEX returns to **Connect to Plex**, showing the error and a next action. Choose another guide when several are listed, or correct the saved file and use **Retry saved configuration**.
+- **No owned badges:** check the persistent snapshot/error message above the guide, then **Retry owned scan** or reconnect. A backup may predate recent additions.
+- **No films:** try a wider day range and clear filters. Your Plex guide may need refreshing on the server.
+- **No posters:** check internet access. Use **Advanced → Clear & rebuild poster cache** after downloads finish.
 
-If you need a deeper reference, open the repository’s main guide:
-<https://github.com/AnicetusCer/pex#readme>.
+The portable bundle contains the executable, empty starter config, README, sample configs, LICENSE and NOTICE. PEX reads Plex data and does not schedule recordings or modify the server.
 
-Enjoy Pex!
+[Full project documentation](https://github.com/AnicetusCer/pex#readme)

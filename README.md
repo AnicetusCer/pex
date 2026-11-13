@@ -11,7 +11,7 @@ Pex helps you:
 - See at a glance which films are already scheduled to record in Plex.
 - Bring channel art, genre groupings, and on-demand TMDb ratings (click the ⭐ button in the detail pane) into the experience while keeping everything cached locally for speedy, offline-friendly launches.
 
-To get rolling, copy `config.example.json` (or the platform-specific samples in `make_portable/`) to `pex-config.json` and fill in your Plex database paths. The only real prerequisite is that you're using Plex DVR with its standard EPG—Pex mirrors Plex's own library database to figure out what you already own, so there's no filesystem scraping or directory configuration to babysit.
+To get rolling, extract the portable ZIP and launch PEX. **Connect to Plex** lets you choose your Plex Databases folder (including Windows network shares), select a guide, and optionally enable owned-library scanning. No copied config or separate SQLite installation is required. Existing configs and manually supplied local databases remain supported.
 
 Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it's easy to tweak. Grab the code, point your favourite AI at the included primer, and you'll have a head start on customising things for your own setup—especially if your filenames don't follow the `Title (Year)` pattern the app expects today.
 
@@ -152,34 +152,23 @@ the accompanying WAL/SHM files) exist on disk.
 
 ## Getting Started
 
-1. **Clone and bootstrap**
-   ```bash
-   git clone https://github.com/AnicetusCer/pex.git
-   cd pex
-   cp config.example.json pex-config.json
-   ```
+For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip owned and scheduled-recording badges, then **Save and load guide**. Settings are saved automatically; a TMDb key is optional.
 
-2. **Populate the database folder**
-   - Copy your Plex EPG SQLite file into `db/plex_epg.db` beside the executable (for a release build from source, `target/release/db/plex_epg.db`), *or*
-   - Set `plex_epg_db_source` in `pex-config.json` to the path of Plex’s live DB so Pex can refresh `db/plex_epg.db` automatically.
-   - Do the same for your Plex library database: copy it into `db/plex_library.db` or set `plex_library_db_source` and let Pex maintain the mirror. Owned detection relies on this copy so you don’t have to crawl your filesystem.
+If Plex is busy, the owned scan retries the consistent live copy up to three times. It keeps a usable local mirror. On a first scan without a usable mirror, it tries completed date-stamped Plex library backups in newest-first order, validating stability, SQLite integrity and library schema before installing a local snapshot. The guide retains the snapshot filename/date or an actionable error with **Retry owned scan**. The live source remains configured, and a fallback does not advance the live-refresh marker.
 
-3. **Edit `pex-config.json`** (see the [Configuration Reference](#configuration-reference)).
+Read the [README bundled in the ZIP](make_portable/README.md) for the complete first-run and recovery instructions.
 
-4. **Build and run the app**
-   ```bash
-   cargo run --release --locked
-   ```
-   The first launch will
-   - copy the Plex database if `plex_epg_db_source` is set,
-   - copy the Plex library database if `plex_library_db_source` is set,
-   - load owned titles from the mirrored library database, and
-   - start poster prefetching.
+For development:
 
-   Subsequent runs reuse the cached data, so they reach the UI much faster.
+```sh
+git clone https://github.com/AnicetusCer/pex.git
+cd pex
+cargo run --release --locked
+```
+
+The application resolves portable data beside the executable. Set `PEX_BASE_DIR` to a writable test folder to exercise a clean install without using your normal data. Use fixture databases rather than a live Plex database for development.
 
 ---
-
 ## Configuration Reference
 
 Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to the app/current directory, then `~/.pex-config.json` (Windows/Linux/macOS home). Legacy `config.json` is still accepted for backward compatibility. All keys are optional unless otherwise stated; absent keys fall back to reasonable defaults.
@@ -188,6 +177,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | --- | --- | --- | --- |
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
 | `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
+| `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
 | `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
 | `log_level` | string | `info` | Sets the default tracing level when `RUST_LOG` is unset. Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
@@ -258,9 +248,9 @@ Copy both `.db` files plus their `-wal`/`-shm` companions (if present) while Ple
 ## Typical Workflows
 
 ### First run (cold start)
-1. Copy or configure access to the Plex EPG DB (and optionally the library DB).
-2. Populate `pex-config.json` with your Plex database paths and TMDb settings.
-3. Launch with `cargo run --release`.
+1. Launch PEX and select your Plex Databases folder in **Connect to Plex**.
+2. Select a guide and choose whether to enable the owned scan.
+3. Click **Save and load guide**.
 4. Let the initial owned scan and poster prefetch finish (progress appears in
 the status bar). Large libraries may take several minutes.
 

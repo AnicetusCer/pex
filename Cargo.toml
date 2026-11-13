@@ -23,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
 urlencoding = "2.1"
 tempfile = "3.10"
+rfd = "0.15"
 
 [build-dependencies]
 winresource = "0.1"
