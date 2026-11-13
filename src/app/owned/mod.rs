@@ -8,8 +8,8 @@ use self::owned_scan_plex::OwnedScanPlex;
 use crate::app::types::OwnedMsg;
 
 // v1 sidecars contain franchise prefixes and synthetic years indistinguishable from real titles.
-pub(super) const ALL_SIDECAR: &str = "owned_all_v2.txt";
-pub(super) const HD_SIDECAR: &str = "owned_hd_v2.txt";
+pub(super) const ALL_SIDECAR: &str = "owned_all_v3.txt";
+pub(super) const HD_SIDECAR: &str = "owned_hd_v3.txt";
 
 impl crate::app::PexApp {
     /// Kick off a non-blocking owned scan against the Plex library database.
@@ -135,6 +135,15 @@ impl crate::app::PexApp {
         if keys.contains(&short_key) {
             return Some(short_key);
         }
+        // Only one side may omit a possessive credit, and both must agree on year.
+        let (kind, name) = match Self::credited_title_remainder(title) {
+            Some(remainder) => ("bare", remainder),
+            None => ("credited", title),
+        };
+        let credit_key = Self::short_title_key(kind, name, year);
+        if keys.contains(&credit_key) {
+            return Some(credit_key);
+        }
         find("undated")
     }
 
@@ -145,6 +154,21 @@ impl crate::app::PexApp {
         )
     }
 
+    fn credited_title_remainder(title: &str) -> Option<&str> {
+        let title = Self::trailing_title_year(title).map_or(title, |(text, _)| text);
+        let (credit, remainder) = title
+            .split_once("'s ")
+            .or_else(|| title.split_once("’s "))?;
+        if credit.split_whitespace().count() < 2 {
+            return None;
+        }
+        let normalized = crate::app::utils::normalize_title(remainder);
+        let words = normalized
+            .split_whitespace()
+            .filter(|w| !matches!(*w, "a" | "an" | "the"));
+        (words.take(2).count() == 2).then_some(remainder.trim())
+    }
+
     fn owned_title_variants(title: &str) -> Vec<String> {
         let trimmed = title.trim();
         if trimmed.is_empty() {
@@ -153,21 +177,6 @@ impl crate::app::PexApp {
 
         let mut titles = Vec::new();
         titles.push(trimmed.to_string());
-
-        // Handle possessive prefixes like "Lemony Snicket's A Series of ..."
-        // so we also match library entries that drop the leading proper name.
-        for needle in ["'s ", "’s "] {
-            if let Some(pos) = trimmed.find(needle) {
-                let before = &trimmed[..pos];
-                if !before.contains(' ') {
-                    continue;
-                }
-                let candidate = trimmed[pos + needle.len()..].trim_start();
-                if !candidate.is_empty() && candidate != trimmed {
-                    titles.push(candidate.to_string());
-                }
-            }
-        }
 
         // Drop leading English articles so "The Return of Sabata" matches "Return of Sabata".
         let lower = trimmed.to_ascii_lowercase();

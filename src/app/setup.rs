@@ -254,7 +254,9 @@ mod tests {
             fs::copy(&library, config::local_library_db_path()).unwrap();
             fs::create_dir_all(portable.join(".pex_cache")).unwrap();
             fs::write(
-                portable.join(".pex_cache/owned_all_v2.txt"),
+                portable
+                    .join(".pex_cache")
+                    .join(super::super::owned::ALL_SIDECAR),
                 "fixture movie|2020\n",
             )
             .unwrap();

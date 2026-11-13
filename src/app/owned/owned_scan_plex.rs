@@ -267,6 +267,9 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
                 if !crate::app::utils::normalize_title(name).is_empty() {
                     abbreviations.insert(PexApp::short_title_key(kind, name, year));
                 }
+                if let Some(remainder) = PexApp::credited_title_remainder(title) {
+                    abbreviations.insert(PexApp::short_title_key("credited", remainder, year));
+                }
             }
             for key in abbreviations {
                 if index.keys.contains(&key) {
@@ -333,7 +336,10 @@ mod tests {
                 width: Some(1920),
                 height: Some(1080),
                 updated_at: None,
-                file_path: format!("library/film-{i}.mkv"),
+                file_path: match year {
+                    Some(year) => format!("library/{title} ({year}).mkv"),
+                    None => format!("library/{title}.mkv"),
+                },
             });
         index_owned_entries(entries.collect())
     }
@@ -376,6 +382,42 @@ mod tests {
         assert!(matches(&owned, "Dune", None));
         let undated = library(&[("Dune", None)]);
         assert!(matches(&undated, "Dune", Some(1984)));
+    }
+
+    #[test]
+    fn possessive_titles_do_not_claim_a_generic_remainder() {
+        let bean = "Mr. Bean's Holiday";
+        let owned = library(&[(bean, Some(2007))]);
+        for year in [Some(2006), Some(2007), None] {
+            assert!(!matches(&owned, "The Holiday", year));
+            assert!(!matches(&owned, "Holiday", year));
+        }
+        assert!(matches(&owned, "Mr Bean’s Holiday", Some(2007)));
+        assert!(matches(
+            &library(&[("The Holiday", Some(2006))]),
+            "The Holiday",
+            Some(2006)
+        ));
+    }
+
+    #[test]
+    fn omitted_possessive_credits_need_a_unique_multiword_title_and_exact_year() {
+        let credited = "Lemony Snicket’s A Series of Unfortunate Events";
+        let bare = "A Series of Unfortunate Events";
+        for (owned, guide) in [(bare, credited), (credited, bare)] {
+            let index = library(&[(owned, Some(2004))]);
+            assert!(matches(&index, guide, Some(2004)));
+            assert!(!matches(&index, guide, Some(2005)));
+            assert!(!matches(&index, guide, None));
+        }
+        let other = "Another Writer's A Series of Unfortunate Events";
+        let ambiguous = library(&[(credited, Some(2004)), (other, Some(2004))]);
+        assert!(!matches(&ambiguous, bare, Some(2004)));
+        assert!(!matches(
+            &library(&[(credited, Some(2004))]),
+            other,
+            Some(2004)
+        ));
     }
 
     #[test]

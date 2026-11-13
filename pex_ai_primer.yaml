@@ -181,8 +181,8 @@ config:
       - detail_w: "persisted detail panel width"
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-    owned_hd_sidecar: "<cache_dir>/owned_hd_v2.txt"
-    owned_all_sidecar: "<cache_dir>/owned_all_v2.txt"
+    owned_hd_sidecar: "<cache_dir>/owned_hd_v3.txt"
+    owned_all_sidecar: "<cache_dir>/owned_all_v3.txt"
     owned_modified: "in-memory map keyed by owned key (timestamp from Plex library)"
   env_flags:
     - PEX_DISABLE_PREFETCH=1
@@ -266,7 +266,7 @@ hd_logic:
   broadcast_hd_inference:
     fn: "utils::infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool"
   owned_hd_inference:
-    stored in owned_hd_v2.txt, recorded during owned scan (positive HD detections)
+    stored in owned_hd_v3.txt, recorded during owned scan (positive HD detections)
   better_hd_available_rule:
     definition: "row.owned && !owned_is_hd && broadcast_hd"
     effects:
