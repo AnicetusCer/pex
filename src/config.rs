@@ -226,7 +226,6 @@ pub fn discover_databases(folder: &Path) -> Result<(Vec<PathBuf>, Option<PathBuf
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("tv.plex.providers.epg.cloud") && name.ends_with(".db") {
-            readable_database(&entry.path())?;
             guides.push(entry.path());
         } else if name == "com.plexapp.plugins.library.db" {
             library = Some(entry.path());
@@ -301,4 +300,31 @@ pub fn save_connection(
         .persist(&path)
         .map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovery_returns_all_guide_choices_and_only_the_live_library() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "tv.plex.providers.epg.cloud-a.db",
+            "tv.plex.providers.epg.cloud-b.db",
+            "com.plexapp.plugins.library.db",
+            "com.plexapp.plugins.library.db-2020-01-01",
+            "tv.plex.providers.epg.cloud-a.db-wal",
+            "unrelated.db",
+        ] {
+            fs::write(dir.path().join(name), b"fixture file").unwrap();
+        }
+        let (guides, library) = discover_databases(dir.path()).unwrap();
+        assert_eq!(guides.len(), 2);
+        assert!(guides[0].ends_with("tv.plex.providers.epg.cloud-a.db"));
+        assert_eq!(
+            library,
+            Some(dir.path().join("com.plexapp.plugins.library.db"))
+        );
+    }
 }

@@ -1,7 +1,6 @@
 pub(crate) mod owned_scan_plex;
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
 
 use eframe::egui as eg;
 
@@ -294,7 +293,6 @@ impl crate::app::PexApp {
                     self.owned_scan_in_progress = false;
                     self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
                     self.set_status(msg);
-                    self.owned_retry_next = None;
                     if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
                         self.boot_phase = crate::app::BootPhase::Ready;
                     }
@@ -309,65 +307,6 @@ impl crate::app::PexApp {
                         modified,
                     } = *done;
                     self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
-                    if keys.is_empty() {
-                        self.owned_scan_in_progress = false;
-                        let has_source = crate::config::load_config()
-                            .plex_library_db_source
-                            .as_ref()
-                            .is_some();
-
-                        if has_source {
-                            if self.owned_retry_attempts < crate::app::OWNED_AUTO_RETRY_MAX {
-                                self.owned_retry_attempts =
-                                    self.owned_retry_attempts.saturating_add(1);
-                                let attempt = self.owned_retry_attempts;
-                                self.owned_retry_next =
-                                    Some(Instant::now() + Duration::from_secs(3));
-                                self.record_owned_message(format!(
-                                    "Owned scan returned no entries (attempt {attempt}/{}) – retrying after copying Plex library…",
-                                    crate::app::OWNED_AUTO_RETRY_MAX
-                                ));
-                                self.set_status("Owned scan retry scheduled…");
-                            } else {
-                                self.record_owned_message(
-                                    "Owned scan returned no entries after automatic retries.",
-                                );
-                                self.set_status(format!(
-                                    "Owned scan completed with no matches. Verify plex_library_db_source in {}.",
-                                    crate::config::CONFIG_FILENAME
-                                ));
-                                self.owned_keys = Some(HashSet::new());
-                                self.owned_guids = Some(HashSet::new());
-                                self.owned_hd_guids = Some(HashSet::new());
-                                self.owned_guid_modified = Some(HashMap::new());
-                                self.owned_retry_next = None;
-                            }
-                        } else {
-                            self.record_owned_message(
-                                "Owned scan returned no entries (plex_library_db_source not configured).",
-                            );
-                            self.set_status(crate::app::OWNED_SCAN_COMPLETE_STATUS);
-                            self.owned_keys = Some(HashSet::new());
-                            self.owned_guids = Some(HashSet::new());
-                            self.owned_hd_guids = Some(HashSet::new());
-                            self.owned_guid_modified = Some(HashMap::new());
-                            self.owned_retry_next = None;
-                        }
-
-                        if !matches!(self.boot_phase, crate::app::BootPhase::Ready) {
-                            self.boot_phase = crate::app::BootPhase::Ready;
-                        }
-                        if self.owned_retry_next.is_none() {
-                            self.owned_hd_keys = Some(hd_keys);
-                            self.owned_modified = Some(modified);
-                            self.apply_owned_flags();
-                            self.mark_dirty();
-                        }
-                        continue;
-                    }
-
-                    self.owned_retry_attempts = 0;
-                    self.owned_retry_next = None;
 
                     let count = keys.len();
                     self.owned_keys = Some(keys);

@@ -96,6 +96,16 @@ mod tests {
         let library = plex.join("com.plexapp.plugins.library.db");
         super::super::test_fixtures::database(&guide);
         super::super::test_fixtures::database(&library);
+        if scenario == "guide_only" {
+            fs::create_dir_all(portable.join("db")).unwrap();
+            fs::copy(&library, config::local_library_db_path()).unwrap();
+            fs::create_dir_all(portable.join(".pex_cache")).unwrap();
+            fs::write(
+                portable.join(".pex_cache/owned_all_v2.txt"),
+                "fixture movie|2020\n",
+            )
+            .unwrap();
+        }
         let legacy = portable.join("config.json");
         match scenario.as_str() {
             "bundled" => fs::write(&legacy, include_str!("../../make_portable/config.json")).unwrap(),
@@ -164,7 +174,7 @@ mod tests {
                     .unwrap()
                     .contains("Retry owned scan"));
                 assert!(!config::local_library_db_path().exists());
-                assert!(app.owned_retry_next.is_none());
+                assert!(!app.owned_scan_in_progress);
             }
             "legacy" => {
                 assert!(app.rows[0].owned);
@@ -174,6 +184,14 @@ mod tests {
                 assert_eq!(value["custom_setting"], 42);
                 assert_eq!(value["tmdb_api_key"], "fixture-key");
                 assert!(value.get("plex_db_source").is_none());
+                #[cfg(windows)]
+                {
+                    let unc = PathBuf::from(
+                        r"\\fixture-nas\Plex share\Databases\tv.plex.providers.epg.cloud-test.db",
+                    );
+                    config::save_connection(&unc, None, true).unwrap();
+                    assert_eq!(config::load_config().plex_epg_db_source, Some(unc));
+                }
             }
             _ => assert!(!app.rows[0].owned),
         }
@@ -242,7 +260,7 @@ impl PexApp {
                 Err(e) => self.connection.message = e,
             }
         }
-        eg::CentralPanel::default().show(ctx, |ui| {
+        eg::CentralPanel::default().show(ctx, |ui| { eg::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Connect to Plex");
             ui.label("Select Plex Media Server's Plug-in Support / Databases folder. PEX copies data locally and leaves Plex's files unchanged.");
             for e in &self.setup_errors { ui.colored_label(eg::Color32::LIGHT_RED, e); }
@@ -278,7 +296,13 @@ impl PexApp {
             }
             if let Some(library) = &self.connection.library { ui.label(format!("Library: {}", library.display())); }
             ui.checkbox(&mut self.connection.guide_only, "Guide only (skip owned library and recording badges)");
-            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0;
+            if self.connection.library.is_none() && !self.connection.guides.is_empty() {
+                ui.label("No live library found. Keep Guide only checked, or select a folder containing com.plexapp.plugins.library.db.");
+            }
+            if self.owned_scan_in_progress || self.in_flight() > 0 || self.prep_rx.is_some() {
+                ui.label("A scan or artwork download is running. You can save a new connection when it finishes.");
+            }
+            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0 && self.prep_rx.is_none();
             if ui.add_enabled(can_save, eg::Button::new("Save and load guide")).clicked() {
                 self.save_selected_connection(ctx);
             }
@@ -290,7 +314,7 @@ impl PexApp {
             }
             if self.did_init && ui.button("Back to guide").clicked() { self.connection.open = false; }
             ui.label("No TMDb key is required. Choose a writable portable folder; your settings and local copies stay beside PEX.");
-        });
+        }); });
     }
     fn save_selected_connection(&mut self, ctx: &eg::Context) {
         let guide = &self.connection.guides[self.connection.selected];
@@ -314,11 +338,6 @@ impl PexApp {
                     self.owned_hd_keys = None;
                     self.owned_guids = None;
                     self.scheduled_index = None;
-                    // Force source refresh even if the prior server's mirror is fresh.
-                    let _ = std::fs::remove_file(format!(
-                        "{}.last_sync",
-                        config::local_db_path().display()
-                    ));
                     self.restart_poster_pipeline(ctx);
                     self.start_owned_scan(true);
                 }

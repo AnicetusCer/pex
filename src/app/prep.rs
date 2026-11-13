@@ -210,6 +210,16 @@ fn copy_validated_snapshot(
     library: bool,
     completed_backup: bool,
 ) -> io::Result<()> {
+    copy_snapshot_with_hook(src, dst, library, completed_backup, || {})
+}
+
+fn copy_snapshot_with_hook(
+    src: &Path,
+    dst: &Path,
+    library: bool,
+    completed_backup: bool,
+    after_copy: impl FnOnce(),
+) -> io::Result<()> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     if dst.exists() && fs::canonicalize(src)? == fs::canonicalize(dst)? {
@@ -231,6 +241,7 @@ fn copy_validated_snapshot(
             &sqlite_sidecar_path(staged_path, "wal"),
         )?;
     }
+    after_copy();
     if before != source_state(src)? {
         return Err(io::Error::other(
             "source changed during copy; no new snapshot installed",
@@ -248,6 +259,35 @@ fn copy_validated_snapshot(
     .map_err(io::Error::other)?;
     db.pragma_update(None, "journal_mode", "DELETE")
         .map_err(io::Error::other)?;
+    let destination_valid = Connection::open_with_flags(dst, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .ok()
+        .is_some_and(|local| validate_snapshot(&local, library).is_ok());
+    if dst.exists() && !destination_valid {
+        // A corrupt mirror cannot be restored with SQLite's backup API. Only after
+        // validating the new snapshot, quarantine the unusable generation locally.
+        // Restore every renamed file if installation fails.
+        drop(db);
+        let mut moved = Vec::new();
+        let mut paths = vec![dst.to_path_buf()];
+        paths.extend(["wal", "shm", "journal"].map(|suffix| sqlite_sidecar_path(dst, suffix)));
+        let install = (|| -> io::Result<()> {
+            for (i, path) in paths.into_iter().enumerate() {
+                if path.exists() {
+                    let old = scratch.path().join(format!("unusable-{i}"));
+                    fs::rename(&path, &old)?;
+                    moved.push((path, old));
+                }
+            }
+            staged.persist_noclobber(dst).map_err(|e| e.error)?;
+            Ok(())
+        })();
+        if install.is_err() {
+            for (path, old) in moved.into_iter().rev() {
+                fs::rename(old, path)?;
+            }
+        }
+        return install;
+    }
     if dst.exists()
         || ["wal", "shm", "journal"]
             .iter()
@@ -846,11 +886,10 @@ impl crate::app::PexApp {
                         self.set_startup_progress_floor(crate::app::STARTUP_STAGE2_DONE);
                         let poster_done_status =
                             format!("Poster prep complete. {} items ready.", self.rows.len());
+                        self.boot_phase = crate::app::BootPhase::Ready;
                         if self.owned_keys.is_some() || !self.owned_scan_in_progress {
-                            self.boot_phase = crate::app::BootPhase::Ready;
                             self.set_status(poster_done_status);
                         } else {
-                            self.boot_phase = crate::app::BootPhase::Caching;
                             self.set_status("Poster prep complete. Scanning owned library...");
                         }
 
@@ -892,6 +931,141 @@ impl crate::app::PexApp {
 #[cfg(test)]
 mod mirror_tests {
     use super::*;
+
+    fn library(path: &Path) {
+        crate::app::test_fixtures::database(path);
+    }
+
+    #[test]
+    fn busy_first_scan_uses_newest_valid_completed_backup_then_returns_to_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("com.plexapp.plugins.library.db");
+        let dst = dir.path().join("local/library.db");
+        library(&src);
+        fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
+        library(&dir.path().join("com.plexapp.plugins.library.db-2020-01-01"));
+        library(&dir.path().join("com.plexapp.plugins.library.db-2020-01-02"));
+        // Reject corrupt, wrong-schema, unfinished and unrelated candidates, even if newer.
+        fs::write(
+            dir.path().join("com.plexapp.plugins.library.db-2020-01-03"),
+            b"corrupt",
+        )
+        .unwrap();
+        drop(source(
+            &dir.path().join("com.plexapp.plugins.library.db-2020-01-04"),
+        ));
+        let unfinished = dir.path().join("com.plexapp.plugins.library.db-2020-01-05");
+        library(&unfinished);
+        fs::write(sqlite_sidecar_path(&unfinished, "wal"), b"in progress").unwrap();
+        library(
+            &dir.path()
+                .join("com.plexapp.plugins.library.db-2020-01-06.tmp"),
+        );
+        library(&dir.path().join("com.plexapp.plugins.library.db-2020-13-01"));
+        let attempts = std::cell::Cell::new(0);
+        let message = recover_library(&src, &dst, false, Duration::ZERO, |s| {
+            if s.contains("attempt") {
+                attempts.set(attempts.get() + 1);
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+        assert!(message.contains("2020-01-02"));
+        assert!(usable_library(&dst));
+        assert!(mirror_due(&dst));
+        assert!(!last_sync_marker_path(&dst).exists());
+        fs::remove_file(sqlite_sidecar_path(&src, "journal")).unwrap();
+        let live = recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap();
+        assert!(live.contains("live source"));
+        assert!(!mirror_due(&dst));
+        assert!(fs::read_to_string(provenance_path(&dst))
+            .unwrap()
+            .contains("live source"));
+    }
+
+    #[test]
+    fn busy_without_backup_is_actionable_and_does_not_install_a_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("com.plexapp.plugins.library.db");
+        let dst = dir.path().join("local.db");
+        library(&src);
+        fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
+        let error = recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap_err();
+        assert!(error.contains("after 3 attempts"));
+        assert!(error.contains("Retry owned scan"));
+        assert!(!dst.exists());
+        assert!(!last_sync_marker_path(&dst).exists());
+    }
+
+    #[test]
+    fn corrupt_local_mirror_can_recover_from_a_completed_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("com.plexapp.plugins.library.db");
+        let dst = dir.path().join("local.db");
+        library(&src);
+        fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
+        library(&dir.path().join("com.plexapp.plugins.library.db-2020-01-01"));
+        fs::write(&dst, b"corrupt old mirror").unwrap();
+        recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap();
+        assert!(usable_library(&dst));
+    }
+
+    #[test]
+    fn transient_busy_source_succeeds_on_a_bounded_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("com.plexapp.plugins.library.db");
+        let dst = dir.path().join("local.db");
+        library(&src);
+        let journal = sqlite_sidecar_path(&src, "journal");
+        fs::write(&journal, b"busy").unwrap();
+        let attempts = std::cell::Cell::new(0);
+        recover_library(&src, &dst, false, Duration::ZERO, |s| {
+            if s.contains("attempt") {
+                attempts.set(attempts.get() + 1);
+            }
+            if s.contains("attempt 2/") {
+                fs::remove_file(&journal).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts.get(), 2);
+        assert!(usable_library(&dst));
+        assert!(!mirror_due(&dst));
+    }
+
+    #[test]
+    fn busy_refresh_keeps_usable_mirror_and_its_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("com.plexapp.plugins.library.db");
+        let dst = dir.path().join("local.db");
+        library(&src);
+        let initial = recover_library(&src, &dst, true, Duration::ZERO, |_| {}).unwrap();
+        let old = fs::read(&dst).unwrap();
+        fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
+        let message = recover_library(&src, &dst, true, Duration::ZERO, |_| {}).unwrap();
+        assert!(message.contains(&initial));
+        assert!(message.contains("Keeping"));
+        assert_eq!(old, fs::read(&dst).unwrap());
+    }
+
+    #[test]
+    fn changed_source_is_rejected_without_replacing_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        let dst = dir.path().join("local.db");
+        library(&src);
+        copy_validated_snapshot(&src, &dst, true, false).unwrap();
+        let old = fs::read(&dst).unwrap();
+        let error = copy_snapshot_with_hook(&src, &dst, true, false, || {
+            Connection::open(&src)
+                .unwrap()
+                .execute("UPDATE metadata_items SET title='changed'", [])
+                .unwrap();
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("source changed during copy"));
+        assert_eq!(old, fs::read(&dst).unwrap());
+    }
 
     fn source(path: &Path) -> Connection {
         let db = Connection::open(path).unwrap();

@@ -59,7 +59,6 @@ const STATUS_EMIT_EVERY_MS: u64 = 120;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
 const PREWARM_UPLOADS: usize = 24;
-const OWNED_AUTO_RETRY_MAX: u8 = 2;
 pub(crate) const STARTUP_STAGE1_DONE: f32 = 0.12;
 pub(crate) const STARTUP_STAGE2_STARTED: f32 = 0.20;
 pub(crate) const STARTUP_STAGE2_DONE: f32 = 0.55;
@@ -138,8 +137,6 @@ pub struct PexApp {
     owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
     owned_scan_messages: VecDeque<String>,
-    owned_retry_attempts: u8,
-    owned_retry_next: Option<Instant>,
     rating_tx: Option<Sender<RatingMsg>>,
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
@@ -241,8 +238,6 @@ impl Default for PexApp {
             owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
             owned_scan_messages: VecDeque::new(),
-            owned_retry_attempts: 0,
-            owned_retry_next: None,
             rating_tx: None,
             rating_rx: None,
             rating_states: HashMap::new(),
@@ -780,15 +775,7 @@ impl PexApp {
     }
 
     fn refresh_owned_scan(&mut self) {
-        self.refresh_owned_scan_internal(true, true);
-    }
-
-    fn refresh_owned_scan_internal(&mut self, force_copy: bool, reset_auto_retry: bool) {
-        if reset_auto_retry {
-            self.owned_retry_attempts = 0;
-            self.owned_retry_next = None;
-        }
-        self.start_owned_scan(force_copy);
+        self.start_owned_scan(true);
     }
 }
 
@@ -1046,20 +1033,6 @@ impl PexApp {
             self.stage4_complete_message = Some(message.clone());
             if !self.owned_scan_in_progress {
                 self.set_status(message);
-            }
-        }
-
-        if !self.owned_scan_in_progress {
-            if let Some(next) = self.owned_retry_next {
-                if Instant::now() >= next && self.owned_retry_attempts > 0 {
-                    let attempt = self.owned_retry_attempts;
-                    self.set_status(format!(
-                        "Retrying owned scan ({attempt}/{})…",
-                        OWNED_AUTO_RETRY_MAX
-                    ));
-                    self.refresh_owned_scan_internal(true, false);
-                    self.owned_retry_next = None;
-                }
             }
         }
 
