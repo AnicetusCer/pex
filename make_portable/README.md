@@ -29,7 +29,7 @@ A backup does not count as a successful daily live refresh. PEX tries the live s
 
 Keep your working settings. PEX retains the existing config search order: `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
 
-When you save a connection, PEX updates the config it found (or creates `pex-config.json` when none exists), preserving other keys, including your cache directory and TMDb key. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
+When you save a connection, PEX preserves other keys, including your cache directory and TMDb key. It saves to `pex-config.json` when starting from the bundled or a legacy `config.json`, leaving that legacy file intact. This protects the saved connection when a later ZIP replaces its bundled starter config. Existing preferred/home configs are updated in place, and an explicit `PEX_CONFIG` destination is always honored. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
 
 ## Optional configuration
 

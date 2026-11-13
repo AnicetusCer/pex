@@ -263,21 +263,27 @@ pub fn config_problem() -> Option<String> {
         })
 }
 
-/// Update the effective config, retaining optional settings and unknown keys.
+/// Retain settings, but migrate legacy files on explicit save so an upgraded ZIP's
+/// bundled config.json cannot replace the user's connection.
 pub fn save_connection(
     epg: &Path,
     library: Option<&Path>,
     guide_only: bool,
 ) -> Result<PathBuf, String> {
-    let path = discover_config_path().unwrap_or_else(|| {
-        env::var_os("PEX_CONFIG")
-            .map(|p| resolve_relative_path(PathBuf::from(p)))
-            .unwrap_or_else(|| base_dir().join(CONFIG_FILENAME))
-    });
-    let mut value = if path.exists() {
-        let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let source = discover_config_path();
+    let path = env::var_os("PEX_CONFIG")
+        .map(|p| resolve_relative_path(PathBuf::from(p)))
+        .unwrap_or_else(|| match source.as_deref() {
+            Some(p) if p.file_name().is_some_and(|n| n == LEGACY_CONFIG_FILENAME) => {
+                p.with_file_name(CONFIG_FILENAME)
+            }
+            Some(p) => p.to_path_buf(),
+            None => base_dir().join(CONFIG_FILENAME),
+        });
+    let mut value = if let Some(source) = source {
+        let raw = fs::read_to_string(&source).map_err(|e| e.to_string())?;
         serde_json::from_str::<serde_json::Value>(&raw)
-            .map_err(|e| format!("Repair {} before saving: {e}", path.display()))?
+            .map_err(|e| format!("Repair {} before saving: {e}", source.display()))?
     } else {
         serde_json::json!({})
     };

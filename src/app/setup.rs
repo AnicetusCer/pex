@@ -179,11 +179,30 @@ mod tests {
             "legacy" => {
                 assert!(app.rows[0].owned);
                 config::save_connection(&guide, Some(&library), false).unwrap();
-                let value: serde_json::Value =
-                    serde_json::from_str(&fs::read_to_string(legacy).unwrap()).unwrap();
+                assert_eq!(
+                    config::discover_config_path(),
+                    Some(portable.join("pex-config.json"))
+                );
+                let value: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(portable.join("pex-config.json")).unwrap(),
+                )
+                .unwrap();
                 assert_eq!(value["custom_setting"], 42);
                 assert_eq!(value["tmdb_api_key"], "fixture-key");
                 assert!(value.get("plex_db_source").is_none());
+                assert!(fs::read_to_string(&legacy)
+                    .unwrap()
+                    .contains("plex_db_source"));
+                // Re-extracting a bundle's empty legacy config must not lose setup.
+                fs::write(&legacy, include_str!("../../make_portable/config.json")).unwrap();
+                assert_eq!(
+                    config::load_config().plex_epg_db_source,
+                    Some(guide.clone())
+                );
+                let explicit = portable.join("custom-settings.json");
+                std::env::set_var("PEX_CONFIG", &explicit);
+                config::save_connection(&guide, Some(&library), false).unwrap();
+                assert_eq!(config::discover_config_path(), Some(explicit));
                 #[cfg(windows)]
                 {
                     let unc = PathBuf::from(
