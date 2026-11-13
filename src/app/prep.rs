@@ -198,11 +198,19 @@ fn check_plex_pages(db: &Connection, library: bool) -> io::Result<String> {
         &["metadata_items", "media_items"]
     };
     for table in tables {
-        let mut statement = db
-            .prepare(&format!("SELECT * FROM main.{table} NOT INDEXED"))
+        // Like quick_check, ask for the last column's type to decode each row
+        // header without materialising large text or blob values.
+        let column: String = db
+            .query_row(
+                "SELECT name FROM pragma_table_info(?1, 'main') ORDER BY cid DESC LIMIT 1",
+                [table],
+                |r| r.get(0),
+            )
             .map_err(io::Error::other)?;
-        let mut rows = statement.query([]).map_err(io::Error::other)?;
-        while rows.next().map_err(io::Error::other)?.is_some() {}
+        let quoted = column.replace('"', "\"\"");
+        let scan = format!("SELECT count(typeof(\"{quoted}\")) FROM main.{table} NOT INDEXED");
+        db.query_row(&scan, [], |_| Ok(()))
+            .map_err(io::Error::other)?;
     }
     db.query_row("PRAGMA main.quick_check(sqlite_schema)", [], |r| r.get(0))
         .map_err(io::Error::other)
@@ -1055,6 +1063,29 @@ mod mirror_tests {
 
         assert!(copy_validated_snapshot(&src, &dst, true, true).is_err());
         assert_eq!(fs::read(&dst).unwrap(), previous);
+    }
+
+    #[test]
+    fn malformed_plex_record_header_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("source.db");
+        plex_search_schema(&src, "icu_root", true);
+        let db = Connection::open(&src).unwrap();
+        let (root, page_size): (usize, usize) = db.query_row(
+            "SELECT rootpage, page_size FROM sqlite_schema, pragma_page_size WHERE name='media_parts'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        drop(db);
+        let mut bytes = fs::read(&src).unwrap();
+        let page = (root - 1) * page_size;
+        let cell = page + u16::from_be_bytes([bytes[page + 8], bytes[page + 9]]) as usize;
+        // The fixture's single row has a one-byte payload length and rowid.
+        assert!(bytes[cell] < 127);
+        assert_eq!(bytes[cell + 1], 1);
+        bytes[cell + 2] = 127; // Declared header exceeds the entire payload.
+        fs::write(&src, bytes).unwrap();
+        let db = Connection::open(&src).unwrap();
+        assert!(validate_snapshot(&db, true).is_err());
     }
 
     #[test]
