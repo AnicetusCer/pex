@@ -41,7 +41,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev xvfb xauth libgl1-mesa-dri
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
@@ -70,6 +70,19 @@ jobs:
           $checksumPath = New-ArtifactChecksums -ArtifactPaths @("$assetDir/$zipName") -OutputPath "$assetDir/$checksumName"
           Test-ArtifactChecksums -ChecksumPath $checksumPath -ArtifactDir $assetDir
           "tag=$tag" >> $env:GITHUB_OUTPUT
+          "zip=$assetDir/$zipName" >> $env:GITHUB_OUTPUT
+      - name: Exercise packaged Linux app with completed snapshots
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          PEX_RENDERER: glow
+          SNAPSHOT_TEST_ZIP: ${{ steps.bundle.outputs.zip }}
+        run: xvfb-run -a python3 tests/portable_snapshot_smoke.py "$SNAPSHOT_TEST_ZIP"
+      - name: Exercise packaged Windows app with completed snapshots
+        if: runner.os == 'Windows'
+        env:
+          SNAPSHOT_TEST_ZIP: ${{ steps.bundle.outputs.zip }}
+        run: python tests/portable_snapshot_smoke.py "$env:SNAPSHOT_TEST_ZIP"
       - uses: actions/upload-artifact@v4
         with:
           name: pex-portable-${{ matrix.platform }}-${{ steps.bundle.outputs.tag }}
