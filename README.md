@@ -30,8 +30,8 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 
 - Releases live on the [GitHub Releases page](https://github.com/AnicetusCer/pex/releases); each tagged version includes portable bundles.
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
-- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.4` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
-- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.4` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
+- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.5` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
+- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.5` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
 - Release helpers also upload `checksums-<platform>-<tag>.txt` so each zip can be verified after download.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
 
@@ -48,8 +48,8 @@ Verify the zip against the published checksum file before running.
 ### Windows (PowerShell)
 
 ```powershell
-$zip = "pex-portable-windows-x86_64-v1.2.4.zip"
-$checksums = "checksums-windows-x86_64-v1.2.4.txt"
+$zip = "pex-portable-windows-x86_64-v1.2.5.zip"
+$checksums = "checksums-windows-x86_64-v1.2.5.txt"
 
 $line = Get-Content $checksums | Where-Object { $_ -like "*`*$zip" } | Select-Object -First 1
 if (-not $line) { throw "No checksum entry found for $zip" }
@@ -62,7 +62,7 @@ if ($expected -eq $actual) { "OK: checksum matches." } else { "ERROR: checksum m
 ### Linux
 
 ```bash
-sha256sum -c checksums-linux-x86_64-v1.2.4.txt
+sha256sum -c checksums-linux-x86_64-v1.2.5.txt
 ```
 
 Expected output: `...zip: OK`
@@ -142,7 +142,7 @@ the accompanying WAL/SHM files) exist on disk.
 - Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or point `plex_epg_db_source` at the live Plex database so Pex pulls in a fresh copy once per day.
 
 ### Toolchain
-- Rust toolchain with Cargo (the 1.2.4 builds use Rust 1.94)
+- Rust toolchain with Cargo (the 1.2.5 builds use Rust 1.94)
 - Git (to clone the repository)
 
 ### External services
