@@ -1,6 +1,6 @@
 pub(crate) mod owned_scan_plex;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use eframe::egui as eg;
 

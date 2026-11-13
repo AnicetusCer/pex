@@ -18,6 +18,159 @@ pub(super) struct ConnectionSetup {
     message: String,
 }
 
+impl PexApp {
+    pub(super) fn run_setup_checks(&mut self) {
+        if self.connection.checks.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.connection.checks = Some(rx);
+            std::thread::spawn(move || {
+                let cfg = config::load_config();
+                let mut errors = Vec::new();
+                let mut warnings = Vec::new();
+                if let Some(problem) = config::config_problem() {
+                    errors.push(problem);
+                }
+                let local_ok = config::readable_database(&config::local_db_path()).is_ok();
+                match cfg.plex_epg_db_source.as_deref() {
+                    Some(path) => if let Err(e) = config::readable_database(path) {
+                        if local_ok { warnings.push(format!("{e} Using the local guide.")); }
+                        else { errors.push(e); }
+                    },
+                    None if !local_ok => errors.push("Welcome to PEX. Choose your Plex Databases folder to load the programme guide. No config or SQLite installation is needed.".into()),
+                    _ => {}
+                }
+                if !cfg.guide_only {
+                    if let Some(path) = cfg.plex_library_db_source.as_deref() {
+                        if let Err(e) = config::readable_database(path) {
+                            warnings.push(e);
+                        }
+                    }
+                }
+                let _ = tx.send((errors, warnings));
+            });
+        }
+        if let Some(Ok((errors, warnings))) =
+            self.connection.checks.as_ref().map(Receiver::try_recv)
+        {
+            self.setup_errors = errors;
+            self.setup_warnings = warnings;
+            self.setup_checked = true;
+            self.connection.checks = None;
+        }
+    }
+
+    pub(super) fn render_setup_gate(&mut self, ctx: &eg::Context) {
+        if let Some(Ok((folder, result))) =
+            self.connection.discovery.as_ref().map(Receiver::try_recv)
+        {
+            self.connection.discovery = None;
+            self.connection.folder = folder;
+            match result {
+                Ok((guides, library)) => {
+                    self.connection.message = if guides.is_empty() {
+                        "No guide databases found. Select the Databases folder containing tv.plex.providers.epg.cloud*.db. Plex DVR/EPG must be enabled.".into()
+                    } else {
+                        "Choose the guide below, then Save and load guide.".into()
+                    };
+                    self.connection.guides = guides;
+                    self.connection.selected = 0;
+                    self.connection.guide_only = library.is_none();
+                    self.connection.library = library;
+                }
+                Err(e) => self.connection.message = e,
+            }
+        }
+        eg::CentralPanel::default().show(ctx, |ui| { eg::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Connect to Plex");
+            ui.label("Select Plex Media Server's Plug-in Support / Databases folder. PEX copies data locally and leaves Plex's files unchanged.");
+            for e in &self.setup_errors { ui.colored_label(eg::Color32::LIGHT_RED, e); }
+            for w in &self.setup_warnings { ui.label(w); }
+            if !self.setup_checked && !self.connection.open { ui.spinner(); ui.label("Checking saved configuration..."); }
+            ui.add_space(12.0);
+            ui.label(r"Databases folder (local or network share, e.g. \\NAS\Plex\Databases):");
+            if ui.text_edit_singleline(&mut self.connection.folder).changed() {
+                self.connection.guides.clear();
+                self.connection.library = None;
+            }
+            let busy = self.connection.discovery.is_some();
+            ui.horizontal(|ui| {
+                let browse = ui.add_enabled(!busy, eg::Button::new("Browse...")).clicked();
+                let find = ui.add_enabled(!busy && !self.connection.folder.trim().is_empty(), eg::Button::new("Find databases")).clicked();
+                if browse || find {
+                    let folder = self.connection.folder.trim().to_string();
+                    let (tx, rx) = mpsc::channel();
+                    self.connection.discovery = Some(rx);
+                    std::thread::spawn(move || {
+                        let chosen = if browse { rfd::FileDialog::new().pick_folder() } else { Some(PathBuf::from(&folder)) };
+                        if let Some(path) = chosen {
+                            let result = config::discover_databases(&path);
+                            let _ = tx.send((path.to_string_lossy().into_owned(), result));
+                        } else { let _ = tx.send((folder, Err("Folder selection cancelled. You can also paste a network path.".into()))); }
+                    });
+                }
+                if busy { ui.spinner(); ui.label("Looking for Plex databases..."); }
+            });
+            ui.label(&self.connection.message);
+            for (i, guide) in self.connection.guides.iter().enumerate() {
+                ui.radio_value(&mut self.connection.selected, i, guide.file_name().unwrap_or_default().to_string_lossy());
+            }
+            if let Some(library) = &self.connection.library { ui.label(format!("Library: {}", library.display())); }
+            ui.checkbox(&mut self.connection.guide_only, "Guide only (skip owned library and recording badges)");
+            if self.connection.library.is_none() && !self.connection.guides.is_empty() {
+                ui.label("No live library found. Keep Guide only checked, or select a folder containing com.plexapp.plugins.library.db.");
+            }
+            if self.owned_scan_in_progress || self.in_flight() > 0 || self.prep_rx.is_some() {
+                ui.label("A scan or artwork download is running. You can save a new connection when it finishes.");
+            }
+            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0 && self.prep_rx.is_none();
+            if ui.add_enabled(can_save, eg::Button::new("Save and load guide")).clicked() {
+                self.save_selected_connection(ctx);
+            }
+            if ui.add_enabled(!self.owned_scan_in_progress && self.prep_rx.is_none() && self.in_flight() == 0,
+                eg::Button::new("Retry saved configuration")).clicked() {
+                self.setup_checked = false;
+                self.connection.checks = None;
+                self.run_setup_checks();
+                self.connection.open = false;
+                if self.did_init { self.restart_poster_pipeline(ctx); self.start_owned_scan(true); }
+            }
+            if self.did_init && ui.button("Back to guide").clicked() { self.connection.open = false; }
+            ui.label("No TMDb key is required. Choose a writable portable folder; your settings and local copies stay beside PEX.");
+        }); });
+    }
+    fn save_selected_connection(&mut self, ctx: &eg::Context) {
+        let guide = &self.connection.guides[self.connection.selected];
+        match config::save_connection(
+            guide,
+            self.connection.library.as_deref(),
+            self.connection.guide_only,
+        ) {
+            Ok(path) => {
+                self.connection.message = format!("Saved {}", path.display());
+                self.connection.open = false;
+                self.setup_errors.clear();
+                self.setup_checked = false;
+                self.connection.checks = None;
+                self.setup_warnings.clear();
+                let _ = std::fs::remove_file(format!(
+                    "{}.last_sync",
+                    config::local_db_path().display()
+                ));
+                if self.did_init {
+                    // A different server must not inherit the old server's owned flags.
+                    self.owned_keys = None;
+                    self.owned_hd_keys = None;
+                    self.owned_guids = None;
+                    self.scheduled_index = None;
+                    self.restart_poster_pipeline(ctx);
+                    self.start_owned_scan(true);
+                }
+            }
+            Err(e) => self.connection.message = e,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,159 +366,6 @@ mod tests {
                 }
             }
             _ => assert!(!app.rows[0].owned),
-        }
-    }
-}
-
-impl PexApp {
-    pub(super) fn run_setup_checks(&mut self) {
-        if self.connection.checks.is_none() {
-            let (tx, rx) = mpsc::channel();
-            self.connection.checks = Some(rx);
-            std::thread::spawn(move || {
-                let cfg = config::load_config();
-                let mut errors = Vec::new();
-                let mut warnings = Vec::new();
-                if let Some(problem) = config::config_problem() {
-                    errors.push(problem);
-                }
-                let local_ok = config::readable_database(&config::local_db_path()).is_ok();
-                match cfg.plex_epg_db_source.as_deref() {
-                    Some(path) => if let Err(e) = config::readable_database(path) {
-                        if local_ok { warnings.push(format!("{e} Using the local guide.")); }
-                        else { errors.push(e); }
-                    },
-                    None if !local_ok => errors.push("Welcome to PEX. Choose your Plex Databases folder to load the programme guide. No config or SQLite installation is needed.".into()),
-                    _ => {}
-                }
-                if !cfg.guide_only {
-                    if let Some(path) = cfg.plex_library_db_source.as_deref() {
-                        if let Err(e) = config::readable_database(path) {
-                            warnings.push(e);
-                        }
-                    }
-                }
-                let _ = tx.send((errors, warnings));
-            });
-        }
-        if let Some(Ok((errors, warnings))) =
-            self.connection.checks.as_ref().map(Receiver::try_recv)
-        {
-            self.setup_errors = errors;
-            self.setup_warnings = warnings;
-            self.setup_checked = true;
-            self.connection.checks = None;
-        }
-    }
-
-    pub(super) fn render_setup_gate(&mut self, ctx: &eg::Context) {
-        if let Some(Ok((folder, result))) =
-            self.connection.discovery.as_ref().map(Receiver::try_recv)
-        {
-            self.connection.discovery = None;
-            self.connection.folder = folder;
-            match result {
-                Ok((guides, library)) => {
-                    self.connection.message = if guides.is_empty() {
-                        "No guide databases found. Select the Databases folder containing tv.plex.providers.epg.cloud*.db. Plex DVR/EPG must be enabled.".into()
-                    } else {
-                        "Choose the guide below, then Save and load guide.".into()
-                    };
-                    self.connection.guides = guides;
-                    self.connection.selected = 0;
-                    self.connection.guide_only = library.is_none();
-                    self.connection.library = library;
-                }
-                Err(e) => self.connection.message = e,
-            }
-        }
-        eg::CentralPanel::default().show(ctx, |ui| { eg::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Connect to Plex");
-            ui.label("Select Plex Media Server's Plug-in Support / Databases folder. PEX copies data locally and leaves Plex's files unchanged.");
-            for e in &self.setup_errors { ui.colored_label(eg::Color32::LIGHT_RED, e); }
-            for w in &self.setup_warnings { ui.label(w); }
-            if !self.setup_checked && !self.connection.open { ui.spinner(); ui.label("Checking saved configuration..."); }
-            ui.add_space(12.0);
-            ui.label(r"Databases folder (local or network share, e.g. \\NAS\Plex\Databases):");
-            if ui.text_edit_singleline(&mut self.connection.folder).changed() {
-                self.connection.guides.clear();
-                self.connection.library = None;
-            }
-            let busy = self.connection.discovery.is_some();
-            ui.horizontal(|ui| {
-                let browse = ui.add_enabled(!busy, eg::Button::new("Browse...")).clicked();
-                let find = ui.add_enabled(!busy && !self.connection.folder.trim().is_empty(), eg::Button::new("Find databases")).clicked();
-                if browse || find {
-                    let folder = self.connection.folder.trim().to_string();
-                    let (tx, rx) = mpsc::channel();
-                    self.connection.discovery = Some(rx);
-                    std::thread::spawn(move || {
-                        let chosen = if browse { rfd::FileDialog::new().pick_folder() } else { Some(PathBuf::from(&folder)) };
-                        if let Some(path) = chosen {
-                            let result = config::discover_databases(&path);
-                            let _ = tx.send((path.to_string_lossy().into_owned(), result));
-                        } else { let _ = tx.send((folder, Err("Folder selection cancelled. You can also paste a network path.".into()))); }
-                    });
-                }
-                if busy { ui.spinner(); ui.label("Looking for Plex databases..."); }
-            });
-            ui.label(&self.connection.message);
-            for (i, guide) in self.connection.guides.iter().enumerate() {
-                ui.radio_value(&mut self.connection.selected, i, guide.file_name().unwrap_or_default().to_string_lossy());
-            }
-            if let Some(library) = &self.connection.library { ui.label(format!("Library: {}", library.display())); }
-            ui.checkbox(&mut self.connection.guide_only, "Guide only (skip owned library and recording badges)");
-            if self.connection.library.is_none() && !self.connection.guides.is_empty() {
-                ui.label("No live library found. Keep Guide only checked, or select a folder containing com.plexapp.plugins.library.db.");
-            }
-            if self.owned_scan_in_progress || self.in_flight() > 0 || self.prep_rx.is_some() {
-                ui.label("A scan or artwork download is running. You can save a new connection when it finishes.");
-            }
-            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0 && self.prep_rx.is_none();
-            if ui.add_enabled(can_save, eg::Button::new("Save and load guide")).clicked() {
-                self.save_selected_connection(ctx);
-            }
-            if ui.add_enabled(!self.owned_scan_in_progress && self.prep_rx.is_none() && self.in_flight() == 0,
-                eg::Button::new("Retry saved configuration")).clicked() {
-                self.setup_checked = false;
-                self.connection.checks = None;
-                self.run_setup_checks();
-                self.connection.open = false;
-                if self.did_init { self.restart_poster_pipeline(ctx); self.start_owned_scan(true); }
-            }
-            if self.did_init && ui.button("Back to guide").clicked() { self.connection.open = false; }
-            ui.label("No TMDb key is required. Choose a writable portable folder; your settings and local copies stay beside PEX.");
-        }); });
-    }
-    fn save_selected_connection(&mut self, ctx: &eg::Context) {
-        let guide = &self.connection.guides[self.connection.selected];
-        match config::save_connection(
-            guide,
-            self.connection.library.as_deref(),
-            self.connection.guide_only,
-        ) {
-            Ok(path) => {
-                self.connection.message = format!("Saved {}", path.display());
-                self.connection.open = false;
-                self.setup_errors.clear();
-                self.setup_checked = false;
-                self.connection.checks = None;
-                self.setup_warnings.clear();
-                let _ = std::fs::remove_file(format!(
-                    "{}.last_sync",
-                    config::local_db_path().display()
-                ));
-                if self.did_init {
-                    // A different server must not inherit the old server's owned flags.
-                    self.owned_keys = None;
-                    self.owned_hd_keys = None;
-                    self.owned_guids = None;
-                    self.scheduled_index = None;
-                    self.restart_poster_pipeline(ctx);
-                    self.start_owned_scan(true);
-                }
-            }
-            Err(e) => self.connection.message = e,
         }
     }
 }
