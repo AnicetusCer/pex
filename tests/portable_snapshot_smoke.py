@@ -47,12 +47,17 @@ def launch(app, expected_title):
         startup = subprocess.STARTUPINFO()
         startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startup.wShowWindow = 0
-    with subprocess.Popen([str(app / EXECUTABLE)], cwd=root, env=env, startupinfo=startup) as proc:
+    with tempfile.TemporaryFile() as log, subprocess.Popen(
+        [str(app / EXECUTABLE)], cwd=root, env=env, startupinfo=startup,
+        stdout=log, stderr=subprocess.STDOUT,
+    ) as proc:
         try:
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
-                    raise RuntimeError(f"Fixture PEX exited early ({proc.returncode})")
+                    log.seek(0)
+                    details = log.read().decode(errors="replace")
+                    raise RuntimeError(f"Fixture PEX exited early ({proc.returncode}):\n{details[-4000:]}")
                 if (app / "db/plex_epg.db.last_sync").is_file() and cache.is_file():
                     if expected_title.lower() + ":2020" in cache.read_text().splitlines():
                         break
