@@ -99,8 +99,8 @@ if [[ "$ZIP_NAME" != /* && "$ZIP_NAME" == */* ]]; then
     echo "Use a file name or an absolute path for --zip-name." >&2
     exit 1
 fi
-files=(pex config.json README.md config_example.windows config_example.linux LICENSE NOTICE)
-sources=("$BINARY_PATH" "$SCRIPT_DIR/config.json" "$SCRIPT_DIR/README.md"
+files=(pex config.json README.md pex_snapshot.py config_example.windows config_example.linux LICENSE NOTICE)
+sources=("$BINARY_PATH" "$SCRIPT_DIR/config.json" "$SCRIPT_DIR/README.md" "$SCRIPT_DIR/pex_snapshot.py"
          "$SCRIPT_DIR/config_example.windows" "$SCRIPT_DIR/config_example.linux"
          "$REPO_ROOT/LICENSE" "$REPO_ROOT/NOTICE")
 for source in "${sources[@]}"; do

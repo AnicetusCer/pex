@@ -35,6 +35,7 @@ $payload = [ordered]@{
     'pex.exe' = $binary.FullName
     'config.json' = Join-Path $PSScriptRoot 'config.json'
     'README.md' = Join-Path $PSScriptRoot 'README.md'
+    'pex_snapshot.py' = Join-Path $PSScriptRoot 'pex_snapshot.py'
     'config_example.windows' = Join-Path $PSScriptRoot 'config_example.windows'
     'config_example.linux' = Join-Path $PSScriptRoot 'config_example.linux'
     'LICENSE' = Join-Path $repoRoot 'LICENSE'
