@@ -41,13 +41,12 @@ impl OwnedScanPlex {
             let _ = tx.send(OwnedMsg::Scheduled(
                 crate::app::scheduled::load_scheduled_index(),
             ));
-            if !db_path.exists()
-                && crate::config::load_config()
-                    .plex_library_db_source
-                    .is_none()
-            {
-                let _ = tx.send(Done(Box::default()));
-                return;
+            if !db_path.exists() {
+                let cfg = crate::config::load_config();
+                if cfg.plex_library_db_source.is_none() && cfg.library_snapshot_dir.is_none() {
+                    let _ = tx.send(Done(Box::default()));
+                    return;
+                }
             }
             let conn = match Connection::open_with_flags(
                 &db_path,

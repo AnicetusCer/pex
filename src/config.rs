@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub cache_dir: Option<PathBuf>,
     pub plex_epg_db_source: Option<PathBuf>,
     pub plex_library_db_source: Option<PathBuf>,
+    pub library_snapshot_dir: Option<PathBuf>,
     pub tmdb_api_key: Option<String>,
 }
 
@@ -34,6 +35,7 @@ struct RawConfig {
     #[serde(alias = "plex_db_source")]
     plex_epg_db_source: Option<String>,
     plex_library_db_source: Option<String>,
+    library_snapshot_dir: Option<String>,
     #[serde(alias = "omdb_api_key")]
     #[serde(alias = "the_movie_db_api_key")]
     tmdb_api_key: Option<String>,
@@ -144,6 +146,12 @@ pub fn load_config() -> AppConfig {
         match serde_json::from_str::<RawConfig>(&raw) {
             Ok(mut parsed) => {
                 cfg.guide_only = parsed.guide_only;
+                cfg.library_snapshot_dir = parsed
+                    .library_snapshot_dir
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(resolve_relative_path);
                 cfg.log_level = parsed.log_level;
                 if let Some(cache_dir) = parsed.cache_dir.take() {
                     let trimmed = cache_dir.trim();
@@ -216,7 +224,7 @@ pub fn local_library_db_path() -> PathBuf {
 pub fn discover_databases(folder: &Path) -> Result<(Vec<PathBuf>, Option<PathBuf>), String> {
     let entries = fs::read_dir(folder).map_err(|e| {
         format!(
-            "Cannot read {}: {e}. Check the share and Windows permissions, then try again.",
+            "Cannot read {}: {e}. Check the folder path and read permissions, then try again.",
             folder.display()
         )
     })?;
@@ -270,6 +278,21 @@ pub fn save_connection(
     library: Option<&Path>,
     guide_only: bool,
 ) -> Result<PathBuf, String> {
+    let existing = load_config();
+    save_connection_with_snapshots(
+        epg,
+        library,
+        existing.library_snapshot_dir.as_deref(),
+        guide_only,
+    )
+}
+
+pub fn save_connection_with_snapshots(
+    epg: &Path,
+    library: Option<&Path>,
+    snapshot_dir: Option<&Path>,
+    guide_only: bool,
+) -> Result<PathBuf, String> {
     let source = discover_config_path();
     let path = env::var_os("PEX_CONFIG")
         .map(|p| resolve_relative_path(PathBuf::from(p)))
@@ -293,6 +316,11 @@ pub fn save_connection(
     object.remove("plex_db_source");
     object.insert("plex_epg_db_source".into(), serde_json::json!(epg));
     object.insert("plex_library_db_source".into(), serde_json::json!(library));
+    if let Some(folder) = snapshot_dir {
+        object.insert("library_snapshot_dir".into(), serde_json::json!(folder));
+    } else {
+        object.remove("library_snapshot_dir");
+    }
     object.insert("guide_only".into(), serde_json::json!(guide_only));
     let parent = path.parent().ok_or("Config has no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;

@@ -13,12 +13,82 @@ pub(super) struct ConnectionSetup {
     selected: usize,
     library: Option<PathBuf>,
     guide_only: bool,
+    use_snapshots: bool,
+    snapshot_folder: String,
+    snapshot_picker: Option<Receiver<Option<PathBuf>>>,
     discovery: Option<Receiver<(String, Discovery)>>,
     checks: Option<Receiver<(Vec<String>, Vec<String>)>>,
     message: String,
 }
 
+impl ConnectionSetup {
+    pub(super) fn from_config(cfg: config::AppConfig) -> Self {
+        let guides: Vec<_> = cfg.plex_epg_db_source.into_iter().collect();
+        let folder = guides
+            .first()
+            .and_then(|guide| guide.parent())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let snapshot_folder = cfg
+            .library_snapshot_dir
+            .as_ref()
+            .filter(|p| Some(p.as_path()) != guides.first().and_then(|guide| guide.parent()))
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            folder,
+            guides,
+            library: cfg.plex_library_db_source,
+            guide_only: cfg.guide_only,
+            use_snapshots: cfg.library_snapshot_dir.is_some(),
+            snapshot_folder,
+            ..Self::default()
+        }
+    }
+
+    fn apply_discovery(&mut self, folder: String, guides: Vec<PathBuf>, library: Option<PathBuf>) {
+        let previous_guide = self.guides.get(self.selected);
+        let same_folder =
+            previous_guide.and_then(|path| path.parent()) == Some(std::path::Path::new(&folder));
+        self.selected = guides
+            .iter()
+            .position(|path| Some(path) == previous_guide)
+            .unwrap_or(0);
+        if same_folder {
+            // Keep an explicitly configured library which may be outside the guide folder.
+            self.library = self.library.take().or(library);
+        } else {
+            self.guide_only = library.is_none() && !self.use_snapshots;
+            self.library = library;
+            self.snapshot_folder.clear();
+        }
+        self.message = if guides.is_empty() {
+            "No guide databases found. Select the Databases folder containing tv.plex.providers.epg.cloud*.db. Plex DVR/EPG must be enabled.".into()
+        } else {
+            "Choose the guide below, then Save and load guide.".into()
+        };
+        self.guides = guides;
+        self.folder = folder;
+    }
+
+    fn selected_snapshot_dir(&self) -> Option<PathBuf> {
+        if !self.use_snapshots {
+            return None;
+        }
+        if self.snapshot_folder.trim().is_empty() {
+            self.guides.get(self.selected)?.parent().map(PathBuf::from)
+        } else {
+            Some(PathBuf::from(self.snapshot_folder.trim()))
+        }
+    }
+}
+
 impl PexApp {
+    pub(super) fn open_connection_setup(&mut self) {
+        self.connection = ConnectionSetup::from_config(config::load_config());
+        self.connection.open = true;
+    }
+
     pub(super) fn run_setup_checks(&mut self) {
         if self.connection.checks.is_none() {
             let (tx, rx) = mpsc::channel();
@@ -39,7 +109,7 @@ impl PexApp {
                     None if !local_ok => errors.push("Welcome to PEX. Choose your Plex Databases folder to load the programme guide. No config or SQLite installation is needed.".into()),
                     _ => {}
                 }
-                if !cfg.guide_only {
+                if !cfg.guide_only && cfg.library_snapshot_dir.is_none() {
                     if let Some(path) = cfg.plex_library_db_source.as_deref() {
                         if let Err(e) = config::readable_database(path) {
                             warnings.push(e);
@@ -64,20 +134,20 @@ impl PexApp {
             self.connection.discovery.as_ref().map(Receiver::try_recv)
         {
             self.connection.discovery = None;
-            self.connection.folder = folder;
             match result {
-                Ok((guides, library)) => {
-                    self.connection.message = if guides.is_empty() {
-                        "No guide databases found. Select the Databases folder containing tv.plex.providers.epg.cloud*.db. Plex DVR/EPG must be enabled.".into()
-                    } else {
-                        "Choose the guide below, then Save and load guide.".into()
-                    };
-                    self.connection.guides = guides;
-                    self.connection.selected = 0;
-                    self.connection.guide_only = library.is_none();
-                    self.connection.library = library;
-                }
+                Ok((guides, library)) => self.connection.apply_discovery(folder, guides, library),
                 Err(e) => self.connection.message = e,
+            }
+        }
+        if let Some(Ok(picked)) = self
+            .connection
+            .snapshot_picker
+            .as_ref()
+            .map(Receiver::try_recv)
+        {
+            self.connection.snapshot_picker = None;
+            if let Some(path) = picked {
+                self.connection.snapshot_folder = path.to_string_lossy().into_owned();
             }
         }
         eg::CentralPanel::default().show(ctx, |ui| { eg::ScrollArea::vertical().show(ui, |ui| {
@@ -87,12 +157,12 @@ impl PexApp {
             for w in &self.setup_warnings { ui.label(w); }
             if !self.setup_checked && !self.connection.open { ui.spinner(); ui.label("Checking saved configuration..."); }
             ui.add_space(12.0);
-            ui.label(r"Databases folder (local or network share, e.g. \\NAS\Plex\Databases):");
+            ui.label("Databases folder (local path, mounted folder or network share)");
             if ui.text_edit_singleline(&mut self.connection.folder).changed() {
                 self.connection.guides.clear();
                 self.connection.library = None;
             }
-            let busy = self.connection.discovery.is_some();
+            let busy = self.connection.discovery.is_some() || self.connection.snapshot_picker.is_some();
             ui.horizontal(|ui| {
                 let browse = ui.add_enabled(!busy, eg::Button::new("Browse...")).clicked();
                 let find = ui.add_enabled(!busy && !self.connection.folder.trim().is_empty(), eg::Button::new("Find databases")).clicked();
@@ -108,21 +178,44 @@ impl PexApp {
                         } else { let _ = tx.send((folder, Err("Folder selection cancelled. You can also paste a network path.".into()))); }
                     });
                 }
-                if busy { ui.spinner(); ui.label("Looking for Plex databases..."); }
+                if self.connection.discovery.is_some() { ui.spinner(); ui.label("Looking for Plex databases..."); }
             });
             ui.label(&self.connection.message);
             for (i, guide) in self.connection.guides.iter().enumerate() {
                 ui.radio_value(&mut self.connection.selected, i, guide.file_name().unwrap_or_default().to_string_lossy());
             }
-            if let Some(library) = &self.connection.library { ui.label(format!("Library: {}", library.display())); }
             ui.checkbox(&mut self.connection.guide_only, "Guide only (skip owned library and recording badges)");
-            if self.connection.library.is_none() && !self.connection.guides.is_empty() {
-                ui.label("No live library found. Keep Guide only checked, or select a folder containing com.plexapp.plugins.library.db.");
+            if self.connection.library.is_none() && self.connection.guide_only && !self.connection.guides.is_empty() {
+                ui.label("To use library backups, uncheck Guide only and choose Completed snapshots.");
+            }
+            if !self.connection.guide_only && !self.connection.guides.is_empty() {
+                ui.label("Owned library source");
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut self.connection.use_snapshots, false, "Live library");
+                    ui.radio_value(&mut self.connection.use_snapshots, true, "Completed snapshots");
+                });
+                if self.connection.use_snapshots {
+                    ui.label("Snapshot folder");
+                    ui.horizontal(|ui| {
+                        ui.add(eg::TextEdit::singleline(&mut self.connection.snapshot_folder)
+                            .hint_text("Use the selected guide’s Databases folder"));
+                        if ui.add_enabled(!busy, eg::Button::new("Browse snapshot folder...")).clicked() {
+                            let (tx, rx) = mpsc::channel();
+                            self.connection.snapshot_picker = Some(rx);
+                            std::thread::spawn(move || { let _ = tx.send(rfd::FileDialog::new().pick_folder()); });
+                        }
+                    });
+                    ui.label("Refresh uses the newest completed snapshot in this folder. Badges reflect its date.");
+                } else if let Some(library) = &self.connection.library {
+                    ui.label(format!("Library: {}", library.display()));
+                } else {
+                    ui.label("No live library found. Choose Completed snapshots or Guide only, or select a folder containing com.plexapp.plugins.library.db.");
+                }
             }
             if self.owned_scan_in_progress || self.in_flight() > 0 || self.prep_rx.is_some() {
                 ui.label("A scan or artwork download is running. You can save a new connection when it finishes.");
             }
-            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0 && self.prep_rx.is_none();
+            let can_save = !busy && !self.connection.guides.is_empty() && (self.connection.guide_only || self.connection.use_snapshots || self.connection.library.is_some()) && !self.owned_scan_in_progress && self.in_flight() == 0 && self.prep_rx.is_none();
             if ui.add_enabled(can_save, eg::Button::new("Save and load guide")).clicked() {
                 self.save_selected_connection(ctx);
             }
@@ -140,9 +233,13 @@ impl PexApp {
     }
     fn save_selected_connection(&mut self, ctx: &eg::Context) {
         let guide = &self.connection.guides[self.connection.selected];
-        match config::save_connection(
+        let reload_guide = config::load_config().plex_epg_db_source.as_deref()
+            != Some(guide.as_path())
+            || !self.setup_errors.is_empty();
+        match config::save_connection_with_snapshots(
             guide,
             self.connection.library.as_deref(),
+            self.connection.selected_snapshot_dir().as_deref(),
             self.connection.guide_only,
         ) {
             Ok(path) => {
@@ -152,17 +249,23 @@ impl PexApp {
                 self.setup_checked = false;
                 self.connection.checks = None;
                 self.setup_warnings.clear();
-                let _ = std::fs::remove_file(format!(
-                    "{}.last_sync",
-                    config::local_db_path().display()
-                ));
+                if reload_guide {
+                    let _ = std::fs::remove_file(format!(
+                        "{}.last_sync",
+                        config::local_db_path().display()
+                    ));
+                }
                 if self.did_init {
                     // A different server must not inherit the old server's owned flags.
                     self.owned_keys = None;
                     self.owned_hd_keys = None;
                     self.owned_guids = None;
                     self.scheduled_index = None;
-                    self.restart_poster_pipeline(ctx);
+                    self.apply_owned_flags();
+                    self.apply_scheduled_flags();
+                    if reload_guide {
+                        self.restart_poster_pipeline(ctx);
+                    }
                     self.start_owned_scan(true);
                 }
             }
@@ -208,6 +311,7 @@ mod tests {
             "guide_only",
             "busy_backup",
             "busy_no_backup",
+            "snapshots_only",
             "legacy",
             "local_only",
         ] {
@@ -248,7 +352,15 @@ mod tests {
         let guide = plex.join("tv.plex.providers.epg.cloud-fixture.db");
         let library = plex.join("com.plexapp.plugins.library.db");
         super::super::test_fixtures::database(&guide);
-        super::super::test_fixtures::database(&library);
+        let backups = root.path().join("Plex backups");
+        if scenario == "snapshots_only" {
+            fs::create_dir(&backups).unwrap();
+            super::super::test_fixtures::database(
+                &backups.join("com.plexapp.plugins.library.db-2026-01-02"),
+            );
+        } else {
+            super::super::test_fixtures::database(&library);
+        }
         if scenario == "guide_only" {
             fs::create_dir_all(portable.join("db")).unwrap();
             fs::copy(&library, config::local_library_db_path()).unwrap();
@@ -301,9 +413,15 @@ mod tests {
                 return;
             }
             let (guides, found_library) = config::discover_databases(&plex).unwrap();
-            app.connection.guides = guides;
-            app.connection.library = found_library;
-            app.connection.guide_only = !scenario.starts_with("busy_");
+            app.connection
+                .apply_discovery(plex.display().to_string(), guides, found_library);
+            app.connection.guide_only =
+                !(scenario.starts_with("busy_") || scenario == "snapshots_only");
+            if scenario == "snapshots_only" {
+                app.connection.use_snapshots = true;
+                assert_eq!(app.connection.selected_snapshot_dir(), Some(plex.clone()));
+                app.connection.snapshot_folder = backups.to_string_lossy().into_owned();
+            }
             app.save_selected_connection(&ctx);
         }
         frames_until(&mut app, &ctx, |app| {
@@ -315,6 +433,27 @@ mod tests {
         assert_eq!(app.rows[0].title, "Fixture Movie");
         assert!(app.should_show_grid());
         match scenario.as_str() {
+            "snapshots_only" => {
+                assert!(app.rows[0].owned);
+                assert!(app.owned_notice.as_deref().unwrap().contains("2026-01-02"));
+                let stored = config::load_config();
+                assert_eq!(stored.library_snapshot_dir, Some(backups.clone()));
+                assert!(stored.plex_library_db_source.is_none());
+                drop(app);
+                let mut reopened = PexApp::default();
+                frames_until(&mut reopened, &ctx, |app| {
+                    app.did_init && app.rows.len() == 1 && !app.owned_scan_in_progress
+                });
+                assert!(reopened.rows[0].owned);
+                assert!(reopened.setup_warnings.is_empty());
+                reopened.open_connection_setup();
+                assert!(reopened.connection.use_snapshots);
+                assert_eq!(reopened.connection.selected_snapshot_dir(), Some(backups));
+                assert_eq!(
+                    reopened.connection.guides[reopened.connection.selected],
+                    guide
+                );
+            }
             "busy_backup" => {
                 assert!(app.rows[0].owned);
                 assert!(app.owned_notice.as_ref().unwrap().contains("2026-01-02"));
@@ -333,6 +472,23 @@ mod tests {
             }
             "legacy" => {
                 assert!(app.rows[0].owned);
+                app.open_connection_setup();
+                assert_eq!(app.connection.library.as_ref(), Some(&library));
+                assert_eq!(app.connection.guides[app.connection.selected], guide);
+                app.connection.use_snapshots = true;
+                config::save_connection_with_snapshots(
+                    &guide,
+                    app.connection.library.as_deref(),
+                    app.connection.selected_snapshot_dir().as_deref(),
+                    false,
+                )
+                .unwrap();
+                let saved = config::load_config();
+                assert_eq!(saved.plex_library_db_source.as_ref(), Some(&library));
+                assert_eq!(saved.library_snapshot_dir, Some(plex.clone()));
+                config::save_connection_with_snapshots(&guide, Some(&library), None, false)
+                    .unwrap();
+                assert!(config::load_config().library_snapshot_dir.is_none());
                 config::save_connection(&guide, Some(&library), false).unwrap();
                 assert_eq!(
                     config::discover_config_path(),

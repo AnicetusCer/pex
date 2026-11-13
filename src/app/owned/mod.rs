@@ -20,6 +20,7 @@ impl crate::app::PexApp {
         let cfg = crate::config::load_config();
         if cfg.guide_only
             || (cfg.plex_library_db_source.is_none()
+                && cfg.library_snapshot_dir.is_none()
                 && !crate::config::local_library_db_path().exists())
         {
             self.owned_scan_available = false;

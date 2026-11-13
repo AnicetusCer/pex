@@ -209,7 +209,7 @@ impl crate::app::PexApp {
                 self.show_advanced_popup = true;
             }
             if ui.button("Connect to Plex").clicked() {
-                self.connection.open = true;
+                self.open_connection_setup();
             }
 
             ui.separator();
@@ -420,13 +420,15 @@ impl crate::app::PexApp {
                             epg_local: &db_path,
                             epg_local_exists: db_exists,
                             library_source: cfg
-                                .plex_library_db_source
+                                .library_snapshot_dir
                                 .as_ref()
+                                .or(cfg.plex_library_db_source.as_ref())
                                 .map(|p| Cow::Owned(p.display().to_string()))
                                 .unwrap_or_else(|| Cow::Borrowed("<not set>")),
                             library_source_exists: cfg
-                                .plex_library_db_source
+                                .library_snapshot_dir
                                 .as_ref()
+                                .or(cfg.plex_library_db_source.as_ref())
                                 .map(|p| p.exists())
                                 .unwrap_or(false),
                             library_local: &library_db_path,
@@ -457,7 +459,7 @@ impl crate::app::PexApp {
         self.show_advanced_popup = open;
     }
 
-    fn advanced_db_summary(&self, ui: &mut eg::Ui, _cfg: &AppConfig, summary: DbSummary<'_>) {
+    fn advanced_db_summary(&self, ui: &mut eg::Ui, cfg: &AppConfig, summary: DbSummary<'_>) {
         let good = eg::Color32::LIGHT_GREEN;
         let warn = eg::Color32::LIGHT_RED;
 
@@ -481,7 +483,12 @@ impl crate::app::PexApp {
 
         ui.label(
             eg::RichText::new(format!(
-                "Library source: {}",
+                "{}: {}",
+                if cfg.library_snapshot_dir.is_some() {
+                    "Snapshot folder"
+                } else {
+                    "Library source"
+                },
                 summary.library_source.as_ref()
             ))
             .color(if summary.library_source_exists {
@@ -581,7 +588,7 @@ impl crate::app::PexApp {
             .clicked()
         {
             self.refresh_owned_scan();
-            self.advanced_feedback = Some("Owned scan refresh started (incremental).".into());
+            self.advanced_feedback = Some("Owned scan refresh started.".into());
             self.set_status("Refreshing owned library.");
         }
 

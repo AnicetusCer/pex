@@ -1,4 +1,6 @@
 // src/app/prep.rs
+mod snapshots;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -121,7 +123,7 @@ fn mirror_due(dst: &Path) -> bool {
     age.is_none_or(|age| age >= Duration::from_secs(MIN_COPY_INTERVAL_HOURS * 3600))
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileState {
     len: u64,
     modified: SystemTime,
@@ -172,7 +174,7 @@ fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
-    copy_validated_snapshot(src, dst, false, false)
+    copy_validated_snapshot(src, dst, false, false).map(|_| ())
 }
 
 // Stock SQLite cannot open Plex's ICU/naturalsort indexes or its FTS4 tokenizer.
@@ -259,7 +261,7 @@ fn copy_validated_snapshot(
     dst: &Path,
     library: bool,
     completed_backup: bool,
-) -> io::Result<()> {
+) -> io::Result<FileState> {
     copy_snapshot_with_hook(src, dst, library, completed_backup, || {})
 }
 
@@ -269,7 +271,7 @@ fn copy_snapshot_with_hook(
     library: bool,
     completed_backup: bool,
     after_copy: impl FnOnce(),
-) -> io::Result<()> {
+) -> io::Result<FileState> {
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     if dst.exists() && fs::canonicalize(src)? == fs::canonicalize(dst)? {
@@ -311,7 +313,8 @@ fn copy_snapshot_with_hook(
         .map_err(io::Error::other)?;
     if !dst.try_exists()? && !has_sidecars(dst)? {
         drop(db);
-        return staged.persist_noclobber(dst).map_err(|err| err.error);
+        staged.persist_noclobber(dst).map_err(|err| err.error)?;
+        return Ok(before.0);
     }
     // SQLite serializes installation with readers and writers, including WAL readers.
     // Only a confirmed corrupt standalone destination needs filesystem replacement.
@@ -329,7 +332,8 @@ fn copy_snapshot_with_hook(
             staged.persist(dst).map_err(|err| err.error)
         }
         Err(e) => Err(io::Error::other(e)),
-    }
+    }?;
+    Ok(before.0)
 }
 
 fn has_sidecars(path: &Path) -> io::Result<bool> {
@@ -362,7 +366,11 @@ pub(crate) fn sync_library_db_from_source(
     force: bool,
     report: impl Fn(String),
 ) -> Result<String, String> {
-    let Some(src) = load_config().plex_library_db_source else {
+    let config = load_config();
+    if let Some(folder) = config.library_snapshot_dir {
+        return snapshots::refresh(&folder, &local_library_db_path(), report);
+    }
+    let Some(src) = config.plex_library_db_source else {
         return Ok("Using the manually supplied local library snapshot.".into());
     };
     recover_library(
@@ -376,6 +384,33 @@ pub(crate) fn sync_library_db_from_source(
 
 fn provenance_path(dst: &Path) -> PathBuf {
     PathBuf::from(format!("{}.snapshot.json", dst.display()))
+}
+
+// Older builds wrote the human-readable provenance directly. A snapshot-folder receipt
+// (a JSON object), or a message for a different server, must not satisfy live refresh.
+fn previous_live_snapshot(src: &Path, dst: &Path) -> Option<String> {
+    let bytes = match fs::read(provenance_path(dst)) {
+        Ok(bytes) => bytes,
+        // Older portable installs and user-supplied mirrors may have no provenance.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Some("Previous local library snapshot (source and date unknown).".into());
+        }
+        Err(_) => return None,
+    };
+    let message = serde_json::from_slice::<String>(&bytes).ok()?;
+    if message.starts_with(&format!(
+        "Library snapshot: live source {}, copied ",
+        src.display()
+    )) {
+        return Some(message);
+    }
+    let (date, detail) = message
+        .strip_prefix("Library snapshot: Plex backup dated ")?
+        .split_once(", ")?;
+    let (path, _) = detail.rsplit_once(". Owned and recording badges reflect that date.")?;
+    (chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
+        && path == format!("{}-{date}", src.display()))
+    .then_some(message)
 }
 
 fn backup_candidates(src: &Path) -> io::Result<Vec<(String, PathBuf)>> {
@@ -422,13 +457,10 @@ fn recover_library(
     delay: Duration,
     report: impl Fn(String),
 ) -> Result<String, String> {
-    if !force && !mirror_due(dst) && usable_library(dst) {
-        return Ok(fs::read_to_string(provenance_path(dst))
-            .ok()
-            .and_then(|s| serde_json::from_str::<String>(&s).ok())
-            .unwrap_or_else(|| {
-                "Using the local library snapshot (last successful live refresh).".into()
-            }));
+    if !force && !mirror_due(dst) {
+        if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
+            return Ok(previous);
+        }
     }
     let mut failure = String::new();
     for attempt in 1..=3 {
@@ -436,7 +468,7 @@ fn recover_library(
             "Copying live Plex library (attempt {attempt}/3)..."
         ));
         match copy_validated_snapshot(src, dst, true, false) {
-            Ok(()) => {
+            Ok(_) => {
                 let message = format!(
                     "Library snapshot: live source {}, copied {}.",
                     src.display(),
@@ -452,11 +484,7 @@ fn recover_library(
             std::thread::sleep(delay);
         }
     }
-    if usable_library(dst) {
-        let previous = fs::read_to_string(provenance_path(dst))
-            .ok()
-            .and_then(|s| serde_json::from_str::<String>(&s).ok())
-            .unwrap_or_else(|| "Previous local library snapshot (date unknown).".into());
+    if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
         return Ok(format!("Live library unavailable ({failure}). Keeping {previous} Use Retry owned scan when Plex is idle."));
     }
     report("Live copy unavailable; checking completed dated Plex library backups...".into());
@@ -465,7 +493,7 @@ fn recover_library(
         Ok(candidates) => {
             for (date, backup) in candidates {
                 match copy_validated_snapshot(&backup, dst, true, true) {
-                    Ok(()) => {
+                    Ok(_) => {
                         let message = format!("Library snapshot: Plex backup dated {date}, {}. Owned and recording badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
                         // Keep this mirror due so the next launch tries the live source again.
                         let _ = fs::remove_file(last_sync_marker_path(dst));

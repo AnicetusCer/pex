@@ -195,6 +195,10 @@ pub struct PexApp {
 
 impl Default for PexApp {
     fn default() -> Self {
+        let cfg = load_config();
+        // The title sidecars alone do not identify which folder supplied their snapshot.
+        // In snapshot mode let the worker verify provenance before displaying badges.
+        let preload_owned = !cfg.guide_only && cfg.library_snapshot_dir.is_none();
         Self {
             rows: Vec::new(),
 
@@ -230,9 +234,17 @@ impl Default for PexApp {
             dim_strength_ui: 0.8, // stronger dimming by default
 
             owned_rx: None,
-            owned_keys: Self::load_owned_keys_sidecar(),
+            owned_keys: if preload_owned {
+                Self::load_owned_keys_sidecar()
+            } else {
+                None
+            },
             owned_guids: None,
-            owned_hd_keys: Self::load_owned_hd_sidecar(),
+            owned_hd_keys: if preload_owned {
+                Self::load_owned_hd_sidecar()
+            } else {
+                None
+            },
             owned_hd_guids: None,
             owned_guid_modified: None,
             owned_modified: None,
@@ -260,7 +272,7 @@ impl Default for PexApp {
             show_genre_filter_popup: false,
             show_advanced_popup: false,
             advanced_feedback: None,
-            connection: setup::ConnectionSetup::default(),
+            connection: setup::ConnectionSetup::from_config(cfg),
             owned_notice: None,
             setup_checked: false,
             setup_errors: Vec::new(),
