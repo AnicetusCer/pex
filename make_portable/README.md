@@ -6,7 +6,7 @@
 2. Double-click `pex.exe`. **Connect to Plex** opens when the guide has not been configured.
 3. Choose **Browse...** and select your Plex server's `Plug-in Support/Databases` folder. For a NAS, you can paste a Windows network path such as `\\NAS\PlexMediaServer\AppData\Plex Media Server\Plug-in Support\Databases` and click **Find databases**. Connect/authenticate the share in File Explorer first if Windows requires credentials. Enter paths normally; no JSON escaping is needed in the app.
 4. PEX lists `tv.plex.providers.epg.cloud*.db` guide databases. If several are listed, choose the one for your DVR guide. PEX also finds `com.plexapp.plugins.library.db` in the same folder.
-5. Leave **Guide only** checked if you just want listings, or uncheck it to enable owned/HD and scheduled recording badges. Click **Save and load guide**.
+5. When PEX finds a library, owned/HD and scheduled recording badges are enabled. Check **Guide only** if you just want listings. Click **Save and load guide**.
 
 Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed. Poster downloads need internet access; listings and local caches remain usable without it.
 
@@ -27,7 +27,9 @@ A backup does not count as a successful daily live refresh. PEX tries the live s
 
 ## Existing portable installations
 
-Keep your working settings. PEX retains the existing config search order: `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
+Close PEX and extract the new ZIP over your existing portable folder. Your saved `pex-config.json`, local databases and caches stay in place. If you are upgrading an older install with settings only in `config.json`, copy that file to `pex-config.json` before extracting. The ZIP replaces the starter `config.json`.
+
+PEX searches for `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
 
 When you save a connection, PEX preserves other keys, including your cache directory and TMDb key. It saves to `pex-config.json` when starting from the bundled or a legacy `config.json`, leaving that legacy file intact. This protects the saved connection when a later ZIP replaces its bundled starter config. Existing preferred/home configs are updated in place, and an explicit `PEX_CONFIG` destination is always honored. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
 
