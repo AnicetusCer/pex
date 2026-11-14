@@ -88,16 +88,18 @@ fn portable_sky_mix_quality() {
             });
             db.execute(
                 "INSERT INTO media_items(metadata_item_id,begins_at,width,height,media_analysis_version,extra_data)
-                 VALUES(1,?1,1280,720,0,?2)", params![time,channel.to_string()]
+                 VALUES(1,?1,1280,720,0,?2)", params![time,serde_json::to_vec(&channel).unwrap()]
             ).unwrap();
         }
         let db = Connection::open(&library).unwrap();
         db.execute_batch(
-            "UPDATE media_items SET width=718,height=432;
+            r#"ALTER TABLE media_items DROP COLUMN width;
+             ALTER TABLE media_items DROP COLUMN height;
+             UPDATE media_items SET extra_data='{"at:channelCallSign":"SKYMIX"}';
              UPDATE media_parts SET file='/fixture/Sky Mix Fixture (1997).mkv';
              CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
              CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
-             CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);",
+             CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);"#,
         )
         .unwrap();
         db.execute(
@@ -132,16 +134,13 @@ fn portable_sky_mix_quality() {
         .iter()
         .position(|r| r.channel_raw.as_deref() == Some("SKYMIXHD"))
         .unwrap();
-    assert_eq!(ui.app.rows[plain].airing_quality, AiringQuality::Unknown);
+    assert_eq!(ui.app.rows[plain].airing_quality, AiringQuality::Sd);
     assert_eq!(ui.app.rows[hd].airing_quality, AiringQuality::Hd);
     let showings = ui.app.filtered_showings_for(plain);
     assert_eq!(showings.len(), 3);
     assert_eq!(showings[0], plain);
     assert_eq!(showings[2], hd);
-    assert_eq!(
-        ui.app.rows[showings[1]].airing_quality,
-        AiringQuality::Unknown
-    );
+    assert_eq!(ui.app.rows[showings[1]].airing_quality, AiringQuality::Sd);
     let upgrade_visible = |ui: &mut TestUi| {
         ui.frame(Vec::new())
             .shapes
@@ -158,11 +157,13 @@ fn portable_sky_mix_quality() {
         .unwrap();
     ui.click(card.rect.center());
     ui.label("Owned SD");
-    assert!(painted_airing_labels(&mut ui).is_empty());
+    assert_eq!(painted_airing_labels(&mut ui), ["Airing SD"]);
     ui.press("Other showings (2)");
     ui.label("Scheduled to record");
     ui.label("Airing HD");
-    assert_eq!(painted_airing_labels(&mut ui), ["Airing HD"]);
+    let mut labels = painted_airing_labels(&mut ui);
+    labels.sort();
+    assert_eq!(labels, ["Airing HD", "Airing SD", "Airing SD"]);
     ui.press("Filters");
     ui.press("HD only");
     assert_eq!(ui.app.filtered_showings_for(hd), [hd]);
@@ -174,7 +175,7 @@ fn portable_sky_mix_quality() {
     Connection::open(&library)
         .unwrap()
         .execute_batch(
-            "INSERT INTO media_items(id, metadata_item_id, width, height) VALUES (2,1,NULL,0);
+            "INSERT INTO media_items(id, metadata_item_id) VALUES (2,1);
          INSERT INTO media_parts(id, media_item_id, file) VALUES (2,2,'/fixture/Unmeasured.mkv');",
         )
         .unwrap();

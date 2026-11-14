@@ -5,9 +5,9 @@
 - Recording badges distinguish channels airing the same film at the same time. **REC?** identifies a scheduled time with an unconfirmed channel. **Film REC** identifies a recording request without a confirmed showing.
 - PEX now recognises Plex recording subscriptions that store the station ID and display name together. A unique station match at the booked time gets **REC**, including when one subscription lists several channels and airtimes.
 - Recording badges recognise zero-padded channel numbers, and an unreadable recording entry no longer hides other bookings.
-- The guide labels confirmed HD and SD showings and leaves the quality label off when the guide supplies insufficient evidence. PEX checks whether Plex analysed the media before using its dimensions, preventing false **HD ↑** badges on listings such as Freeview Sky Mix.
+- Programmes inherit the channel’s quality when the guide has no reliable resolution. A named station defaults to SD and an HD station shows HD. PEX ignores nominal pixel dimensions on unanalysed guide entries, including the Freeview Sky Mix fixture.
 - Owned badges follow the configured library across restarts. **Owned Details** includes both neighbouring years when they tie for the best match.
-- **HD ↑** requires an HD airing and confirmed SD library copies. Files with missing dimensions show **Owned**. Manual and completed-snapshot scans skip saving redundant title lists.
+- **HD ↑** requires an HD airing and SD library copies. When file dimensions are missing, PEX uses the resolution or source channel saved with that recording. Manual and completed-snapshot scans skip saving redundant title lists.
 - **Owned Details** explains the match and shows the Plex title, year and server file path. It lists all candidates when a match is ambiguous. The scan total counts each Plex movie once, including movies with multiple files or title variants.
 - **Advanced → Refresh path status** checks configured sources and local paths in the background, so an unreachable share leaves the guide available.
 - Manage an optional TMDb v3 API key from **Set up ratings…** on **Connect to Plex** or **Advanced → Ratings key…**. Choosing **⭐ Rating** in film details opens the same masked key entry when needed and resumes the lookup after saving. The key is saved with your portable settings.

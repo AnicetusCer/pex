@@ -229,7 +229,7 @@ pub struct PosterRow {
 }
 
 // With several possible copies, one HD match is enough to suppress an upgrade.
-// SD is certain only when every matching copy has known SD dimensions.
+// An upgrade requires SD quality for every matching copy.
 #[derive(
     Clone,
     Copy,

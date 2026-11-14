@@ -9,7 +9,8 @@ use tracing::warn;
 
 use crate::app::cache;
 use crate::app::types::{
-    OwnedCandidate, OwnedCandidates, OwnedField, OwnedLibrary, OwnedMovie, OwnedMsg, OwnedQuality,
+    AiringQuality, OwnedCandidate, OwnedCandidates, OwnedField, OwnedLibrary, OwnedMovie, OwnedMsg,
+    OwnedQuality,
 };
 use crate::app::PexApp;
 use crate::config::local_library_db_path;
@@ -93,14 +94,21 @@ struct PlexOwnedEntry {
     title: String,
     original_title: Option<String>,
     year: Option<i32>,
-    width: Option<u32>,
-    height: Option<u32>,
+    quality: OwnedQuality,
     updated_at: Option<u64>,
     file_path: String,
 }
 
 fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, String> {
-    let sql = r#"
+    let columns = crate::app::prep::table_columns(conn, "media_items")
+        .map_err(|e| format!("Failed to read Plex media columns: {e}"))?;
+    let optional = |name| crate::app::prep::optional_column(&columns, "mi", name);
+    let width = optional("width");
+    let height = optional("height");
+    let extra_data = optional("extra_data");
+    let resolution = optional("video_resolution");
+    let sql = format!(
+        r#"
         SELECT
             m.id            AS metadata_id,
             m.guid          AS guid,
@@ -109,13 +117,12 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             m.year          AS year,
             m.updated_at    AS meta_updated_at,
             m.added_at      AS meta_added_at,
-            mi.id           AS media_item_id,
-            mi.width        AS width,
-            mi.height       AS height,
+            {width}         AS width,
+            {height}        AS height,
+            {extra_data}    AS recording_data,
+            CAST({resolution} AS TEXT) AS resolution,
             mi.updated_at   AS media_updated_at,
-            mp.id           AS media_part_id,
             mp.file         AS file_path,
-            mp.size         AS file_size,
             mp.updated_at   AS part_updated_at
         FROM metadata_items m
         JOIN media_items mi ON mi.metadata_item_id = m.id
@@ -125,100 +132,62 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
           AND mp.file <> ''
         ORDER BY
             m.id ASC,
-            COALESCE(mi.width, 0) DESC,
-            COALESCE(mi.height, 0) DESC,
+            COALESCE({width}, 0) DESC,
+            COALESCE({height}, 0) DESC,
             COALESCE(mp.size, 0) DESC,
             mp.id ASC
-    "#;
+    "#
+    );
 
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|err| format!("Failed to prepare Plex library query: {err}"))?;
 
     let rows = stmt
         .query_map([], |row| {
-            let metadata_id: i64 = row.get("metadata_id")?;
-            let guid: Option<String> = row.get("guid")?;
-            let title: String = row.get("title")?;
-            let original_title: Option<String> = row.get("original_title")?;
-            let year: Option<i32> = row.get("year")?;
-            let width: Option<i64> = row.get("width")?;
-            let height: Option<i64> = row.get("height")?;
             let part_updated_at: Option<i64> = row.get("part_updated_at")?;
             let media_updated_at: Option<i64> = row.get("media_updated_at")?;
             let meta_updated_at: Option<i64> = row.get("meta_updated_at")?;
             let meta_added_at: Option<i64> = row.get("meta_added_at")?;
-            let file_path: String = row.get("file_path")?;
-            let _size: Option<i64> = row.get("file_size")?;
-
-            Ok((
-                metadata_id,
-                guid,
-                title,
-                original_title,
-                year,
-                width,
-                height,
-                part_updated_at,
-                media_updated_at,
-                meta_updated_at,
-                meta_added_at,
-                file_path,
-            ))
+            let mut quality = file_quality(row.get("width")?, row.get("height")?);
+            if quality == OwnedQuality::Unknown {
+                quality = recording_quality(
+                    row.get_ref("resolution")?.as_str().ok(),
+                    row.get_ref("recording_data")?.as_bytes().ok(),
+                );
+            }
+            Ok(PlexOwnedEntry {
+                metadata_id: row.get("metadata_id")?,
+                guid: row.get("guid")?,
+                title: row.get("title")?,
+                original_title: row.get("original_title")?,
+                year: row.get("year")?,
+                quality,
+                updated_at: part_updated_at
+                    .or(media_updated_at)
+                    .or(meta_updated_at)
+                    .or(meta_added_at)
+                    .map(|ts| ts.max(0) as u64),
+                file_path: row.get("file_path")?,
+            })
         })
         .map_err(|err| format!("Failed to iterate Plex library rows: {err}"))?;
 
     let mut results: Vec<PlexOwnedEntry> = Vec::new();
 
     for row in rows {
-        let (
-            metadata_id,
-            guid,
-            title,
-            original_title,
-            year,
-            width,
-            height,
-            part_updated_at,
-            media_updated_at,
-            meta_updated_at,
-            meta_added_at,
-            file_path,
-        ) = row.map_err(|err| format!("Failed to read Plex library row: {err}"))?;
-
-        if title.trim().is_empty() {
+        let entry = row.map_err(|err| format!("Failed to read Plex library row: {err}"))?;
+        if entry.title.trim().is_empty() {
             continue;
         }
-
-        let width = width.map(|v| v.max(0) as u32);
-        let height = height.map(|v| v.max(0) as u32);
-        let updated_at = part_updated_at
-            .or(media_updated_at)
-            .or(meta_updated_at)
-            .or(meta_added_at)
-            .map(|ts| ts.max(0) as u64);
-
-        let entry = PlexOwnedEntry {
-            metadata_id,
-            guid,
-            title,
-            original_title,
-            year,
-            width,
-            height,
-            updated_at,
-            file_path,
-        };
         // Copies of one movie are adjacent in SQL quality/size order. Retain
         // a representative path for the strongest evidence across all copies:
-        // one HD file suffices, and any unmeasured copy prevents an SD-only claim.
+        // one HD file suffices, and any unidentified copy prevents an SD-only claim.
         if let Some(previous) = results
             .last_mut()
-            .filter(|prior| prior.metadata_id == metadata_id)
+            .filter(|prior| prior.metadata_id == entry.metadata_id)
         {
-            if file_quality(entry.width, entry.height)
-                > file_quality(previous.width, previous.height)
-            {
+            if entry.quality > previous.quality {
                 *previous = entry;
             }
         } else {
@@ -308,7 +277,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedLibrary {
             title: entry.title,
             year: entry.year,
             path: entry.file_path,
-            quality: file_quality(entry.width, entry.height),
+            quality: entry.quality,
             updated_at: entry.updated_at,
         });
     }
@@ -318,7 +287,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedLibrary {
     index
 }
 
-fn file_quality(width: Option<u32>, height: Option<u32>) -> OwnedQuality {
+fn file_quality(width: Option<i64>, height: Option<i64>) -> OwnedQuality {
     if width.is_some_and(|w| w >= 1280) || height.is_some_and(|h| h >= 720) {
         return OwnedQuality::Hd;
     }
@@ -326,6 +295,36 @@ fn file_quality(width: Option<u32>, height: Option<u32>) -> OwnedQuality {
         return OwnedQuality::Sd;
     }
     OwnedQuality::Unknown
+}
+
+// Read the station attached to this file's media item. A booking for the same
+// title doesn't identify which channel produced an existing library copy.
+fn recording_quality(resolution: Option<&str>, extra_data: Option<&[u8]>) -> OwnedQuality {
+    let data: Option<serde_json::Value> =
+        extra_data.and_then(|bytes| serde_json::from_slice(bytes).ok());
+    let field = |key: &str| {
+        data.as_ref()?
+            .get(key)?
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+    };
+    let station = |call_sign, title| {
+        let labels = (field(call_sign), field(title));
+        (labels != (None, None))
+            .then(|| crate::app::utils::station_quality(resolution, labels.0, labels.1))
+    };
+    let at = station("at:channelCallSign", "at:channelTitle");
+    let me = station("me:channelCallSign", "me:channelTitle");
+    let quality = match (at, me) {
+        (Some(a), Some(b)) if a != b => AiringQuality::Unknown,
+        (Some(q), _) | (_, Some(q)) => q,
+        (None, None) => crate::app::utils::station_quality(resolution, None, None),
+    };
+    match quality {
+        AiringQuality::Hd => OwnedQuality::Hd,
+        AiringQuality::Sd => OwnedQuality::Sd,
+        AiringQuality::Unknown => OwnedQuality::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -342,8 +341,7 @@ pub(super) mod tests {
                 title: title.into(),
                 original_title: None,
                 year,
-                width: Some(1920),
-                height: Some(1080),
+                quality: OwnedQuality::Hd,
                 updated_at: None,
                 file_path: match year {
                     Some(year) => format!("library/{title} ({year}).mkv"),
@@ -433,6 +431,85 @@ pub(super) mod tests {
         assert_eq!(file_quality(Some(1280), None), OwnedQuality::Hd);
         assert_eq!(file_quality(None, Some(720)), OwnedQuality::Hd);
         assert_eq!(file_quality(Some(720), Some(576)), OwnedQuality::Sd);
+    }
+
+    #[test]
+    fn unmeasured_recordings_inherit_their_own_stations() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../test_fixtures.sql"))
+            .unwrap();
+        db.execute_batch(r#"
+            ALTER TABLE media_items ADD COLUMN video_resolution TEXT;
+            UPDATE media_items SET width=NULL, height=NULL, extra_data='{"at:channelTitle":"Cinema"}';
+            INSERT INTO media_items(id,metadata_item_id,extra_data)
+              VALUES (2,1,CAST('{"me:channelCallSign":"CinemaHD"}' AS BLOB));
+            INSERT INTO media_parts(id,media_item_id,file) VALUES (2,2,'/media/second.mkv');
+        "#).unwrap();
+        let movie = || {
+            index_owned_entries(collect_plex_owned_entries(&db).unwrap())
+                .movies
+                .pop()
+                .unwrap()
+        };
+        let best = movie();
+        assert_eq!(best.quality, OwnedQuality::Hd);
+        assert_eq!(best.path, "/media/second.mkv");
+
+        // Measured SD in the second copy overrides its source channel's HD.
+        db.execute(
+            "UPDATE media_items SET width=720, height=576 WHERE id=2",
+            [],
+        )
+        .unwrap();
+        assert_eq!(movie().quality, OwnedQuality::Sd);
+        // Measured HD in the first copy similarly overrides its plain station.
+        db.execute(
+            "UPDATE media_items SET width=1920, height=800 WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(movie().quality, OwnedQuality::Hd);
+
+        db.execute(
+            "UPDATE media_items SET width=NULL, height=NULL, extra_data=x'FF' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(movie().quality, OwnedQuality::Unknown);
+        db.execute(
+            "UPDATE media_items SET video_resolution='720' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert_eq!(movie().quality, OwnedQuality::Hd);
+        db.execute(
+            r#"UPDATE media_items SET video_resolution=NULL,
+            extra_data='{"at:channelTitle":"Cinema","me:channelTitle":"Cinema HD"}' WHERE id=1"#,
+            [],
+        )
+        .unwrap();
+        assert_eq!(movie().quality, OwnedQuality::Unknown);
+    }
+
+    #[test]
+    fn library_without_station_or_dimensions_keeps_unidentified_copies() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../test_fixtures.sql"))
+            .unwrap();
+        db.execute_batch(
+            r#"
+            ALTER TABLE media_items DROP COLUMN width;
+            ALTER TABLE media_items DROP COLUMN height;
+            ALTER TABLE media_items DROP COLUMN extra_data;
+            UPDATE media_parts SET file='/fixture/CinemaHD.mkv';
+            CREATE TABLE media_grabs(metadata_item_id INTEGER, status INTEGER, extra_data TEXT);
+            INSERT INTO media_grabs VALUES(1,0,'{"me:channelTitle":"Cinema HD"}');
+        "#,
+        )
+        .unwrap();
+        let scan = index_owned_entries(collect_plex_owned_entries(&db).unwrap());
+        assert_eq!(scan.movies.len(), 1);
+        assert_eq!(scan.movies[0].quality, OwnedQuality::Unknown);
     }
 
     #[test]

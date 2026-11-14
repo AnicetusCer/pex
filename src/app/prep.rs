@@ -26,6 +26,27 @@ fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
     .is_ok()
 }
 
+pub(super) fn table_columns(
+    db: &Connection,
+    table: &str,
+) -> rusqlite::Result<std::collections::HashSet<String>> {
+    db.prepare("SELECT name FROM pragma_table_info(?1)")?
+        .query_map([table], |row| row.get(0))?
+        .collect()
+}
+
+pub(super) fn optional_column(
+    columns: &std::collections::HashSet<String>,
+    alias: &str,
+    name: &str,
+) -> String {
+    if columns.contains(name) {
+        format!("{alias}.{name}")
+    } else {
+        "NULL".into()
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 struct ChannelMeta {
     guide_channel: super::scheduled::GuideChannel,
@@ -35,8 +56,8 @@ struct ChannelMeta {
 }
 
 /// Extract channel metadata from `media_items.extra_data`
-fn parse_channel_meta(extra: &str) -> ChannelMeta {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(extra) else {
+fn parse_channel_meta(extra: &[u8]) -> ChannelMeta {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(extra) else {
         return ChannelMeta::default();
     };
     let text = |key: &str| {
@@ -61,23 +82,10 @@ fn read_guide_airings(
     progress: impl Fn(usize),
 ) -> rusqlite::Result<Vec<PrepItem>> {
     // Discover optional columns once. Old guides may omit both artwork and video dimensions.
-    let mut columns = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
-    let mut optional_columns = |table: &str| {
-        columns
-            .query_map([table], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()
-    };
-    let metadata = optional_columns("metadata_items")?;
-    let media = optional_columns("media_items")?;
-    let column = |names: &std::collections::HashSet<String>, alias: &str, name: &str| {
-        if names.contains(name) {
-            format!("{alias}.{name}")
-        } else {
-            "NULL".into()
-        }
-    };
-    let preferred = column(&metadata, "m", "user_thumb_url");
-    let secondary = column(&metadata, "m", "thumb_url");
+    let metadata = table_columns(db, "metadata_items")?;
+    let media = table_columns(db, "media_items")?;
+    let preferred = optional_column(&metadata, "m", "user_thumb_url");
+    let secondary = optional_column(&metadata, "m", "thumb_url");
     // An unanalysed EPG entry can repeat nominal dimensions for every programme
     // on a station. Only pass measured dimensions to the quality classifier.
     let analyzed_dimension = |name: &str| {
@@ -89,10 +97,11 @@ fn read_guide_airings(
     };
     let width = analyzed_dimension("width");
     let height = analyzed_dimension("height");
-    let resolution = column(&media, "mi", "video_resolution");
+    let resolution = optional_column(&media, "mi", "video_resolution");
+    let extra_data = optional_column(&media, "mi", "extra_data");
     let sql = format!(
         "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
-        mi.extra_data, m.summary, m.audience_rating, m.rating, {preferred}, {secondary},
+        {extra_data}, m.summary, m.audience_rating, m.rating, {preferred}, {secondary},
         {width} AS airing_width, {height} AS airing_height, CAST({resolution} AS TEXT) AS airing_resolution
         FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id = m.id
         WHERE m.metadata_type = 1 AND mi.begins_at >= 0 AND trim(m.title) <> ''
@@ -136,8 +145,12 @@ fn read_guide_airings(
         } else {
             url_to_cache_key(&thumb_url)
         };
-        let extra: Option<String> = row.get(6).ok();
-        let channel = extra.as_deref().map(parse_channel_meta).unwrap_or_default();
+        let channel = row
+            .get_ref(6)?
+            .as_bytes()
+            .ok()
+            .map(parse_channel_meta)
+            .unwrap_or_default();
         let resolution: Option<String> = row.get("airing_resolution")?;
         let airing_quality = crate::app::utils::airing_quality(
             row.get("airing_width").ok(),
@@ -330,7 +343,7 @@ fn validate_snapshot(db: &Connection, library: bool) -> io::Result<()> {
     if library {
         db.prepare(
             "SELECT m.id, m.guid, m.title, m.original_title, m.year, m.updated_at, m.added_at,
-            mi.id, mi.width, mi.height, mi.updated_at, mp.id, mp.file, mp.size, mp.updated_at
+            mi.id, mi.updated_at, mp.id, mp.file, mp.size, mp.updated_at
             FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id=m.id
             JOIN media_parts mp ON mp.media_item_id=mi.id WHERE m.metadata_type=1 LIMIT 0",
         )
@@ -982,12 +995,12 @@ mod guide_tests {
                 .map(|airing| airing.airing_quality)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(qualities(), [Hd, Sd, Hd, Sd, Unknown, Hd, Sd, Hd]);
+        assert_eq!(qualities(), [Hd, Sd, Hd, Sd, Sd, Hd, Sd, Hd]);
         // Older guides without an analysis marker still have useful resolution
         // and station labels. Dimensions alone cannot confirm an upgrade.
         db.execute_batch("ALTER TABLE media_items DROP COLUMN media_analysis_version;")
             .unwrap();
-        assert_eq!(qualities(), [Unknown, Hd, Hd, Sd, Unknown, Hd, Sd, Unknown]);
+        assert_eq!(qualities(), [Unknown, Hd, Hd, Sd, Sd, Hd, Sd, Unknown]);
         db.execute_batch(
             "ALTER TABLE media_items DROP COLUMN width;
                           ALTER TABLE media_items DROP COLUMN height;
@@ -996,8 +1009,11 @@ mod guide_tests {
         .unwrap();
         assert_eq!(
             qualities(),
-            [Unknown, Hd, Unknown, Sd, Unknown, Hd, Unknown, Unknown]
+            [Unknown, Hd, Unknown, Sd, Sd, Hd, Unknown, Unknown]
         );
+        db.execute_batch("ALTER TABLE media_items DROP COLUMN extra_data;")
+            .unwrap();
+        assert_eq!(qualities(), [Unknown; 8]);
     }
 
     #[test]
@@ -1011,12 +1027,20 @@ mod guide_tests {
         )
         .unwrap();
         for (station, resolution, expected) in [
-            ("011 Provider", None, Unknown),
+            ("011 Provider", None, Sd),
             ("Provider SD", None, Sd),
             ("ProviderHD", None, Hd),
+            ("041 ProviderHD (The Network)", None, Hd),
+            ("Unbranded", Some("1080i"), Hd),
             ("Provider", Some("576i"), Sd),
             ("Provider SD", Some("1080i"), Unknown),
             ("Provider HD / SD", None, Unknown),
+            ("ProviderHD (ProviderSD)", None, Unknown),
+            ("", None, Unknown),
+            ("1080", None, Unknown),
+            ("2.1", None, Unknown),
+            ("Unknown channel", None, Unknown),
+            ("N/A", None, Unknown),
         ] {
             db.execute(
                 "UPDATE media_items SET width=1280,height=720,extra_data=?1,video_resolution=?2",

@@ -262,16 +262,16 @@ ui:
         - poster preview (cached or placeholder)
         - channel icon (64px), long-title scroller, copy button
         - airing line and optional TMDb rating button
-        - "Other showings (N) lists additional qualifying airings with time, channel, confirmed HD/SD when available, and recording status."
+        - "Other showings (N) lists additional qualifying airings with time, channel, airing quality and recording status when available."
         - "Owned Details shows the match reason, Plex titles, years and server paths with a copy action. Both adjacent years are considered together after identifier and exact title/year matches."
         - description and genres
 
 hd_logic:
   broadcast_hd_inference:
     fn: "utils::airing_quality(width, height, resolution, call_sign, channel_title) -> AiringQuality (Hd, Sd or Unknown)"
-    evidence: "read_guide_airings passes dimensions only for positive media_analysis_version. On unanalysed and older guides, look for explicit resolution or station quality. Missing or conflicting evidence gives Unknown."
+    evidence: "read_guide_airings passes dimensions only for positive media_analysis_version. Otherwise utils::station_quality checks explicit resolution, call sign and channel title. A named station defaults to SD. With no usable station or resolution, or conflicting labels, it returns Unknown."
   owned_hd_inference:
-    definition: "Any matching HD copy establishes HD. Every matching copy must be confirmed SD to establish SD. Otherwise display Owned."
+    definition: "Check a copy's dimensions first, then its reported resolution and original station metadata from its own media_items row. An HD copy establishes HD. Only all-SD matches qualify for an upgrade. An unclassified match can display Owned."
   better_hd_available_rule:
     definition: "PosterRow::hd_upgrade() requires owned SD and an HD airing."
     effects:

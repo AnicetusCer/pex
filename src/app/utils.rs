@@ -226,8 +226,7 @@ pub fn humanize_channel(raw: &str) -> String {
     }
 }
 
-/// Use dimensions from analysed media first. Otherwise look for an explicit
-/// resolution or station designation; the channel number is never a resolution.
+/// Use dimensions from analysed guide media first; some guides have only station metadata.
 pub(super) fn airing_quality(
     width: Option<i64>,
     height: Option<i64>,
@@ -235,11 +234,30 @@ pub(super) fn airing_quality(
     call_sign: Option<&str>,
     channel_title: Option<&str>,
 ) -> super::types::AiringQuality {
-    use super::types::AiringQuality::{Hd, Sd, Unknown};
+    use super::types::AiringQuality::{Hd, Sd};
 
     if let Some(height) = height.filter(|&n| n > 0) {
         return if height >= 720 { Hd } else { Sd };
     }
+
+    // Width alone is sufficient for the usual HD and SD broadcast formats.
+    // Intermediate widths are ambiguous without the height.
+    match width {
+        Some(n) if n >= 1280 => return Hd,
+        Some(1..=720) => return Sd,
+        _ => {}
+    }
+    station_quality(resolution, call_sign, channel_title)
+}
+
+/// Use the station attached to this showing or recorded file. A named station
+/// defaults to SD when Plex supplies no HD designation or explicit resolution.
+pub(super) fn station_quality(
+    resolution: Option<&str>,
+    call_sign: Option<&str>,
+    channel_title: Option<&str>,
+) -> super::types::AiringQuality {
+    use super::types::AiringQuality::{Hd, Sd, Unknown};
 
     let from_resolution = |label: &str| match label {
         "hd" | "uhd" | "720" | "720i" | "720p" | "1080" | "1080i" | "1080p" | "2160" | "2160p"
@@ -248,27 +266,29 @@ pub(super) fn airing_quality(
         | "576p" => Some(Sd),
         _ => None,
     };
-    // Width alone is sufficient for the usual HD and SD broadcast formats.
-    // Intermediate widths are ambiguous without the height.
-    match width {
-        Some(n) if n >= 1280 => return Hd,
-        Some(1..=720) => return Sd,
-        _ => {}
-    }
     let mut reported = resolution.and_then(|s| from_resolution(&s.trim().to_ascii_lowercase()));
+    let mut named_station = false;
     for name in [call_sign, channel_title].into_iter().flatten() {
         let name = name.trim().to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "unknown" | "unknown channel" | "n/a" | "none" | "null" | "unnamed"
+        ) {
+            continue;
+        }
+        named_station |= name.chars().any(char::is_alphabetic);
         for quality in name
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|token| token.chars().any(|c| c.is_ascii_alphabetic()))
-            .filter_map(from_resolution)
-            // Some providers omit the space, e.g. BBCONEHD or SkyCinemaSD.
-            .chain(if name.ends_with("hd") || name.ends_with("4k") {
-                Some(Hd)
-            } else if name.ends_with("sd") {
-                Some(Sd)
-            } else {
-                None
+            .filter_map(|token| {
+                // Plex may combine a VCN, a compact call sign and a display name.
+                if token.ends_with("hd") || token.ends_with("4k") {
+                    Some(Hd)
+                } else if token.ends_with("sd") {
+                    Some(Sd)
+                } else {
+                    from_resolution(token)
+                }
             })
         {
             if reported.is_some_and(|existing| existing != quality) {
@@ -277,5 +297,5 @@ pub(super) fn airing_quality(
             reported = Some(quality);
         }
     }
-    reported.unwrap_or(Unknown)
+    reported.unwrap_or(if named_station { Sd } else { Unknown })
 }

@@ -16,7 +16,9 @@ Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the
 
 The guide opens when listings are ready. Posters load in the background, and films without artwork still show their title and airtime. Your date range and filters determine which showing appears on each film’s card.
 
-Select a film and expand **Other showings (N)** for the channel and UTC time of each additional airing. PEX labels confirmed standard-definition showings **Airing SD** and high-definition showings **Airing HD**. When the guide gives no reliable resolution, you’ll see just the channel and time. **HD only** shows confirmed HD airings. The **HD ↑** badge means the airing is HD and all matching copies in your library are confirmed SD. If Plex cannot establish the resolution of your copy, its label is simply **Owned**.
+Select a film and expand **Other showings (N)** for the channel and UTC time of each additional airing. Programmes inherit their channel’s quality when Plex has no resolution for the showing. For example, **Sky Mix** shows **Airing SD** and **Sky Mix HD** shows **Airing HD**. PEX treats a named channel as SD by default, so your lineup doesn’t need to include “SD” in station names. **HD only** shows the HD airings.
+
+**HD ↑** means an HD airing could replace an SD copy you own. PEX checks the file’s resolution first. If that is missing, it uses the source channel saved with that recording. If any matching copy is HD or has too little information to classify, the upgrade badge stays off.
 
 **REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 
@@ -36,7 +38,7 @@ If Plex starts writing during the transfer, PEX limits the read to the file size
 
 The guide shows the source and date used for owned and scheduled recording badges. A backup can predate new films, recording requests or cancellations. Choose **Retry owned scan** to check the live library again. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
 
-Saved owned badges belong to the library that produced them. When you change libraries, the first successful scan fills in the new badges. After an upgrade, older saved badges can show **Owned** until the scan checks the file dimensions.
+Saved owned badges belong to the library that produced them. When you change libraries, the first successful scan fills in the new badges. After an upgrade, the next owned scan updates older badges using the recording’s resolution and source channel.
 
 ## Refresh from completed snapshots
 
