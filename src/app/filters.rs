@@ -122,7 +122,7 @@ impl crate::app::PexApp {
             if self.filter_hd_only && !hd {
                 return None;
             }
-            if self.hide_owned && row.owned && (!hd || row.owned_hd) {
+            if self.hide_owned && row.owned && !row.hd_upgrade() {
                 return None;
             }
             if self.filter_owned_before_cutoff

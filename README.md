@@ -256,15 +256,14 @@ Map the server path to a readable client path when PEX runs on another machine. 
 
 ### Daily usage
 - Choose your day range and filters. Each film gets one card showing its next matching airing, or the most recent matching airing when all have started. Films with the same title but different release years can have separate cards.
-- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime and channel, with a recording status when applicable. Confirmed showings carry an **Airing SD** or **Airing HD** label. PEX uses pixel dimensions when Plex marks the media as analysed. Otherwise it checks the explicit resolution and station label. Showings with insufficient or conflicting information appear without a quality label. Only confirmed HD qualifies for **HD only** and **HD ↑**.
+- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime and channel, with a recording status when applicable. Confirmed showings carry an **Airing SD** or **Airing HD** label. PEX uses pixel dimensions when Plex marks the media as analysed. Otherwise it checks the explicit resolution and station label. Showings with insufficient or conflicting information appear without a quality label. **HD only** shows confirmed HD airings. **HD ↑** also requires every matching library copy to be confirmed SD.
 - **Owned Details** gives priority to a matching Plex identifier, then a title and exact year. When the best title matches are one year earlier and one year later, both are listed with their Plex file paths.
 - If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
   day whether the respective database copy needs refreshing.
-- Owned and HD badges stay up-to-date thanks to scanning the mirrored Plex library database.
 
 ### Keeping the owned cache fresh
 - Use **Advanced ▸ Refresh owned scan** after adding/removing many files.
-- PEX associates cached owned and HD badges with their library source. When you change libraries or upgrade from an older badge cache, the new library’s first successful scan populates the badges.
+- PEX associates saved badges with their live library. When you switch libraries, the first successful scan fills in its badges. Older badges can show **Owned** until the scan checks the file dimensions.
 
 ### Poster cache maintenance
 - **Advanced ▸ Clear & rebuild poster cache** wipes cached artwork and immediately restarts prefetching.

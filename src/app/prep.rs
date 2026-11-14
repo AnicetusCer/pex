@@ -792,6 +792,7 @@ impl crate::app::PexApp {
                         self.rating_states.clear();
                         self.channel_icon_textures.clear();
                         let mut cached_posters = std::collections::HashMap::new();
+                        let hotset = self.last_hotset.take().unwrap_or_default();
                         self.rows = list
                             .into_iter()
                             .map(|item| {
@@ -826,7 +827,15 @@ impl crate::app::PexApp {
                                     let key = Self::small_key(&item.key);
                                     let path = cached_posters
                                         .entry(key.clone())
-                                        .or_insert_with(|| crate::app::cache::find_any_by_key(&key))
+                                        .or_insert_with(|| {
+                                            hotset
+                                                .get(&key)
+                                                .filter(|p| p.is_file())
+                                                .cloned()
+                                                .or_else(|| {
+                                                    crate::app::cache::find_any_by_key(&key)
+                                                })
+                                        })
                                         .clone();
                                     (key, path)
                                 };
@@ -867,11 +876,10 @@ impl crate::app::PexApp {
                                     audience_rating: item.audience_rating,
                                     critic_rating: item.critic_rating,
                                     path,
-                                    tex: None,
                                     state,
                                     owned: false, // filled in by apply_owned_flags()
                                     owned_modified: None,
-                                    owned_hd: false,
+                                    owned_quality: Default::default(),
                                     airing_quality: item.airing_quality,
                                     scheduled: Default::default(),
                                 }
@@ -892,31 +900,6 @@ impl crate::app::PexApp {
                             Self::spawn_channel_icon_prefetch(icon_urls, ctx.clone());
                         }
 
-                        // Warm-start: upload last hotset first (bounded)
-                        if let Some(hs) = self.last_hotset.take() {
-                            for row in &mut self.rows {
-                                if let Some(p) = hs.get(&row.key) {
-                                    if p.exists() {
-                                        row.path = Some(p.clone());
-                                        row.state = crate::app::PosterState::Cached;
-                                    }
-                                }
-                            }
-                            let mut uploaded = 0usize;
-                            for i in 0..self.rows.len() {
-                                if uploaded >= crate::app::PREWARM_UPLOADS {
-                                    break;
-                                }
-                                let should_upload = self
-                                    .rows
-                                    .get(i)
-                                    .is_some_and(|row| hs.contains_key(&row.key));
-                                if should_upload && self.try_lazy_upload_row(ctx, i) {
-                                    uploaded += 1;
-                                }
-                            }
-                        }
-
                         // Scheduled recordings (from Plex library DB)
                         self.apply_scheduled_flags();
 
@@ -926,7 +909,10 @@ impl crate::app::PexApp {
                         let poster_done_status =
                             format!("Poster prep complete. {} items ready.", self.rows.len());
                         self.boot_phase = crate::app::BootPhase::Ready;
-                        if self.owned_keys.is_some() || !self.owned_scan_in_progress {
+                        if self.owned_preload.is_some()
+                            || self.owned_library.is_some()
+                            || !self.owned_scan_in_progress
+                        {
                             self.set_status(poster_done_status);
                         } else {
                             self.set_status("Poster prep complete. Scanning owned library...");

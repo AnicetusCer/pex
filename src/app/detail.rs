@@ -45,10 +45,10 @@ impl crate::app::PexApp {
                         };
 
                         let airing_quality = row.airing_quality;
-                        let owned_is_hd = row.owned_hd;
+                        let owned_quality = row.owned_quality;
 
                         // Snapshot values so we can release the immutable borrow on self.rows
-                        let poster_tex = row.tex.clone();
+                        let poster_tex = self.poster_textures.get(&row.key);
                         let title_text = row.title.clone();
                         let year = row.year;
                         let channel_display = channel_name(row);
@@ -253,12 +253,18 @@ impl crate::app::PexApp {
                                     );
                                 }
 
-                                // Owned chip (Owned HD / Owned SD)
                                 if owned {
-                                    let (txt, col) = if owned_is_hd {
-                                        ("Owned HD", eg::Color32::from_rgb(130, 200, 130))
-                                    } else {
-                                        ("Owned SD", eg::Color32::from_gray(200))
+                                    use super::types::OwnedQuality;
+                                    let (txt, col) = match owned_quality {
+                                        OwnedQuality::Hd => {
+                                            ("Owned HD", eg::Color32::from_rgb(130, 200, 130))
+                                        }
+                                        OwnedQuality::Sd => {
+                                            ("Owned SD", eg::Color32::from_gray(200))
+                                        }
+                                        OwnedQuality::Unknown => {
+                                            ("Owned", eg::Color32::from_gray(200))
+                                        }
                                     };
                                     ui.add(eg::Label::new(eg::RichText::new(txt).color(col)));
 

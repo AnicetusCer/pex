@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 // ---- Crates ----
 use eframe::egui as eg;
@@ -112,6 +112,7 @@ pub struct PexApp {
 
     // prefetch plumbing
     prefetch_started: bool,
+    poster_textures: HashMap<String, eg::TextureHandle>,
     total_targets: usize,
     completed: usize,
     failed: usize,
@@ -127,10 +128,9 @@ pub struct PexApp {
 
     // background owned scan
     owned_rx: Option<Receiver<OwnedMsg>>,
-    owned_keys: Option<HashSet<String>>,
+    owned_preload: Option<HashMap<String, types::OwnedQuality>>,
     owned_library: Option<types::OwnedLibrary>,
     owned_source: Option<owned::LibrarySource>,
-    owned_hd_keys: Option<HashSet<String>>,
     owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
     owned_scan_available: bool,
@@ -198,8 +198,7 @@ impl Default for PexApp {
     fn default() -> Self {
         let cfg = load_config();
         let owned_source = owned::LibrarySource::configured(&cfg);
-        let (owned_keys, owned_hd_keys) =
-            owned::title_cache::preload(&cache::cache_dir(), owned_source.as_ref()).unzip();
+        let owned_preload = owned::title_cache::preload(&cache::cache_dir(), owned_source.as_ref());
         Self {
             rows: Vec::new(),
 
@@ -221,6 +220,7 @@ impl Default for PexApp {
             prep_started: false,
 
             prefetch_started: false,
+            poster_textures: HashMap::new(),
             total_targets: 0,
             completed: 0,
             failed: 0,
@@ -232,8 +232,7 @@ impl Default for PexApp {
             dim_strength_ui: 0.8, // stronger dimming by default
 
             owned_rx: None,
-            owned_keys,
-            owned_hd_keys,
+            owned_preload,
             owned_library: None,
             owned_source,
             owned_match_stats: OwnedMatchStats::default(),
@@ -484,64 +483,23 @@ impl PexApp {
     /// Try to upload texture for a single row if a cached file exists (small variant).
     /// Returns true if a texture was uploaded this call.
     fn try_lazy_upload_row(&mut self, ctx: &eg::Context, idx: usize) -> bool {
-        if let Some(row) = self.rows.get_mut(idx) {
-            if row.tex.is_some() || matches!(row.state, PosterState::Failed) {
-                return false;
-            }
-            if let Some(path) = row.path.as_ref() {
-                match crate::app::gfx::load_texture_from_path(
-                    ctx,
-                    &path.to_string_lossy(),
-                    &row.key,
-                ) {
-                    Ok(tex) => {
-                        row.tex = Some(tex);
-                        row.state = PosterState::Ready;
-                        return true;
-                    }
-                    Err(_) => {
-                        row.state = PosterState::Failed;
-                    }
-                }
-            }
+        let Some(row) = self.rows.get_mut(idx) else {
+            return false;
+        };
+        if self.poster_textures.contains_key(&row.key) || row.state == PosterState::Failed {
+            return false;
         }
-        false
-    }
-
-    /// Upload a handful of textures immediately for the first visible window (fast perception).
-    fn prewarm_first_screen(&mut self, ctx: &eg::Context) {
-        // Only target near-future rows (for 2d/7d/etc.) and take the first PREWARM_UPLOADS
-        let now_bucket = utils::day_bucket(SystemTime::now());
-        let max_bucket_opt = self.current_range.max_bucket(now_bucket);
-
-        let targets: Vec<usize> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, row)| {
-                let b = row.airing.map(utils::day_bucket)?;
-                if b < now_bucket {
-                    return None;
-                }
-                if let Some(max_b) = max_bucket_opt {
-                    if b >= max_b {
-                        return None;
-                    }
-                }
-                Some(idx)
-            })
-            .take(PREWARM_UPLOADS * 2) // grab a few extra so we have buffers
-            .collect();
-
-        // Keep ordering stable (rows are already time-ordered; this is a no-op in most cases)
-        // Attempt uploads up to PREWARM_UPLOADS
-        let mut uploaded = 0usize;
-        for idx in targets {
-            if uploaded >= PREWARM_UPLOADS {
-                break;
+        let Some(path) = &row.path else {
+            return false;
+        };
+        match crate::app::gfx::load_texture_from_path(ctx, &path.to_string_lossy(), &row.key) {
+            Ok(texture) => {
+                self.poster_textures.insert(row.key.clone(), texture);
+                true
             }
-            if self.try_lazy_upload_row(ctx, idx) {
-                uploaded += 1;
+            Err(_) => {
+                row.state = PosterState::Failed;
+                false
             }
         }
     }
@@ -681,6 +639,7 @@ impl PexApp {
         self.prefetch_started = false;
         self.done_rx = None;
         self.rows.clear();
+        self.poster_textures.clear();
         self.total_targets = 0;
         self.completed = 0;
         self.failed = 0;
@@ -1050,7 +1009,11 @@ impl PexApp {
             }
         }
 
-        // --- NEW: Right-side detail panel (shown when selected) ---
+        // A selected film stays visible in Details even when its grid card is offscreen.
+        let selected_upload = self
+            .selected_idx
+            .is_some_and(|idx| self.try_lazy_upload_row(ctx, idx));
+        let grid_upload_budget = MAX_UPLOADS_PER_FRAME - usize::from(selected_upload);
         self.ui_render_detail_panel(ctx);
 
         // ---- Main UI ----
@@ -1087,7 +1050,7 @@ impl PexApp {
             }
 
             // Grouped grid
-            self.ui_render_grouped_grid(ui, ctx);
+            self.ui_render_grouped_grid(ui, ctx, grid_upload_budget);
         });
 
         self.maybe_save_prefs();

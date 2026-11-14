@@ -200,7 +200,13 @@ impl crate::app::PexApp {
     /// record up to N posters that already have textures this run
     pub(crate) fn save_hotset_manifest(&self, max_items: usize) -> io::Result<()> {
         let mut lines = Vec::new();
-        for row in self.rows.iter().filter(|r| r.tex.is_some()).take(max_items) {
+        let mut seen = std::collections::HashSet::new();
+        for row in self
+            .rows
+            .iter()
+            .filter(|r| self.poster_textures.contains_key(&r.key) && seen.insert(&r.key))
+            .take(max_items)
+        {
             if let Some(p) = &row.path {
                 lines.push(format!("{}\t{}", row.key, p.display()));
             }

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::Value;
 use tracing::warn;
 use urlencoding::decode;
@@ -128,17 +128,19 @@ impl GuideChannel {
 
     fn compare_token(&self, token: &str) -> StationMatch {
         use StationMatch::*;
-        for (field, strength) in [
-            (&self.id, Id),
-            (&self.number, Number),
-            (&self.call_sign, Name),
-            (&self.title, Name),
-        ] {
-            if field.as_deref() == Some(token) {
-                return strength;
-            }
+        if self.id.as_deref() == Some(token) {
+            Id
+        } else if self
+            .number
+            .as_deref()
+            .is_some_and(|n| same_number(n, token))
+        {
+            Number
+        } else if self.call_sign.as_deref() == Some(token) || self.title.as_deref() == Some(token) {
+            Name
+        } else {
+            Unknown
         }
-        Unknown
     }
 }
 
@@ -366,8 +368,7 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
             r#"
         SELECT extra_data
         FROM media_grabs
-        WHERE json_valid(extra_data)
-          AND status IN (0, 1, 2, 3)
+        WHERE status IN (0, 1, 2, 3)
         "#,
         )
         .map_err(|err| format!("prepare scheduled query failed: {err}"))?;
@@ -378,8 +379,9 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
         .map_err(|err| format!("query scheduled rows failed: {err}"))?;
 
     while let Some(row) = rows.next().map_err(|err| err.to_string())? {
-        let raw: String = row.get(0).map_err(|e| e.to_string())?;
-        let data: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let Some(data) = recording_metadata(row.get_ref(0).map_err(|err| err.to_string())?) else {
+            continue;
+        };
         let Some(time) = integer(data.get("me:beginsAt")) else {
             continue;
         };
@@ -433,6 +435,15 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
 fn integer(value: Option<&Value>) -> Option<i64> {
     let value = value?;
     value.as_i64().or_else(|| value.as_str()?.parse().ok())
+}
+
+// Plex databases can contain UTF-8 JSON in either TEXT or BLOB columns.
+// A malformed record has no usable booking and mustn't discard other rows.
+fn recording_metadata(value: ValueRef<'_>) -> Option<Value> {
+    match value {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => serde_json::from_slice(bytes).ok(),
+        _ => None,
+    }
 }
 
 fn subscription_list(value: Option<&Value>) -> Vec<String> {
@@ -542,19 +553,9 @@ fn load_from_media_subscriptions(
         .map_err(|err| format!("query media_subscriptions failed: {err}"))?;
 
     while let Some(row) = rows.next().map_err(|err| err.to_string())? {
-        let blob: Option<String> = row.get(0).map_err(|err| err.to_string())?;
-        let Some(blob) = blob else {
+        let Some(parsed) = recording_metadata(row.get_ref(0).map_err(|err| err.to_string())?)
+        else {
             continue;
-        };
-        if blob.trim().is_empty() {
-            continue;
-        }
-        let parsed: Value = match serde_json::from_str(&blob) {
-            Ok(val) => val,
-            Err(err) => {
-                warn!("Failed to parse media_subscriptions.extra_data: {err}");
-                continue;
-            }
         };
 
         let times = subscription_list(parsed.get("pv:airingTimes"));
@@ -577,14 +578,14 @@ fn load_from_media_subscriptions(
                 || v.as_str()
                     .is_some_and(|text| text == "1" || text.eq_ignore_ascii_case("true"))
         });
-        let remote: Option<String> = row.get(1).map_err(|err| err.to_string())?;
-        for guid in [
-            parsed.get("hi:guid").and_then(Value::as_str),
-            remote.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(utils::canonicalize_guid)
+        let remote = match row.get_ref(1).map_err(|err| err.to_string())? {
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => std::str::from_utf8(bytes).ok(),
+            _ => None,
+        };
+        for guid in [parsed.get("hi:guid").and_then(Value::as_str), remote]
+            .into_iter()
+            .flatten()
+            .filter_map(utils::canonicalize_guid)
         {
             if !one_shot {
                 index.films.insert(guid.clone());
@@ -624,6 +625,51 @@ fn decode_mt_key(mt_key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_dvr_rows_leave_other_text_and_blob_bookings_available() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            r#"
+            CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+            CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+            CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);
+            INSERT INTO media_grabs VALUES
+              (0,'{"mt:guid":"plex://bad-grab","me:beginsAt":10,"unused":1e999}'),
+              (0,NULL), (0,'not JSON'), (0,x'FF'),
+              (0,CAST('{"mt:guid":"plex://blob-grab","me:beginsAt":10}' AS BLOB)),
+              (0,'{"mt:guid":"plex://text-grab","me:beginsAt":10}');
+            INSERT INTO media_subscriptions VALUES
+              (1,'{"hi:guid":"plex://bad-sub","pv:airingTimes":"10","unused":1e999}'),
+              (2,x'FF'), (3,NULL), (4,'not JSON'),
+              (5,CAST('{"hi:guid":"plex://blob-sub","pv:airingTimes":"10"}' AS BLOB)),
+              (6,'{"hi:guid":"plex://text-sub","pv:airingTimes":"10"}');
+            INSERT INTO metadata_subscription_desired_items VALUES
+              (5,CAST('plex://desired' AS BLOB)), (6,x'FF');
+        "#,
+        )
+        .unwrap();
+        let index = read_scheduled_index(&db, 1).unwrap();
+        let flags = |guid| {
+            index
+                .match_slot(Some(guid), None, Some(10), &[&GuideChannel::default()])
+                .0[0]
+        };
+        for guid in [
+            "plex://text-grab",
+            "plex://blob-grab",
+            "plex://text-sub",
+            "plex://blob-sub",
+            "plex://desired",
+        ] {
+            assert_eq!(flags(guid), RecordingStatus::Exact, "{guid}");
+        }
+        for guid in ["plex://bad-sub", "plex://bad-grab"] {
+            assert_eq!(flags(guid), RecordingStatus::None, "{guid}");
+        }
+        db.execute("DROP TABLE media_grabs", []).unwrap();
+        assert!(read_scheduled_index(&db, 1).is_err());
+    }
 
     #[test]
     fn a_one_shot_recording_marks_only_its_selected_airing() {
@@ -687,7 +733,8 @@ mod tests {
               (1,'{"hi:guid":"plex://one","pr:oneShot":1,"pv:airingTimes":"20"}'),
               (2,'{"hi:guid":"plex://one","pr:oneShot":"1","pv:airingTimes":"60%2Cbad%2C70","pv:airingChannels":"200%2Cunused%2C100"}'),
               (3,'{"hi:guid":"plex://one","pr:oneShot":"1","pv:airingTimes":"80,90,100","pv:airingChannels":"100,200"}'),
-              (4,'{"hi:guid":"plex://all","pr:oneShot":"0"}');
+              (4,'{"hi:guid":"plex://all","pr:oneShot":"0"}'),
+              (5,'{"hi:guid":"plex://one","pr:oneShot":1,"pv:airingTimes":"110","pv:airingChannels":"049"}');
         "#).unwrap();
         let index = read_scheduled_index(&db, 1).unwrap();
         let sd = GuideChannel::read(
@@ -709,6 +756,12 @@ mod tests {
         assert_eq!(pair(30, &sd, &hd), [Slot, Slot]);
         assert_eq!(pair(80, &sd, &hd), [Slot, Slot]);
         assert_eq!(pair(95, &sd, &hd), [Absent, Absent]);
+        let current = GuideChannel::read(&serde_json::json!({"at:channelVcn":49}));
+        let sibling = GuideChannel::read(&serde_json::json!({
+            "at:channelVcn":50,"at:channelIdentifier":"49","at:channelCallSign":"49","at:channelTitle":"49"
+        }));
+        assert_eq!(pair(110, &sibling, &current), [Absent, Exact]);
+        assert_eq!(pair(110, &sibling, &GuideChannel::default()), [Slot, Slot]);
         let duplicate_title = GuideChannel::read(
             &serde_json::json!({"at:channelIdentifier":"sd", "at:channelCallSign":"SD", "at:channelTitle":"Movie HD"}),
         );

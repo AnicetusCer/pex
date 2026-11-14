@@ -267,13 +267,6 @@ impl PexApp {
                     ));
                 }
                 if self.did_init {
-                    // A different server must not inherit the old server's owned flags.
-                    self.owned_keys = None;
-                    self.owned_hd_keys = None;
-                    self.owned_library = None;
-                    self.scheduled_index = None;
-                    self.apply_owned_flags();
-                    self.apply_scheduled_flags();
                     if reload_guide {
                         self.restart_poster_pipeline(ctx);
                     }
@@ -360,17 +353,38 @@ mod tests {
         let mut ui = TestUi::default();
         // The last launch has a title cache for the selected live source, but
         // both that source and its mirror have gone away since the scan.
-        assert_eq!(ui.app.owned_keys.is_some(), phase == "failed-live");
+        assert_eq!(ui.app.owned_preload.is_some(), phase == "failed-live");
         if phase == "snapshot" || phase == "live" {
             ui.frames_until("verified library", |a| {
-                a.rows.first().is_some_and(|r| r.owned && r.owned_hd)
-                    && a.owned_library.is_some()
+                a.rows.first().is_some_and(|r| {
+                    r.owned && r.owned_quality == crate::app::types::OwnedQuality::Hd
+                }) && a.owned_library.is_some()
                     && !a.owned_scan_in_progress
             });
-            assert!(root.join(".pex_cache/owned_titles_v4.json").is_file());
+            let saved: serde_json::Value = serde_json::from_slice(
+                &fs::read(root.join(".pex_cache/owned_titles_v5.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                saved["titles"].as_object().unwrap().is_empty(),
+                phase == "snapshot"
+            );
             if phase == "live" {
                 fs::remove_file(&offline).unwrap();
                 fs::remove_file(config::local_library_db_path()).unwrap();
+                ui.app.start_owned_scan(true);
+                ui.frames_until("failed refresh of the same library", |a| {
+                    !a.owned_scan_in_progress
+                        && a.owned_notice
+                            .as_deref()
+                            .is_some_and(|s| s.contains("Owned scan error"))
+                });
+                assert!(ui.app.owned_library.is_some());
+                assert!(ui.app.rows[0].owned);
+                assert_eq!(
+                    ui.app.rows[0].owned_quality,
+                    crate::app::types::OwnedQuality::Hd
+                );
                 return;
             }
             ui.app.open_connection_setup();
@@ -380,7 +394,10 @@ mod tests {
         ui.frames_until("library scan or guide-only mode", |a| {
             !a.rows.is_empty() && !a.owned_scan_in_progress && a.owned_notice.is_some()
         });
-        assert!(!ui.app.rows[0].owned && !ui.app.rows[0].owned_hd);
+        assert!(
+            !ui.app.rows[0].owned
+                && ui.app.rows[0].owned_quality == crate::app::types::OwnedQuality::Unknown
+        );
         assert!(ui.app.owned_library.is_none());
         ui.app.hide_owned = true;
         assert!(!ui.app.filtered_guide().days.is_empty());
@@ -636,7 +653,7 @@ mod tests {
                 app.hide_owned = true;
                 for row in &mut app.rows {
                     row.owned = true;
-                    row.owned_hd = false;
+                    row.owned_quality = crate::app::types::OwnedQuality::Sd;
                 }
                 let upgrades: Vec<_> = app
                     .filtered_guide()

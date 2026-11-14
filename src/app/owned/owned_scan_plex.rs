@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::app::cache;
 use crate::app::types::{
-    OwnedCandidate, OwnedCandidates, OwnedDone, OwnedField, OwnedMovie, OwnedMsg,
+    OwnedCandidate, OwnedCandidates, OwnedField, OwnedLibrary, OwnedMovie, OwnedMsg, OwnedQuality,
 };
 use crate::app::PexApp;
 use crate::config::local_library_db_path;
@@ -71,7 +71,7 @@ impl OwnedScanPlex {
             match collect_plex_owned_entries(&conn) {
                 Ok(entries) => {
                     let mut index = index_owned_entries(entries);
-                    index.library.snapshot = Some(snapshot);
+                    index.snapshot = Some(snapshot);
                     if let Err(e) = super::title_cache::save(&cache::cache_dir(), &source, &index) {
                         warn!("Could not save the owned title cache: {e}");
                     }
@@ -86,7 +86,6 @@ impl OwnedScanPlex {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PlexOwnedEntry {
     metadata_id: i64,
@@ -135,8 +134,6 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
     let mut stmt = conn
         .prepare(sql)
         .map_err(|err| format!("Failed to prepare Plex library query: {err}"))?;
-
-    let mut seen_ids: HashSet<i64> = HashSet::new();
 
     let rows = stmt
         .query_map([], |row| {
@@ -189,10 +186,6 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             file_path,
         ) = row.map_err(|err| format!("Failed to read Plex library row: {err}"))?;
 
-        if !seen_ids.insert(metadata_id) {
-            continue;
-        }
-
         if title.trim().is_empty() {
             continue;
         }
@@ -205,7 +198,7 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             .or(meta_added_at)
             .map(|ts| ts.max(0) as u64);
 
-        results.push(PlexOwnedEntry {
+        let entry = PlexOwnedEntry {
             metadata_id,
             guid,
             title,
@@ -215,18 +208,32 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             height,
             updated_at,
             file_path,
-        });
+        };
+        // Copies of one movie are adjacent in SQL quality/size order. Retain
+        // a representative path for the strongest evidence across all copies:
+        // one HD file suffices, and any unmeasured copy prevents an SD-only claim.
+        if let Some(previous) = results
+            .last_mut()
+            .filter(|prior| prior.metadata_id == metadata_id)
+        {
+            if file_quality(entry.width, entry.height)
+                > file_quality(previous.width, previous.height)
+            {
+                *previous = entry;
+            }
+        } else {
+            results.push(entry);
+        }
     }
 
     Ok(results)
 }
 
-fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
-    let mut index = OwnedDone::default();
-    index.library.movies.reserve(entries.len());
+fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedLibrary {
+    let mut index = OwnedLibrary::default();
+    index.movies.reserve(entries.len());
     let mut ambiguous = HashSet::new();
     for (movie, entry) in entries.into_iter().enumerate() {
-        let hd = is_hd(entry.width, entry.height);
         let path = Path::new(&entry.file_path);
         let stem = path.file_stem().and_then(|s| s.to_str());
         let titles = [Some(entry.title.as_str()), entry.original_title.as_deref()];
@@ -273,7 +280,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
                 let credit = PexApp::credited_title_remainder(title)
                     .map(|name| PexApp::short_title_key("credited", name, year));
                 for key in short.into_iter().chain(credit) {
-                    if index.keys.contains(&key) {
+                    if index.by_title.contains_key(&key) {
                         ambiguous.insert(key.clone());
                     }
                     keys.entry(key).or_insert(field);
@@ -281,15 +288,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
             }
         }
         for (key, field) in keys {
-            if hd {
-                index.hd_keys.insert(key.clone());
-            }
-            OwnedCandidates::add(
-                &mut index.library.by_title,
-                key.clone(),
-                OwnedCandidate { movie, field },
-            );
-            index.keys.insert(key);
+            OwnedCandidates::add(&mut index.by_title, key, OwnedCandidate { movie, field });
         }
         if let Some(guid) = entry
             .guid
@@ -297,7 +296,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
             .and_then(crate::app::utils::canonicalize_guid)
         {
             OwnedCandidates::add(
-                &mut index.library.by_guid,
+                &mut index.by_guid,
                 guid,
                 OwnedCandidate {
                     movie,
@@ -305,31 +304,35 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
                 },
             );
         }
-        index.library.movies.push(OwnedMovie {
+        index.movies.push(OwnedMovie {
             title: entry.title,
             year: entry.year,
             path: entry.file_path,
-            hd,
+            quality: file_quality(entry.width, entry.height),
             updated_at: entry.updated_at,
         });
     }
     for key in ambiguous {
-        index.keys.remove(&key);
-        index.hd_keys.remove(&key);
-        index.library.by_title.remove(&key);
+        index.by_title.remove(&key);
     }
     index
 }
 
-fn is_hd(width: Option<u32>, height: Option<u32>) -> bool {
-    width.map(|w| w >= 1280).unwrap_or(false) || height.map(|h| h >= 720).unwrap_or(false)
+fn file_quality(width: Option<u32>, height: Option<u32>) -> OwnedQuality {
+    if width.is_some_and(|w| w >= 1280) || height.is_some_and(|h| h >= 720) {
+        return OwnedQuality::Hd;
+    }
+    if width.is_some_and(|w| w > 0) && height.is_some_and(|h| h > 0) {
+        return OwnedQuality::Sd;
+    }
+    OwnedQuality::Unknown
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn library(films: &[(&str, Option<i32>)]) -> OwnedDone {
+    pub(in crate::app::owned) fn library(films: &[(&str, Option<i32>)]) -> OwnedLibrary {
         let entries = films
             .iter()
             .enumerate()
@@ -350,13 +353,13 @@ mod tests {
         index_owned_entries(entries.collect())
     }
 
-    fn matches(index: &OwnedDone, title: &str, year: Option<i32>) -> bool {
-        PexApp::match_owned_title(title, year, &index.keys).is_some()
+    fn matches(index: &OwnedLibrary, title: &str, year: Option<i32>) -> bool {
+        PexApp::match_owned_title(title, year, |key| index.by_title.contains_key(key)).is_some()
     }
 
     #[test]
     fn both_adjacent_years_are_equal_candidates_and_share_hd_evidence() {
-        use super::super::{lookup, MatchMethod};
+        use super::super::{lookup, title_cache, LibrarySource, MatchMethod, Titles};
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("../test_fixtures.sql"))
             .unwrap();
@@ -368,32 +371,68 @@ mod tests {
             INSERT INTO media_parts(id,media_item_id,file) VALUES(2,2,'/media/The Return (2026).mkv');
         ").unwrap();
         let scan = index_owned_entries(collect_plex_owned_entries(&db).unwrap());
-        let find = |y, lib| {
-            lookup(
-                "The Return",
-                Some(y),
-                None,
-                &scan.keys,
-                Some(&scan.hd_keys),
-                lib,
-            )
-            .unwrap()
-        };
-        let matched = find(2025, Some(&scan.library));
+        let find = |y, titles| lookup("The Return", Some(y), None, titles).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let source = LibrarySource::Live(tmp.path().join("library.db"));
+        title_cache::save(tmp.path(), &source, &scan).unwrap();
+        let preload = title_cache::preload(tmp.path(), Some(&source)).unwrap();
+        let matched = find(2025, Titles::Verified(&scan));
         assert!(matched.method == MatchMethod::AdjacentYear);
         assert_eq!(
             matched
                 .candidates
                 .iter()
-                .map(|c| scan.library.movies[c.movie].year)
+                .map(|c| scan.movies[c.movie].year)
                 .collect::<Vec<_>>(),
             [Some(2024), Some(2026)]
         );
-        assert!(matched.hd && find(2025, None).hd);
-        let exact = find(2024, Some(&scan.library));
+        assert_eq!(matched.quality, OwnedQuality::Hd);
+        assert_eq!(
+            find(2025, Titles::Preloaded(&preload)).quality,
+            matched.quality
+        );
+        let exact = find(2024, Titles::Verified(&scan));
         assert!(exact.method == MatchMethod::ExactYear);
         assert_eq!(exact.candidates.len(), 1);
-        assert!(!exact.hd && !find(2024, None).hd);
+        assert_eq!(exact.quality, OwnedQuality::Sd);
+        assert_eq!(
+            find(2024, Titles::Preloaded(&preload)).quality,
+            exact.quality
+        );
+        db.execute(
+            "UPDATE media_items SET height=NULL, width=720 WHERE id=2",
+            [],
+        )
+        .unwrap();
+        let mixed = index_owned_entries(collect_plex_owned_entries(&db).unwrap());
+        title_cache::save(tmp.path(), &source, &mixed).unwrap();
+        let preload = title_cache::preload(tmp.path(), Some(&source)).unwrap();
+        for titles in [Titles::Verified(&mixed), Titles::Preloaded(&preload)] {
+            assert_eq!(
+                lookup("The Return", Some(2025), None, titles)
+                    .unwrap()
+                    .quality,
+                OwnedQuality::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn partial_dimensions_cannot_establish_an_sd_only_library_copy() {
+        for dimensions in [
+            (None, Some(540)),
+            (Some(720), None),
+            (Some(0), Some(576)),
+            (None, None),
+        ] {
+            assert_eq!(
+                file_quality(dimensions.0, dimensions.1),
+                OwnedQuality::Unknown
+            );
+        }
+        assert_eq!(file_quality(Some(1280), None), OwnedQuality::Hd);
+        assert_eq!(file_quality(None, Some(720)), OwnedQuality::Hd);
+        assert_eq!(file_quality(Some(720), Some(576)), OwnedQuality::Sd);
     }
 
     #[test]
@@ -415,18 +454,10 @@ mod tests {
         )
         .unwrap();
         let scan = index_owned_entries(collect_plex_owned_entries(&conn).unwrap());
-        assert_eq!(scan.library.movies.len(), 2);
-        assert!(scan.keys.len() > 2);
+        assert_eq!(scan.movies.len(), 2);
+        assert!(scan.by_title.len() > 2);
         let find = |title, year, guid| {
-            super::super::lookup(
-                title,
-                year,
-                guid,
-                &scan.keys,
-                Some(&scan.hd_keys),
-                Some(&scan.library),
-            )
-            .unwrap()
+            super::super::lookup(title, year, guid, super::super::Titles::Verified(&scan)).unwrap()
         };
         // GUID wins over the conflicting title/year. The chosen part is the HD copy.
         let by_id = find("Fixture Movie", Some(1999), Some("IMDB://tt1234567"));
@@ -444,7 +475,7 @@ mod tests {
                 panic!("expected one movie")
             };
             assert_eq!(candidate.field, field);
-            let movie = &scan.library.movies[candidate.movie];
+            let movie = &scan.movies[candidate.movie];
             assert_eq!(movie.title, "Fixture Movie");
             assert_eq!(movie.year, Some(2020));
             assert_eq!(movie.path, "/media/Evening Film.mkv");
@@ -452,16 +483,6 @@ mod tests {
         let ambiguous = find("Fixture Movie", None, None);
         assert_eq!(ambiguous.candidates.len(), 2);
         assert_ne!(ambiguous.candidates[0].movie, ambiguous.candidates[1].movie);
-        let cached = super::super::lookup(
-            "Fixture Movie",
-            None,
-            None,
-            &scan.keys,
-            Some(&scan.hd_keys),
-            None,
-        )
-        .unwrap();
-        assert!(cached.candidates.is_empty());
     }
 
     #[test]

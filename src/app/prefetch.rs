@@ -27,7 +27,14 @@ impl crate::app::PexApp {
         self.completed = 0;
         self.failed = 0;
         let today = crate::app::utils::day_bucket(std::time::SystemTime::now());
-        let jobs = self.poster_jobs(today);
+        let first_cards: Vec<_> = self
+            .filtered_guide()
+            .days
+            .into_iter()
+            .flat_map(|(_, cards)| cards)
+            .take(super::PREWARM_UPLOADS)
+            .collect();
+        let jobs = self.poster_jobs(today, &first_cards);
         self.total_targets = jobs.len();
         let mut downloads = Vec::new();
         for job in jobs {
@@ -35,16 +42,16 @@ impl crate::app::PexApp {
                 for idx in job.row_indices {
                     let row = &mut self.rows[idx];
                     row.path = Some(path.clone());
-                    if row.tex.is_none() {
-                        row.state = super::PosterState::Cached;
-                    }
+                    row.state = super::PosterState::Cached;
                 }
                 self.completed += 1;
             } else if !prefetch_disabled {
                 downloads.push(job);
             }
         }
-        self.prewarm_first_screen(ctx);
+        for idx in first_cards {
+            self.try_lazy_upload_row(ctx, idx);
+        }
         if downloads.is_empty() {
             self.total_targets = self.completed;
             self.finish_prefetch(if prefetch_disabled {
@@ -118,14 +125,11 @@ impl crate::app::PexApp {
         self.done_rx = None;
     }
 
-    fn poster_jobs(&self, now_bucket: i64) -> Vec<PosterJob> {
+    fn poster_jobs(&self, now_bucket: i64, first_cards: &[usize]) -> Vec<PosterJob> {
         let soon = now_bucket..now_bucket + 2;
-        let first_cards: std::collections::HashMap<_, _> = self
-            .filtered_guide()
-            .days
-            .into_iter()
-            .flat_map(|(_, cards)| cards)
-            .take(super::PREWARM_UPLOADS)
+        let first_cards: std::collections::HashMap<_, _> = first_cards
+            .iter()
+            .copied()
             .enumerate()
             .map(|(rank, idx)| (idx, rank))
             .collect();
@@ -240,11 +244,10 @@ mod tests {
             audience_rating: None,
             critic_rating: None,
             path: None,
-            tex: None,
             state: PosterState::Pending,
             owned: false,
             owned_modified: None,
-            owned_hd: false,
+            owned_quality: Default::default(),
             airing_quality: crate::app::types::AiringQuality::Unknown,
             scheduled: Default::default(),
         }
@@ -267,7 +270,7 @@ mod tests {
             ..Default::default()
         };
         app.rows[2].path = Some("artwork.jpg".into());
-        let jobs = app.poster_jobs(0);
+        let jobs = app.poster_jobs(0, &[]);
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].row_indices, [0, 2]);
         assert_eq!(
@@ -290,6 +293,95 @@ mod tests {
         assert_eq!(app.in_flight(), 0);
         assert_eq!(app.total_targets, 0);
         assert!(app.should_show_grid());
+    }
+
+    #[test]
+    fn prewarm_uses_displayed_films_and_shares_textures_across_airings() {
+        use std::time::{Duration, SystemTime};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("poster.png");
+        image::RgbaImage::new(2, 3).save(&path).unwrap();
+        let now = SystemTime::now();
+        let mut rows = Vec::new();
+        for i in 0..=super::super::PREWARM_UPLOADS {
+            let mut row = listing("repeated");
+            row.airing = Some(now + Duration::from_secs(60 + i as u64));
+            row.path = Some(path.clone());
+            rows.push(row);
+        }
+        let mut other = listing("second");
+        other.airing = Some(now + Duration::from_secs(3600));
+        other.path = Some(path);
+        rows.push(other);
+
+        let mut app = PexApp {
+            rows,
+            ..Default::default()
+        };
+        let ctx = eframe::egui::Context::default();
+        app.start_prefetch(&ctx, true);
+        assert!(app.poster_textures.contains_key("second"));
+        let first_texture = app.poster_textures[&app.rows[0].key].id();
+        // A later showing already has its texture and spends no upload budget.
+        assert!(!app.try_lazy_upload_row(&ctx, 1));
+        assert_eq!(app.poster_textures[&app.rows[1].key].id(), first_texture);
+        assert_eq!(app.poster_textures.len(), 2);
+        assert_eq!(app.completed, 2);
+    }
+
+    #[test]
+    fn offscreen_selection_displays_art_as_soon_as_its_download_completes() {
+        use eframe::egui as eg;
+        use std::time::{Duration, SystemTime};
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let now = SystemTime::now();
+        let rows = (0..40)
+            .map(|i| {
+                let mut row = listing(&format!("film-{i}"));
+                row.airing = Some(now + Duration::from_secs(60 + i));
+                row
+            })
+            .collect();
+        let selected = 39;
+        let mut ui = crate::app::test_fixtures::TestUi {
+            app: PexApp {
+                rows,
+                did_init: true,
+                setup_checked: true,
+                prefetch_started: true,
+                selected_idx: Some(selected),
+                total_targets: 1,
+                done_rx: Some(rx),
+                ..Default::default()
+            },
+            screen: Some(eg::vec2(1000.0, 700.0)),
+            ..Default::default()
+        };
+        ui.frame(vec![]);
+        let card = ui
+            .ctx
+            .read_response(eg::Id::new(("card_sel", selected)))
+            .unwrap();
+        assert!(card.rect.top() > 700.0);
+        ui.label("Poster loading…");
+
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("poster.png");
+        image::RgbaImage::new(2, 3).save(&path).unwrap();
+        tx.send(crate::app::PrefetchDone {
+            row_indices: vec![selected],
+            result: Ok(path),
+        })
+        .unwrap();
+        let output = ui.frame(vec![]);
+        let texture = ui.app.poster_textures[&ui.app.rows[selected].key].id();
+        let primitives = ui.ctx.tessellate(output.shapes, output.pixels_per_point);
+        assert!(primitives.iter().any(|p| {
+            matches!(&p.primitive, eg::epaint::Primitive::Mesh(mesh) if mesh.texture_id == texture && mesh.calc_bounds().intersects(p.clip_rect))
+        }));
+        assert_eq!(ui.app.in_flight(), 0);
     }
 
     #[test]
@@ -327,7 +419,7 @@ mod tests {
             if t.galley.text().contains("Uncached film") && t.galley.text().contains("Film Channel") &&
             t.galley.text().contains("UTC"))));
         assert_eq!(app.in_flight(), 1);
-        assert!(app.rows[0].tex.is_none());
+        assert!(app.poster_textures.is_empty());
 
         let fixture = tempfile::tempdir().unwrap();
         let path = fixture.path().join("poster.png");
@@ -338,7 +430,7 @@ mod tests {
         })
         .unwrap();
         frame(&mut app);
-        assert!(app.rows[0].tex.is_some());
+        assert!(app.poster_textures.contains_key(&app.rows[0].key));
         assert_eq!(app.rows[1].path.as_ref(), Some(&path));
         assert_eq!(app.in_flight(), 0);
         assert_eq!(app.completed, 1);

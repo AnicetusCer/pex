@@ -1,6 +1,5 @@
 // src/app/types.rs
-use eframe::egui::TextureHandle;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::SystemTime;
@@ -10,30 +9,23 @@ pub enum OwnedMsg {
     Info(String),
     Snapshot(String),
     Scheduled(Result<super::scheduled::ScheduledIndex, String>),
-    Done(Box<OwnedDone>),
+    Done(Box<OwnedLibrary>),
     Error(String),
 }
 
 #[derive(Default)]
-pub struct OwnedDone {
-    pub hd_keys: HashSet<String>,
-    pub keys: HashSet<String>,
-    pub(super) library: OwnedLibrary,
-}
-
-#[derive(Default)]
-pub(super) struct OwnedLibrary {
-    pub snapshot: Option<String>,
-    pub movies: Vec<OwnedMovie>,
-    pub by_guid: HashMap<String, OwnedCandidates>,
-    pub by_title: HashMap<String, OwnedCandidates>,
+pub struct OwnedLibrary {
+    pub(super) snapshot: Option<String>,
+    pub(super) movies: Vec<OwnedMovie>,
+    pub(super) by_guid: HashMap<String, OwnedCandidates>,
+    pub(super) by_title: HashMap<String, OwnedCandidates>,
 }
 
 pub(super) struct OwnedMovie {
     pub title: String,
     pub year: Option<i32>,
     pub path: String,
-    pub hd: bool,
+    pub quality: OwnedQuality,
     pub updated_at: Option<u64>,
 }
 
@@ -126,7 +118,6 @@ pub enum BootPhase {
 pub enum PosterState {
     Pending, // queued or downloading
     Cached,  // file present on disk (ready to upload)
-    Ready,   // texture uploaded
     Failed,  // permanent failure
 }
 
@@ -229,13 +220,42 @@ pub struct PosterRow {
     pub audience_rating: Option<f32>,
     pub critic_rating: Option<f32>,
     pub path: Option<PathBuf>,
-    pub tex: Option<TextureHandle>, // UI thread only
     pub state: PosterState,
     pub owned: bool,
     pub owned_modified: Option<u64>,
-    pub owned_hd: bool,
+    pub owned_quality: OwnedQuality,
     pub airing_quality: AiringQuality,
     pub scheduled: super::scheduled::RecordingStatus,
+}
+
+// With several possible copies, one HD match is enough to suppress an upgrade.
+// SD is certain only when every matching copy has known SD dimensions.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum OwnedQuality {
+    Sd,
+    #[default]
+    Unknown,
+    Hd,
+}
+
+impl PosterRow {
+    pub(super) fn hd_upgrade(&self) -> bool {
+        self.owned
+            && self.owned_quality == OwnedQuality::Sd
+            && self.airing_quality == AiringQuality::Hd
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

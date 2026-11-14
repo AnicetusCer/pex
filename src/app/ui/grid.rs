@@ -32,7 +32,12 @@ fn draw_corner_badge(p: &eframe::egui::Painter, rect: eg::Rect, label: &str) {
 }
 
 impl crate::app::PexApp {
-    pub(crate) fn ui_render_grouped_grid(&mut self, ui: &mut eg::Ui, ctx: &eg::Context) {
+    pub(crate) fn ui_render_grouped_grid(
+        &mut self,
+        ui: &mut eg::Ui,
+        ctx: &eg::Context,
+        mut uploads_left: usize,
+    ) {
         self.handle_keyboard_navigation(ctx);
 
         let guide = self.filtered_guide();
@@ -43,8 +48,6 @@ impl crate::app::PexApp {
         let card_w: f32 = self.poster_width_ui;
         let text_h: f32 = 56.0;
         let card_h: f32 = card_w.mul_add(1.5, text_h);
-
-        let mut uploads_left = super::super::MAX_UPLOADS_PER_FRAME;
 
         eg::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -108,7 +111,7 @@ impl crate::app::PexApp {
 
                                         if let Some(row) = self.rows.get(idx) {
                                             // Poster
-                                            if let Some(tex) = &row.tex {
+                                            if let Some(tex) = self.poster_textures.get(&row.key) {
                                                 ui.painter().image(
                                                     tex.id(),
                                                     poster_rect,
@@ -171,9 +174,7 @@ impl crate::app::PexApp {
 
                                             // --- Compute statuses (needed for badges & dimming) ---
                                             let broadcast_hd = row.airing_quality == AiringQuality::Hd;
-                                            let owned_is_hd = row.owned_hd;
-                                            let better_hd_available =
-                                                row.owned && !owned_is_hd && broadcast_hd;
+                                            let better_hd_available = row.hd_upgrade();
 
                                             // Corner badge: show only for HD airings; SD gets no symbol
                                             if better_hd_available {

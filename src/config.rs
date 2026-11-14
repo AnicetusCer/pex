@@ -139,11 +139,33 @@ pub fn discover_config_path() -> Option<PathBuf> {
     config_candidates().into_iter().find(|p| p.exists())
 }
 
+fn config_json_problem(path: &Path, error: &serde_json::Error) -> String {
+    // Serde diagnostics can quote a setting's value, including a misplaced API key.
+    let guidance = if error.is_data() {
+        "Use a JSON object with true or false for guide_only, strings or null for paths and keys, and only one name for each setting."
+    } else {
+        "Check the JSON syntax."
+    };
+    let location = if error.line() > 0 {
+        format!(" at line {}, column {}", error.line(), error.column())
+    } else {
+        String::new()
+    };
+    format!(
+        "Cannot load {}{location}. {guidance} Repair the file and retry.",
+        path.display()
+    )
+}
+
+fn parse_config(path: &Path, raw: &str) -> Result<RawConfig, String> {
+    serde_json::from_str(raw).map_err(|e| config_json_problem(path, &e))
+}
+
 pub fn load_config() -> AppConfig {
     let mut cfg = AppConfig::default();
 
     if let Some((path, raw)) = read_config_source() {
-        match serde_json::from_str::<RawConfig>(&raw) {
+        match parse_config(&path, &raw) {
             Ok(mut parsed) => {
                 cfg.guide_only = parsed.guide_only;
                 cfg.library_snapshot_dir = parsed
@@ -196,10 +218,7 @@ pub fn load_config() -> AppConfig {
                 info!("Loaded config from {}", path.display());
             }
             Err(err) => {
-                warn!(
-                    "Failed to parse {} ({err}). Using defaults.",
-                    path.display()
-                );
+                warn!("{err} Using defaults.");
             }
         }
     } else {
@@ -260,15 +279,14 @@ pub fn readable_database(path: &Path) -> Result<(), String> {
 pub fn config_problem() -> Option<String> {
     let path = discover_config_path()?;
     fs::read_to_string(&path)
-        .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str::<RawConfig>(&s).map_err(|e| e.to_string()))
-        .err()
-        .map(|e| {
+        .map_err(|e| {
             format!(
-                "Cannot load {}: {e}. Repair this file and retry checks.",
+                "Cannot read {}: {e}. Check the file permissions and retry.",
                 path.display()
             )
         })
+        .and_then(|s| parse_config(&path, &s))
+        .err()
 }
 
 /// Retain settings, but migrate legacy files on explicit save so an upgraded ZIP's
@@ -336,23 +354,28 @@ fn update_config(
             Some(p) => p.to_path_buf(),
             None => base_dir().join(CONFIG_FILENAME),
         });
-    let mut value = if let Some(source) = &source {
-        let raw = fs::read_to_string(source).map_err(|e| e.to_string())?;
-        serde_json::from_str::<serde_json::Value>(&raw)
-            .map_err(|e| format!("Repair {} before saving: {e}", source.display()))?
-    } else {
-        serde_json::json!({})
-    };
-    let object = value
-        .as_object_mut()
-        .ok_or("Config must contain a JSON object")?;
-    update(object);
-    // Serde type errors can quote input values, including a misplaced API key.
-    RawConfig::deserialize(&value).map_err(|_| {
+    let input_path = source.as_deref().unwrap_or(&path);
+    let raw = source
+        .as_ref()
+        .map(fs::read_to_string)
+        .transpose()
+        .map_err(|e| format!("Cannot read {}: {e}", input_path.display()))?;
+    let raw = raw.as_deref().unwrap_or("{}");
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| config_json_problem(input_path, &e))?;
+    let object = value.as_object_mut().ok_or_else(|| {
         format!(
-            "Repair {} before saving. Use true or false for guide_only, strings or null for paths and API keys, and only one name for each setting.",
-            source.as_deref().unwrap_or(&path).display()
+            "Cannot load {}. Use a JSON object for the config.",
+            input_path.display()
         )
+    })?;
+    update(object);
+    RawConfig::deserialize(&value).map_err(|updated_error| {
+        // The edited value has no line numbers. Recover the location from the user's file.
+        let error = serde_json::from_str::<RawConfig>(raw)
+            .err()
+            .unwrap_or(updated_error);
+        config_json_problem(input_path, &error)
     })?;
     let parent = path.parent().ok_or("Config has no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -445,23 +468,54 @@ mod tests {
 
         for invalid in ["{invalid", "[]"] {
             fs::write(&explicit, invalid).unwrap();
+            assert!(config_problem().is_some());
+            assert!(load_config().tmdb_api_key.is_none());
             assert!(save_tmdb_api_key(Some("fixture-key")).is_err());
             assert_eq!(fs::read_to_string(&explicit).unwrap(), invalid);
         }
-        let incompatible =
-            r#"{"guide_only":"private-fixture-value","tmdb_api_key":"old-fixture-key"}"#;
-        fs::write(&explicit, incompatible).unwrap();
-        let error = save_tmdb_api_key(Some("new-fixture-key")).unwrap_err();
-        assert!(error.contains("guide_only"));
-        assert!(error.contains(&explicit.display().to_string()));
-        for value in [
-            "private-fixture-value",
-            "old-fixture-key",
-            "new-fixture-key",
+        for (invalid, guidance) in [
+            (
+                r#"{
+                "guide_only":"private-fixture-value","tmdb_api_key":"old-fixture-key"
+            }"#,
+                "guide_only",
+            ),
+            (
+                r#"{
+                "tmdb_api_key":"old-fixture-key","private-fixture-value": }
+            "#,
+                "JSON syntax",
+            ),
         ] {
-            assert!(!error.contains(value));
+            fs::write(&explicit, invalid).unwrap();
+            let problem = config_problem().unwrap();
+            assert!(problem.contains(guidance));
+            assert!(problem.contains(&explicit.display().to_string()));
+            assert!(problem.contains("line 2, column "));
+            assert_eq!(
+                save_tmdb_api_key(Some("new-fixture-key")).unwrap_err(),
+                problem
+            );
+            let log_path = portable.join("config-fixture.log");
+            let log = fs::File::create(&log_path).unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || log.try_clone().unwrap())
+                .finish();
+            let cfg = tracing::subscriber::with_default(subscriber, load_config);
+            assert!(cfg.tmdb_api_key.is_none());
+            let logged = fs::read_to_string(&log_path).unwrap();
+            assert!(logged.contains(&problem));
+            for value in [
+                "private-fixture-value",
+                "old-fixture-key",
+                "new-fixture-key",
+            ] {
+                assert!(!logged.contains(value));
+            }
+            assert_eq!(fs::read_to_string(&explicit).unwrap(), invalid);
         }
-        assert_eq!(fs::read_to_string(&explicit).unwrap(), incompatible);
     }
 
     #[test]

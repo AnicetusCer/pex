@@ -111,7 +111,10 @@ fn portable_sky_mix_quality() {
     let mut ui = TestUi::default();
     ui.frames_until("owned SD film and booked Sky Mix repeat", |app| {
         app.rows.len() == 3
-            && app.rows.iter().all(|r| r.owned && !r.owned_hd)
+            && app
+                .rows
+                .iter()
+                .all(|r| r.owned && r.owned_quality == super::types::OwnedQuality::Sd)
             && app
                 .rows
                 .iter()
@@ -165,6 +168,26 @@ fn portable_sky_mix_quality() {
     assert_eq!(ui.app.filtered_showings_for(hd), [hd]);
     assert_eq!(ui.app.filtered_guide().days[0].1, [hd]);
     assert!(upgrade_visible(&mut ui));
+
+    // A second, unmeasured file means this film is no longer known to be
+    // SD-only. Refresh the actual mirror and check the card and detail text.
+    Connection::open(&library)
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO media_items(id, metadata_item_id, width, height) VALUES (2,1,NULL,0);
+         INSERT INTO media_parts(id, media_item_id, file) VALUES (2,2,'/fixture/Unmeasured.mkv');",
+        )
+        .unwrap();
+    ui.app.start_owned_scan(true);
+    ui.frames_until("unmeasured alternative copy", |app| {
+        !app.owned_scan_in_progress
+            && app.rows[hd].owned
+            && app.rows[hd].owned_quality == super::types::OwnedQuality::Unknown
+    });
+    ui.label("Owned");
+    assert!(!upgrade_visible(&mut ui));
+    ui.app.hide_owned = true;
+    assert!(ui.app.filtered_guide().days.is_empty());
 }
 
 #[test]

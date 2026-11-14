@@ -61,7 +61,7 @@ project:
     Cargo.toml
   tips_for_new_work:
     - "Start from `src/app/mod.rs` to understand app state transitions; it wires prep, owned, filters, and UI."
-    - "`PosterRow` carries precomputed `owned_hd` and `airing_quality`."
+    - "`PosterRow` carries precomputed `owned_quality` and `airing_quality`."
     - "Any new UI lives under `src/app/ui/`; keep expensive work off the paint path and return early when splash is active."
     - "Reuse helpers in `utils.rs` for date/ordinal logic and channel normalization."
     - "When touching caching logic, review `cache.rs` + `prefs.rs` to keep sidecars/prefs consistent."
@@ -96,7 +96,7 @@ runtime_model:
   threads_channels:
     - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation on UI only).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: reads Plex library metadata, caches owned and HD keys together with their source, and records modified timestamps.
+    - Owned-scan thread: reads the local Plex mirror and records matching files, quality and modification times. Live scans cache title qualities with their source.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
     - Scheduled loader: read of the local mirror on the owned worker after library refresh (`app::scheduled::load_scheduled_index`).
   messages:
@@ -106,7 +106,9 @@ runtime_model:
         - Error(String)
     - OwnedMsg:
         - Info(String)
-        - Done { keys: HashSet<String>, modified: HashMap<String, Option<u64>> }
+        - Snapshot(String)
+        - Scheduled(Result<ScheduledIndex, String>)
+        - Done(Box<OwnedLibrary>)
         - Error(String)
     - PosterJob: "One per unique artwork key, shared across the matching row indices"
     - PrefetchDone: "{ row_indices: Vec<usize>, result: Result<PathBuf, String> }"
@@ -129,7 +131,7 @@ runtime_model:
 flow:
   first_frame:
     - load_prefs() from "<cache_dir>/ui_prefs.txt"
-    - Load owned and HD sidecars if present; the scan supplies modified timestamps
+    - Preload cached title qualities for the configured live library. The scan supplies file details and timestamps.
     - start_owned_scan() (mirrors the Plex library DB and refreshes owned sidecars)
     - start_poster_prep()
     - Show splash with status heartbeat
@@ -182,8 +184,8 @@ config:
       - detail_w: "persisted detail panel width"
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-    owned_title_cache: "<cache_dir>/owned_titles_v4.json (source, keys and hd_keys written together). Live preloads require matching source. Snapshot and manual modes wait for scan validation."
-    owned_modified: "in-memory map keyed by owned key (timestamp from Plex library)"
+    owned_title_cache: "<cache_dir>/owned_titles_v5.json holds the source and title qualities. Only matching live sources preload. A v4 live cache can establish ownership and HD. Manual and snapshot scans write a source marker with an empty title map."
+    owned_modified: "File timestamps in the in-memory OwnedLibrary."
   env_flags:
     - PEX_DISABLE_PREFETCH=1
     - RUST_LOG=info
@@ -252,7 +254,7 @@ ui:
         - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
         - "Apply filters first, then display one representative airing per film. Group on film_key independently from artwork."
         - "Center grid by adding left pad"
-        - "Bounded lazy texture uploads per frame"
+        - "Share one texture per artwork key between grid and Details. Reserve upload capacity for the selected poster."
     details_panel:
       side: "right"
       width: "snap to poster width + spacing"
@@ -269,9 +271,9 @@ hd_logic:
     fn: "utils::airing_quality(width, height, resolution, call_sign, channel_title) -> AiringQuality (Hd, Sd or Unknown)"
     evidence: "read_guide_airings passes dimensions only for positive media_analysis_version. On unanalysed and older guides, look for explicit resolution or station quality. Missing or conflicting evidence gives Unknown."
   owned_hd_inference:
-    stored in owned_titles_v4.json with the source and owned keys
+    definition: "Any matching HD copy establishes HD. Every matching copy must be confirmed SD to establish SD. Otherwise display Owned."
   better_hd_available_rule:
-    definition: "row.owned && !row.owned_hd && row.airing_quality == AiringQuality::Hd"
+    definition: "PosterRow::hd_upgrade() requires owned SD and an HD airing."
     effects:
       - "Grid shows 'HD ↑' badge"
       - "Detail panel suppresses dimming message"
