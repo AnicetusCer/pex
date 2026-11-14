@@ -152,6 +152,7 @@ impl crate::app::PexApp {
         }
         let cfg = crate::config::load_config();
         let source = LibrarySource::configured(&cfg);
+        self.configure_live_dvr(cfg.live_dvr, false);
         let available = match source.as_ref() {
             Some(LibrarySource::Manual(path)) => path.exists(),
             Some(_) => true,
@@ -167,7 +168,10 @@ impl crate::app::PexApp {
         }
         let Some(source) = source.filter(|_| available) else {
             self.owned_scan_available = false;
-            self.owned_notice = Some("Guide only: owned and recording badges are disabled. Use Connect to Plex to enable them.".into());
+            self.owned_notice = Some(
+                "Guide only: owned badges are disabled. Use Connect to Plex to add a library."
+                    .into(),
+            );
             return;
         };
         self.owned_scan_available = true;
@@ -506,7 +510,7 @@ impl crate::app::PexApp {
                         Ok(index) => (!index.is_empty()).then_some(index),
                         Err(err) => {
                             self.record_owned_message(format!(
-                                "Could not read recording schedules from the local library copy: {err}. REC badges cleared."
+                                "Could not read recording schedules from the local library copy: {err}."
                             ));
                             None
                         }

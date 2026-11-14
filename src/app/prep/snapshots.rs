@@ -167,7 +167,7 @@ pub(super) fn refresh(
                     .map(|s| format!(" Skipped a newer candidate: {s}"))
                     .unwrap_or_default();
                 return Ok(format!(
-                    "{action}: {} ({}). Owned and recording badges reflect this snapshot.{notice}",
+                    "{action}: {} ({}). Library-based badges reflect this snapshot.{notice}",
                     file.description,
                     path.display()
                 ));

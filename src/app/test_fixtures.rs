@@ -84,4 +84,21 @@ impl TestUi {
         let pos = self.label(label);
         self.click(pos);
     }
+
+    pub(super) fn replace_input(&mut self, id: &str, value: &str) {
+        let id = eg::Id::new(id);
+        let input = self.ctx.read_response(id).expect("input is visible");
+        self.click(input.rect.center());
+        assert!(self.ctx.memory(|m| m.has_focus(id)), "input receives focus");
+        self.frame(vec![
+            eg::Event::Key {
+                key: eg::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: eg::Modifiers::COMMAND,
+            },
+            eg::Event::Paste(value.to_owned()),
+        ]);
+    }
 }

@@ -72,6 +72,7 @@ impl OwnedCandidates {
 pub struct PrepItem {
     pub airing_quality: AiringQuality,
     pub film_key: String,
+    pub guide_media_id: i64,
     pub movie_subscription_id: Option<i64>,
     pub title: String,
     pub thumb_url: String,
@@ -206,6 +207,7 @@ impl FromStr for SortKey {
 // ---- core row backing each grid card ----
 pub struct PosterRow {
     pub film_key: String,
+    pub guide_media_id: i64,
     pub movie_subscription_id: Option<i64>,
     pub title: String,
     pub url: String,

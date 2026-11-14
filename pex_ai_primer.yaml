@@ -26,7 +26,7 @@ project:
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
     - "Advanced menu: clear/prune poster cache, refresh owned scan, backup/restore UI prefs."
-    - "DVR badges use the library snapshot. REC and Other REC identify confirmed showings, REC? an unresolved channel, and Film REC a film-level request."
+    - "DVR badges prefer an explicitly connected live DVR schedule and otherwise use the library snapshot. REC and Other REC identify confirmed showings, REC? an unresolved channel, and Film REC a film-level request."
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)

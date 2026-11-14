@@ -1,6 +1,5 @@
 use super::test_fixtures::TestUi;
 use crate::config;
-use eframe::egui as eg;
 use std::{env, fs, process::Command};
 
 impl TestUi {
@@ -10,27 +9,7 @@ impl TestUi {
     }
 
     fn enter_key(&mut self, key: &str) {
-        let id = eg::Id::new("tmdb_rating_key_input");
-        let rect = self
-            .ctx
-            .read_response(id)
-            .expect("key input is visible")
-            .rect;
-        self.click(rect.center());
-        assert!(
-            self.ctx.memory(|m| m.has_focus(id)),
-            "key input receives focus"
-        );
-        self.frame(vec![
-            eg::Event::Key {
-                key: eg::Key::A,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: eg::Modifiers::COMMAND,
-            },
-            eg::Event::Paste(key.to_owned()),
-        ]);
+        self.replace_input("tmdb_rating_key_input", key);
     }
 }
 

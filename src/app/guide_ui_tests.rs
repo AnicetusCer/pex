@@ -432,7 +432,7 @@ fn portable_expired_one_shot() {
                 params![
                     movie,
                     time,
-                    serde_json::json!({"at:channelCallSign":station}).to_string()
+                    serde_json::json!({"at:channelCallSign":station,"at:channelIdentifier":format!("dvr-{station}")}).to_string()
                 ],
             )
             .unwrap();
@@ -477,9 +477,10 @@ fn portable_expired_one_shot() {
     }
     ui.label("Film REC");
 
-    // When Plex supplies the replacement booking, only that showing gets REC.
+    // The library copy now identifies the later Rewind showing.
+    let later = first + 7_200;
     let grab = serde_json::json!({
-        "mt:guid":"plex://movie/fixture", "me:beginsAt":first, "me:channelCallSign":"REWINDUK"
+        "mt:guid":"plex://movie/fixture", "me:beginsAt":later, "me:channelCallSign":"REWINDUK"
     });
     Connection::open(&library)
         .unwrap()
@@ -494,7 +495,7 @@ fn portable_expired_one_shot() {
     for row in &ui.app.rows {
         let booked = row.title == "Rescheduled Film"
             && row.airing
-                == Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first as u64));
+                == Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(later as u64));
         assert_eq!(
             row.scheduled,
             if booked {
@@ -504,7 +505,124 @@ fn portable_expired_one_shot() {
             }
         );
     }
+    ui.label("Other REC");
+    ui.frames_until("completed library fixture scan", |app| {
+        !app.owned_scan_in_progress
+    });
+    exercise_live_schedule(&mut ui, first, later);
+}
+
+fn exercise_live_schedule(ui: &mut TestUi, first: i64, later: i64) {
+    use super::scheduled::RecordingStatus;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    // The live server selects the first Rewind airing. Its recorder has ten
+    // minutes of pre-roll. Refreshes exercise cancellation, padded times and an outage.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let target_id = ui
+        .app
+        .rows
+        .iter()
+        .find(|r| {
+            r.title == "Rescheduled Film"
+                && r.airing
+                    == Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first as u64))
+        })
+        .unwrap()
+        .guide_media_id;
+    let mut booking = serde_json::json!({"MediaContainer":{"size":1,"MediaGrabOperation":[{
+        "mediaSubscriptionID":42,"status":"scheduled","beginsAt":first-600,
+        "Metadata":{"type":"movie","guid":"plex://movie/fixture","title":"Rescheduled Film",
+            "year":1984,"Media":[{"id":target_id,"beginsAt":first,"endsAt":first+5400,"channelCallSign":"REWINDUK","channelIdentifier":"dvr-REWINDUK"}]}
+    }]}});
+    let listed_time = booking.to_string();
+    booking["MediaContainer"]["MediaGrabOperation"][0]["Metadata"]["Media"][0]["beginsAt"] =
+        (first - 600).into();
+    let padded_time = booking.to_string();
+    let cancelled = r#"{"MediaContainer":{"size":0}}"#;
+    let http = std::thread::spawn(move || {
+        for (status, body) in [
+            ("200 OK", listed_time.as_str()),
+            ("200 OK", cancelled),
+            ("200 OK", padded_time.as_str()),
+            ("503 Service Unavailable", ""),
+            ("200 OK", listed_time.as_str()),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request: Vec<_> = BufReader::new(&stream)
+                .lines()
+                .map(Result::unwrap)
+                .take_while(|line| !line.is_empty())
+                .collect();
+            assert_eq!(
+                request[0].split_whitespace().take(2).collect::<Vec<_>>(),
+                ["GET", "/media/subscriptions/scheduled"]
+            );
+            assert!(request
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("X-Plex-Token: portable-fixture")));
+            write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        }
+    });
+    let mirror_stamp = || {
+        fs::metadata(config::local_library_db_path().with_extension("db.last_sync"))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let before = mirror_stamp();
+    ui.press("Advanced.");
+    ui.press("Plex DVR Schedule…");
+    ui.label("Plex DVR Schedule");
+    ui.replace_input("plex_dvr_server_url", &server);
+    ui.replace_input("plex_dvr_token", "portable-fixture");
+    ui.press("Save and refresh");
+
+    let exact_airings = |app: &super::PexApp| -> Vec<i64> {
+        app.rows
+            .iter()
+            .filter(|r| r.scheduled == RecordingStatus::Exact)
+            .map(|r| {
+                r.airing
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+            })
+            .collect()
+    };
+    ui.frames_until("live recording supersedes the stale repeat", |app| {
+        exact_airings(app) == [first]
+    });
     ui.label("REC");
+    ui.press("Refresh DVR schedule");
+    ui.frames_until("cancellation clears recording badges", |app| {
+        !app.live_dvr_busy()
+            && app
+                .rows
+                .iter()
+                .all(|r| r.scheduled == RecordingStatus::None)
+    });
+    ui.press("Refresh DVR schedule");
+    ui.frames_until("recording pre-roll identifies the same airing", |app| {
+        !app.live_dvr_busy() && exact_airings(app) == [first]
+    });
+    ui.press("Refresh DVR schedule");
+    ui.frames_until("unreachable schedule falls back to the library", |app| {
+        !app.live_dvr_busy() && exact_airings(app) == [later]
+    });
+    // Starting PEX again should load the saved connection even in guide-only mode.
+    let guide_path = config::load_config().plex_epg_db_source.unwrap();
+    config::save_connection(&guide_path, None, true).unwrap();
+    let mut restarted = TestUi::default();
+    restarted.frames_until("live schedule with no library scan on restart", |app| {
+        !app.owned_scan_available && exact_airings(app) == [first]
+    });
+    restarted.label("REC");
+    http.join().unwrap();
+    assert_eq!(mirror_stamp(), before);
 }
 
 #[test]

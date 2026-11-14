@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde_json::Value;
@@ -85,7 +85,10 @@ impl GuideChannel {
     }
 
     fn from_metadata(value: &Value, prefix: &str) -> Self {
-        let get = |suffix: &str| field(value, &format!("{prefix}:{suffix}"));
+        Self::from_fields(|suffix| field(value, &format!("{prefix}:{suffix}")))
+    }
+
+    fn from_fields(get: impl Fn(&str) -> Option<String>) -> Self {
         Self {
             id: get("channelIdentifier")
                 .or_else(|| get("channelID"))
@@ -213,14 +216,79 @@ pub struct ScheduledIndex {
     past_one_shots: HashMap<i64, HashSet<String>>,
     booked_identities: HashSet<String>,
     indexed_at: i64,
+    live_airings: HashMap<i64, Vec<LiveAiring>>,
+    live_films: HashSet<String>,
+}
+
+struct LiveAiring {
+    guid: String,
+    time: SystemTime,
+    station: GuideChannel,
+}
+
+impl LiveAiring {
+    fn matches_padded_start(&self, guid: Option<&str>, row: &super::PosterRow) -> bool {
+        guid == Some(self.guid.as_str())
+            && row.airing.is_some_and(|start| {
+                start
+                    .duration_since(self.time)
+                    .is_ok_and(|padding| padding <= Duration::from_secs(3600))
+            })
+            && self.station.compare(&row.guide_channel, None) >= StationMatch::Number
+    }
 }
 
 impl ScheduledIndex {
+    pub(super) fn add_live_movie(&mut self, metadata: &Value, media: Option<&Value>) {
+        // A numeric ratingKey identifies a row local to a provider, not a global film.
+        let guid = ["guid", "ratingKey"].iter().find_map(|key| {
+            utils::canonicalize_guid(metadata.get(key)?.as_str()?)
+                .filter(|value| value.contains("://"))
+        });
+        if let Some(guid) = &guid {
+            self.live_films.insert(format!("guid:{guid}"));
+        }
+        let Some((media, time)) =
+            media.and_then(|m| Some((m, integer(m.get("beginsAt")).filter(|time| *time > 0)?)))
+        else {
+            return;
+        };
+        // Use title/year only for a booking without a global identity, so a different
+        // film with the same name cannot inherit a known GUID's booking.
+        let station = GuideChannel::from_fields(|key| field(media, key));
+        if let (Some(guid), Some(id), Some(time)) = (
+            guid.as_ref(),
+            integer(media.get("id")).filter(|id| *id > 0),
+            UNIX_EPOCH.checked_add(Duration::from_secs(time as u64)),
+        ) {
+            self.live_airings.entry(id).or_default().push(LiveAiring {
+                guid: guid.clone(),
+                time,
+                station: station.clone(),
+            });
+        }
+        let identity = guid.or_else(|| {
+            let year = i32::try_from(integer(metadata.get("year"))?)
+                .ok()
+                .filter(|y| *y > 0)?;
+            make_title_key(metadata.get("title")?.as_str()?, Some(year))
+        });
+        if let Some(identity) = identity {
+            let channel = if station == GuideChannel::default() {
+                BookingChannel::Unconfirmed
+            } else {
+                BookingChannel::Station(station)
+            };
+            self.grabs.add(&identity, time, &channel);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.films.is_empty()
             && self.grabs.0.is_empty()
             && self.subscriptions.0.is_empty()
             && self.past_one_shots.is_empty()
+            && self.live_films.is_empty()
     }
 
     pub(super) fn apply(&self, rows: &mut [super::PosterRow]) -> super::ScheduledMatchStats {
@@ -234,7 +302,8 @@ impl ScheduledIndex {
                 .push(idx);
         }
         let mut flags = vec![RecordingStatus::None; rows.len()];
-        for ((_, airing), group) in simultaneous {
+        let mut located_live_films = HashSet::new();
+        for (&(film_key, airing), group) in &simultaneous {
             let first = &rows[group[0]];
             let guid = first.guid.as_deref().and_then(utils::canonicalize_guid);
             let title = make_title_key(&first.title, first.year);
@@ -242,27 +311,55 @@ impl ScheduledIndex {
             let stations: Vec<_> = group.iter().map(|&i| &rows[i].guide_channel).collect();
             let (statuses, kind) =
                 self.match_slot(guid.as_deref(), title.as_deref(), time, &stations);
-            for (idx, status) in group.into_iter().zip(statuses) {
-                // The guide can still link a film to a one-shot whose stored
-                // airtime has passed. This confirms the request, not the showing.
-                let (status, kind) = if kind == ScheduledMatchKind::None
+            for (&idx, status) in group.iter().zip(statuses) {
+                let (status, kind) = if self
+                    .live_airings
+                    .get(&rows[idx].guide_media_id)
+                    .is_some_and(|candidates| {
+                        candidates.iter().any(|candidate| {
+                            candidate.matches_padded_start(guid.as_deref(), &rows[idx])
+                                && !simultaneous.contains_key(&(film_key, Some(candidate.time)))
+                        })
+                    }) {
+                    // Some servers return the recording start with pre-roll. A nearby
+                    // guide media ID is usable only for the same global film and station.
+                    (RecordingStatus::Exact, ScheduledMatchKind::Guid)
+                } else if kind == ScheduledMatchKind::None
                     && self.has_linked_past_request(
                         rows[idx].movie_subscription_id,
                         guid.as_deref(),
                         title.as_deref(),
                         time,
-                    ) {
+                    )
+                {
                     (RecordingStatus::Film, ScheduledMatchKind::Guid)
                 } else {
                     (status, kind)
                 };
                 flags[idx] = status;
+                if status >= RecordingStatus::Slot && self.live_films.contains(film_key) {
+                    located_live_films.insert(film_key);
+                }
                 if status == RecordingStatus::None {
                     stats.misses += 1;
                 } else if kind == ScheduledMatchKind::Guid {
                     stats.by_guid += 1;
                 } else {
                     stats.by_title_slot += 1;
+                }
+            }
+        }
+        if self.live_films.len() > located_live_films.len() {
+            let now = SystemTime::now();
+            for (row, flag) in rows.iter().zip(&mut flags) {
+                if *flag == RecordingStatus::None
+                    && row.airing.is_some_and(|start| start >= now)
+                    && self.live_films.contains(&row.film_key)
+                    && !located_live_films.contains(row.film_key.as_str())
+                {
+                    *flag = RecordingStatus::Film;
+                    stats.by_guid += 1;
+                    stats.misses -= 1;
                 }
             }
         }
