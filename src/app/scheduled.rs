@@ -210,11 +210,17 @@ pub struct ScheduledIndex {
     films: HashSet<String>,
     grabs: Slots,
     subscriptions: Slots,
+    past_one_shots: HashMap<i64, HashSet<String>>,
+    booked_identities: HashSet<String>,
+    indexed_at: i64,
 }
 
 impl ScheduledIndex {
     pub fn is_empty(&self) -> bool {
-        self.films.is_empty() && self.grabs.0.is_empty() && self.subscriptions.0.is_empty()
+        self.films.is_empty()
+            && self.grabs.0.is_empty()
+            && self.subscriptions.0.is_empty()
+            && self.past_one_shots.is_empty()
     }
 
     pub(super) fn apply(&self, rows: &mut [super::PosterRow]) -> super::ScheduledMatchStats {
@@ -237,6 +243,19 @@ impl ScheduledIndex {
             let (statuses, kind) =
                 self.match_slot(guid.as_deref(), title.as_deref(), time, &stations);
             for (idx, status) in group.into_iter().zip(statuses) {
+                // The guide can still link a film to a one-shot whose stored
+                // airtime has passed. This confirms the request, not the showing.
+                let (status, kind) = if kind == ScheduledMatchKind::None
+                    && self.has_linked_past_request(
+                        rows[idx].movie_subscription_id,
+                        guid.as_deref(),
+                        title.as_deref(),
+                        time,
+                    ) {
+                    (RecordingStatus::Film, ScheduledMatchKind::Guid)
+                } else {
+                    (status, kind)
+                };
                 flags[idx] = status;
                 if status == RecordingStatus::None {
                     stats.misses += 1;
@@ -251,6 +270,24 @@ impl ScheduledIndex {
             row.scheduled = status;
         }
         stats
+    }
+
+    fn has_linked_past_request(
+        &self,
+        subscription_id: Option<i64>,
+        guid: Option<&str>,
+        title: Option<&str>,
+        time: Option<i64>,
+    ) -> bool {
+        let (Some(id), Some(guid), Some(time)) = (subscription_id, guid, time) else {
+            return false;
+        };
+        time >= self.indexed_at
+            && self
+                .past_one_shots
+                .get(&id)
+                .is_some_and(|ids| ids.contains(guid))
+            && !title.is_some_and(|key| self.booked_identities.contains(key))
     }
 
     fn match_slot(
@@ -373,7 +410,10 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
         )
         .map_err(|err| format!("prepare scheduled query failed: {err}"))?;
 
-    let mut index = ScheduledIndex::default();
+    let mut index = ScheduledIndex {
+        indexed_at: now,
+        ..ScheduledIndex::default()
+    };
     let mut rows = stmt
         .query([])
         .map_err(|err| format!("query scheduled rows failed: {err}"))?;
@@ -410,10 +450,7 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
                     .as_deref()
                     .and_then(utils::canonicalize_guid)
             });
-        if let Some(guid) = guid {
-            index.grabs.add(&guid, time, &channel);
-        }
-        if let Some(title) = data
+        let title = data
             .get("mt:title")
             .and_then(Value::as_str)
             .and_then(|title| {
@@ -421,13 +458,27 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
                     title,
                     integer(data.get("mt:year")).and_then(|y| i32::try_from(y).ok()),
                 )
-            })
-        {
-            index.grabs.add(&title, time, &channel);
+            });
+        for key in [guid, title].into_iter().flatten() {
+            index.grabs.add(&key, time, &channel);
         }
     }
 
     load_from_media_subscriptions(conn, &mut index, now)?;
+    if !index.past_one_shots.is_empty() {
+        index.booked_identities = index
+            .grabs
+            .0
+            .keys()
+            .chain(index.subscriptions.0.keys())
+            .map(|(identity, _)| identity.clone())
+            .collect();
+        // A retained booking under any GUID used by the subscription supersedes
+        // the old film-level link, even when the guide uses a different GUID alias.
+        index
+            .past_one_shots
+            .retain(|_, guids| guids.is_disjoint(&index.booked_identities));
+    }
 
     Ok(index)
 }
@@ -542,7 +593,7 @@ fn load_from_media_subscriptions(
 ) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
-            "SELECT s.extra_data, d.remote_id FROM media_subscriptions s
+            "SELECT s.extra_data, d.remote_id, s.id FROM media_subscriptions s
                   LEFT JOIN metadata_subscription_desired_items d ON d.sub_id = s.id
                   WHERE s.extra_data IS NOT NULL",
         )
@@ -560,12 +611,18 @@ fn load_from_media_subscriptions(
 
         let times = subscription_list(parsed.get("pv:airingTimes"));
         let channels = subscription_channels(parsed.get("pv:airingChannels"), times.len());
+        let times: Vec<_> = times.iter().map(|raw| raw.parse::<i64>().ok()).collect();
+        let earliest = now.saturating_sub(86_400);
+        let all_expired = !times.is_empty()
+            && times
+                .iter()
+                .all(|t| t.is_some_and(|time| (1..earliest).contains(&time)));
         let slots: Vec<_> = times
-            .iter()
+            .into_iter()
             .zip(channels)
             .filter_map(|(raw, channel)| {
-                let time: i64 = raw.parse().ok()?;
-                if time < now.saturating_sub(86_400) {
+                let time = raw?;
+                if time < earliest {
                     return None;
                 }
                 Some((time, channel))
@@ -582,6 +639,10 @@ fn load_from_media_subscriptions(
             ValueRef::Text(bytes) | ValueRef::Blob(bytes) => std::str::from_utf8(bytes).ok(),
             _ => None,
         };
+        let past_id = match row.get_ref(2).map_err(|err| err.to_string())? {
+            ValueRef::Integer(id) if id > 0 && one_shot && all_expired => Some(id),
+            _ => None,
+        };
         for guid in [parsed.get("hi:guid").and_then(Value::as_str), remote]
             .into_iter()
             .flatten()
@@ -589,6 +650,13 @@ fn load_from_media_subscriptions(
         {
             if !one_shot {
                 index.films.insert(guid.clone());
+            }
+            if let Some(id) = past_id {
+                index
+                    .past_one_shots
+                    .entry(id)
+                    .or_default()
+                    .insert(guid.clone());
             }
             for (time, channel) in &slots {
                 index.subscriptions.add(&guid, *time, channel);
@@ -715,6 +783,53 @@ mod tests {
         for guid in ["plex://past", "plex://orphan"] {
             assert_eq!(status(Some(guid), "", None, 200000), RecordingStatus::None);
         }
+    }
+
+    #[test]
+    fn expired_one_shots_need_a_matching_guide_link_and_no_retained_booking() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            r#"
+            CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+            CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+            CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);
+            INSERT INTO media_subscriptions VALUES
+              (1, '{"hi:guid":"plex://movie","pr:oneShot":true,"pv:airingTimes":"10,20"}'),
+              (2, '{"hi:guid":"plex://started","pr:oneShot":true,"pv:airingTimes":"199940"}'),
+              (3, '{"hi:guid":"plex://malformed","pr:oneShot":true,"pv:airingTimes":"10,bad"}');
+            INSERT INTO metadata_subscription_desired_items VALUES (1, 'plex%3A%2F%2Fdesired');
+        "#,
+        )
+        .unwrap();
+        let now = 200000;
+        let linked = |index: &ScheduledIndex, id, guid, title, time| {
+            index.has_linked_past_request(Some(id), Some(guid), title, Some(time))
+        };
+        let index = read_scheduled_index(&db, now).unwrap();
+        assert!(linked(&index, 1, "plex://desired", None, now));
+        assert!(linked(&index, 1, "plex://movie", None, now));
+        assert!(!linked(&index, 2, "plex://movie", None, now));
+        assert!(!linked(&index, 1, "plex://remake", None, now));
+        assert!(!linked(&index, 1, "plex://movie", None, now - 1));
+        assert!(!linked(&index, 2, "plex://started", None, now + 86400));
+        assert!(!linked(&index, 3, "plex://malformed", None, now));
+
+        db.execute(
+            "INSERT INTO media_grabs VALUES (0, ?1)",
+            [r#"{"mt:title":"Rescheduled Film","mt:year":1984,"me:beginsAt":220000}"#],
+        )
+        .unwrap();
+        let title = make_title_key("Rescheduled Film", Some(1984));
+        let index = read_scheduled_index(&db, now).unwrap();
+        assert!(!linked(&index, 1, "plex://movie", title.as_deref(), now));
+
+        db.execute(
+            "INSERT INTO media_grabs VALUES (0, ?1)",
+            [r#"{"mt:guid":"plex://desired","me:beginsAt":199940}"#],
+        )
+        .unwrap();
+        let index = read_scheduled_index(&db, now).unwrap();
+        assert!(!linked(&index, 1, "plex://movie", None, now));
     }
 
     #[test]

@@ -280,7 +280,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 - **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
   `plex_library_db_source` paths are reachable and readable.
 - **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup. In live mode, verify the configured library path.
-- If a **REC** badge is missing, check **Other showings** for the scheduled slot. After a new recording request, choose **Advanced → Refresh owned scan**. Badges reflect the date of the library snapshot used.
+- If a **REC** badge is missing, check **Other showings** for the scheduled slot. After a new recording request, choose **Advanced → Refresh owned scan**. Badges reflect the date of the library snapshot used. When a one-off request only lists a past airtime, **Film REC** can still appear if the guide and library link the same request to that film. Plex’s **Live TV & DVR → DVR Schedule** shows the current recording time.
 - If a NAS disconnects, choose **Advanced → Refresh path status** to check the configured sources, local mirrors and cache. You can use the guide while PEX checks the paths in the background.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days

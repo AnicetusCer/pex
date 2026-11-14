@@ -8,7 +8,7 @@ use std::time::SystemTime;
 pub enum OwnedMsg {
     Info(String),
     Snapshot(String),
-    Scheduled(Result<super::scheduled::ScheduledIndex, String>),
+    Scheduled(Result<Box<super::scheduled::ScheduledIndex>, String>),
     Done(Box<OwnedLibrary>),
     Error(String),
 }
@@ -72,6 +72,7 @@ impl OwnedCandidates {
 pub struct PrepItem {
     pub airing_quality: AiringQuality,
     pub film_key: String,
+    pub movie_subscription_id: Option<i64>,
     pub title: String,
     pub thumb_url: String,
     pub key: String,
@@ -205,6 +206,7 @@ impl FromStr for SortKey {
 // ---- core row backing each grid card ----
 pub struct PosterRow {
     pub film_key: String,
+    pub movie_subscription_id: Option<i64>,
     pub title: String,
     pub url: String,
     pub key: String,

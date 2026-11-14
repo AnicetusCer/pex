@@ -141,7 +141,7 @@ pub struct PexApp {
     has_ratings_key: bool,
     rating_key_feedback: Option<&'static str>,
 
-    scheduled_index: Option<ScheduledIndex>,
+    scheduled_index: Option<Box<ScheduledIndex>>,
     scheduled_match_stats: ScheduledMatchStats,
 
     // search/filter/sort controls

@@ -14,6 +14,11 @@ fn distinguish_booked_and_unresolved_simulcasts() {
 }
 
 #[test]
+fn show_a_film_request_after_its_original_one_shot_expires() {
+    run_portable_test("app::guide_ui_tests::portable_expired_one_shot");
+}
+
+#[test]
 fn hd_upgrade_requires_evidence_for_the_airing() {
     run_portable_test("app::guide_ui_tests::portable_sky_mix_quality");
 }
@@ -389,6 +394,117 @@ fn portable_simulcasts() {
     ui.label("REC");
     // Hiding the SD sibling cannot confirm the station Plex left unspecified.
     ui.label("REC?");
+}
+
+#[test]
+#[ignore = "parent creates an isolated portable install"]
+fn portable_expired_one_shot() {
+    use super::scheduled::RecordingStatus;
+    let source = config::base_dir().join("source");
+    fs::create_dir(&source).unwrap();
+    let guide = source.join("guide.db");
+    let library = source.join("library.db");
+    database(&guide);
+    database(&library);
+    let now = chrono::Utc::now().timestamp();
+    let first = now + 3_600;
+    {
+        let db = Connection::open(&guide).unwrap();
+        db.execute_batch(
+            r#"ALTER TABLE metadata_items ADD COLUMN extra_data BLOB;
+               UPDATE metadata_items SET title='Rescheduled Film', original_title=NULL,
+                   year=1984, guid='plex://movie/fixture', user_thumb_url=NULL,
+                   extra_data=CAST('{"at:subscriptionID":"42","at:subscriptionType":"movie"}' AS BLOB);
+               INSERT INTO metadata_items(id,title,year,metadata_type,guid,extra_data)
+                   VALUES(2,'Unrelated Film',2021,1,'plex://movie/unrelated',
+                       '{"at:subscriptionID":"42","at:subscriptionType":"movie"}');
+               DELETE FROM media_items;"#,
+        )
+        .unwrap();
+        for (movie, time, station) in [
+            (1, first, "REWINDUK"),
+            (1, first + 7_200, "REWINDUK"),
+            (1, first + 86_400, "TOGETUK"),
+            (2, first, "REWINDUK"),
+        ] {
+            db.execute(
+                "INSERT INTO media_items(metadata_item_id,begins_at,extra_data) VALUES(?1,?2,?3)",
+                params![
+                    movie,
+                    time,
+                    serde_json::json!({"at:channelCallSign":station}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        let db = Connection::open(&library).unwrap();
+        db.execute_batch(
+            "CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+             CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+             CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);
+             INSERT INTO metadata_subscription_desired_items VALUES(42,'plex%3A%2F%2Fmovie%2Ffixture');",
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "hi:guid":"plex://movie/fixture", "hi:title":"Rescheduled Film", "hi:year":"1984",
+            "pr:oneShot":"1", "pr:startOffsetMinutes":"10",
+            "pv:airingTimes": (now - 12 * 86_400).to_string(),
+            "pv:airingChannels":"together%3D083%2520TOGETUK%2520%2528Together%2529"
+        });
+        db.execute(
+            "INSERT INTO media_subscriptions VALUES(42,?1)",
+            [request.to_string()],
+        )
+        .unwrap();
+    }
+    config::save_connection(&guide, Some(&library), false).unwrap();
+    let mut ui = TestUi::default();
+    ui.frames_until("film recording request", |app| {
+        !app.owned_scan_in_progress
+            && app.rows.len() == 4
+            && app
+                .rows
+                .iter()
+                .any(|r| r.scheduled == RecordingStatus::Film)
+    });
+    for row in &ui.app.rows {
+        let expected = if row.title == "Rescheduled Film" {
+            RecordingStatus::Film
+        } else {
+            RecordingStatus::None
+        };
+        assert_eq!(row.scheduled, expected, "{}", row.title);
+    }
+    ui.label("Film REC");
+
+    // When Plex supplies the replacement booking, only that showing gets REC.
+    let grab = serde_json::json!({
+        "mt:guid":"plex://movie/fixture", "me:beginsAt":first, "me:channelCallSign":"REWINDUK"
+    });
+    Connection::open(&library)
+        .unwrap()
+        .execute("INSERT INTO media_grabs VALUES(0,?1)", [grab.to_string()])
+        .unwrap();
+    ui.app.start_owned_scan(true);
+    ui.frames_until("replacement DVR booking", |app| {
+        app.rows
+            .iter()
+            .any(|r| r.scheduled == RecordingStatus::Exact)
+    });
+    for row in &ui.app.rows {
+        let booked = row.title == "Rescheduled Film"
+            && row.airing
+                == Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(first as u64));
+        assert_eq!(
+            row.scheduled,
+            if booked {
+                RecordingStatus::Exact
+            } else {
+                RecordingStatus::None
+            }
+        );
+    }
+    ui.label("REC");
 }
 
 #[test]

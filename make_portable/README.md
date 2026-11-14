@@ -22,6 +22,8 @@ Select a film and expand **Other showings (N)** for the channel and UTC time of 
 
 **REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 
+Plex can keep the original airtime in its database after moving a one-off recording. If the guide and library still identify the same film and request, PEX shows **Film REC**. Open **Live TV & DVR → DVR Schedule** in Plex to see which repeat it currently plans to record.
+
 For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. A matching Plex identifier takes priority, followed by a matching title and year. If the only title matches are a year earlier and a year later, PEX lists both. **Copy file path** copies the path as Plex sees it on the server.
 
 ## Optional film ratings

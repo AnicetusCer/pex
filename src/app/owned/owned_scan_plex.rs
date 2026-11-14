@@ -52,7 +52,7 @@ impl OwnedScanPlex {
                 }
             };
             let _ = tx.send(OwnedMsg::Scheduled(
-                crate::app::scheduled::load_scheduled_index(),
+                crate::app::scheduled::load_scheduled_index().map(Box::new),
             ));
             let conn = match Connection::open_with_flags(
                 &db_path,

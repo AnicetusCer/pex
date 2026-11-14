@@ -75,6 +75,27 @@ fn parse_channel_meta(extra: &[u8]) -> ChannelMeta {
         guide_channel: super::scheduled::GuideChannel::read(&value),
     }
 }
+
+fn movie_subscription_id(extra: &[u8]) -> Option<i64> {
+    #[derive(serde::Deserialize)]
+    struct Subscription {
+        #[serde(rename = "at:subscriptionType")]
+        kind: String,
+        #[serde(rename = "at:subscriptionID")]
+        id: serde_json::Value,
+    }
+
+    let subscription: Subscription = serde_json::from_slice(extra).ok()?;
+    if !subscription.kind.eq_ignore_ascii_case("movie") {
+        return None;
+    }
+    subscription
+        .id
+        .as_i64()
+        .or_else(|| subscription.id.as_str()?.trim().parse().ok())
+        .filter(|id| *id > 0)
+}
+
 /// A film can have many media_items (airings). Artwork is optional and belongs
 /// to the metadata item, so neither its URL nor its absence identifies the film.
 fn read_guide_airings(
@@ -99,10 +120,12 @@ fn read_guide_airings(
     let height = analyzed_dimension("height");
     let resolution = optional_column(&media, "mi", "video_resolution");
     let extra_data = optional_column(&media, "mi", "extra_data");
+    let metadata_extra = optional_column(&metadata, "m", "extra_data");
     let sql = format!(
         "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
         {extra_data}, m.summary, m.audience_rating, m.rating, {preferred}, {secondary},
-        {width} AS airing_width, {height} AS airing_height, CAST({resolution} AS TEXT) AS airing_resolution
+        {width} AS airing_width, {height} AS airing_height, CAST({resolution} AS TEXT) AS airing_resolution,
+        {metadata_extra} AS movie_metadata
         FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id = m.id
         WHERE m.metadata_type = 1 AND mi.begins_at >= 0 AND trim(m.title) <> ''
         ORDER BY mi.begins_at, m.id, mi.id"
@@ -162,6 +185,11 @@ fn read_guide_airings(
         list.push(PrepItem {
             airing_quality,
             film_key,
+            movie_subscription_id: row
+                .get_ref("movie_metadata")?
+                .as_bytes()
+                .ok()
+                .and_then(movie_subscription_id),
             title,
             thumb_url,
             key,
@@ -877,6 +905,7 @@ impl crate::app::PexApp {
 
                                 crate::app::PosterRow {
                                     film_key: item.film_key,
+                                    movie_subscription_id: item.movie_subscription_id,
                                     title: item.title,
                                     url: item.thumb_url,
                                     key: item.key,
