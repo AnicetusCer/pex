@@ -49,14 +49,7 @@ impl crate::app::PexApp {
             }
         }
         for idxs in days.values_mut() {
-            // Deterministic tie order even when several films share a slot.
-            idxs.sort_unstable_by(|&a, &b| {
-                self.rows[a].title.cmp(&self.rows[b].title).then(a.cmp(&b))
-            });
             self.sort_intra_day(idxs);
-            if self.sort_desc {
-                idxs.reverse();
-            }
         }
         FilteredGuide {
             days: days.into_iter().collect(),
@@ -149,44 +142,27 @@ impl crate::app::PexApp {
 
     /// Sort a day's indices according to the current SortKey.
     fn sort_intra_day(&self, idxs: &mut [usize]) {
-        match self.sort_key {
-            SortKey::Time => {
-                idxs.sort_by_key(|&i| {
-                    self.rows[i]
-                        .airing
-                        .map(|ts| {
-                            ts.duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs()
-                        })
-                        .unwrap_or(u64::MAX)
-                });
+        idxs.sort_unstable_by(|&a, &b| {
+            let (left, right) = (&self.rows[a], &self.rows[b]);
+            let primary = match self.sort_key {
+                SortKey::Time => left.airing.cmp(&right.airing),
+                SortKey::Channel => left
+                    .channel
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(right.channel.as_deref().unwrap_or("")),
+                SortKey::Genre => left.genres.first().cmp(&right.genres.first()),
+                SortKey::Title => std::cmp::Ordering::Equal,
+            };
+            // Keep ties deterministic even when the grouping map changes its iteration order.
+            let order = primary
+                .then_with(|| left.title.cmp(&right.title))
+                .then(a.cmp(&b));
+            if self.sort_desc {
+                order.reverse()
+            } else {
+                order
             }
-            SortKey::Title => idxs.sort_by(|&a, &b| self.rows[a].title.cmp(&self.rows[b].title)),
-            SortKey::Channel => {
-                idxs.sort_by(|&a, &b| {
-                    let ca = self.rows[a].channel.as_deref().unwrap_or("");
-                    let cb = self.rows[b].channel.as_deref().unwrap_or("");
-                    ca.cmp(cb)
-                        .then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
-                });
-            }
-            SortKey::Genre => {
-                idxs.sort_by(|&a, &b| {
-                    let ga = self.rows[a]
-                        .genres
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let gb = self.rows[b]
-                        .genres
-                        .first()
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    ga.cmp(gb)
-                        .then_with(|| self.rows[a].title.cmp(&self.rows[b].title))
-                });
-            }
-        }
+        });
     }
 }

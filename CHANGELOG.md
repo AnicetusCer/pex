@@ -2,6 +2,7 @@
 
 - The guide keeps repeat airings, remakes and films without artwork. Each card reflects the current filters. Expand **Other showings (N)** for additional times and channels. **REC** identifies the displayed showing and **Other REC** identifies a scheduled alternative.
 - Film listings appear while posters load in the background. Showings with the same artwork share a poster download and display texture. Selecting a film loads its poster in Details even when its card is offscreen.
+- The guide looks up cached posters on its background worker and reuses the layout of offscreen cards. Owned scans avoid repeated title normalization and stream the saved title cache directly from the index.
 - Recording badges distinguish channels airing the same film at the same time. **REC?** identifies a scheduled time with an unconfirmed channel. **Film REC** identifies a recording request without a confirmed showing.
 - PEX now recognises Plex recording subscriptions that store the station ID and display name together. A unique station match at the booked time gets **REC**, including when one subscription lists several channels and airtimes.
 - Recording badges recognise zero-padded channel numbers, and an unreadable recording entry no longer hides other bookings.

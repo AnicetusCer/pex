@@ -18,6 +18,84 @@ fn hd_upgrade_requires_evidence_for_the_airing() {
     run_portable_test("app::guide_ui_tests::portable_sky_mix_quality");
 }
 
+#[test]
+fn scroll_a_large_guide_with_wrapped_titles() {
+    run_portable_test("app::guide_ui_tests::portable_scroll_fixture");
+}
+
+#[test]
+#[ignore = "parent creates an isolated portable install"]
+fn portable_scroll_fixture() {
+    use eframe::egui as eg;
+    let root = std::path::PathBuf::from(env::var_os("PEX_GUIDE_DETAILS_FIXTURE").unwrap());
+    let guide = root.join("guide.db");
+    database(&guide);
+    let db = Connection::open(&guide).unwrap();
+    let start = chrono::Utc::now().timestamp() + 60;
+    db.execute_batch("
+        DELETE FROM metadata_items; DELETE FROM media_items;
+        WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq WHERE i<1000)
+        INSERT INTO metadata_items(id,title,year,metadata_type)
+          SELECT i, printf('Film %04d', i) || CASE WHEN i%7=0 THEN
+             ' with a long title that wraps to several lines in the poster grid' ELSE '' END, 1999, 1 FROM seq;
+    ").unwrap();
+    db.execute("INSERT INTO media_items(id,metadata_item_id,begins_at) SELECT id,id,?1+id FROM metadata_items", [start]).unwrap();
+    drop(db);
+    config::save_connection(&guide, None, true).unwrap();
+    let mut ui = TestUi::default();
+    ui.frames_until("large guide", |app| app.rows.len() == 1000);
+    let id = eg::Id::new(("card_sel", 999usize));
+    let first = ui.ctx.read_response(id).unwrap().rect;
+    assert!(first.top() > 850.0);
+    ui.frame(vec![]);
+    ui.frame(vec![]);
+    let active = (0..1000usize)
+        .filter(|idx| {
+            ui.ctx
+                .read_response(eg::Id::new(("card_sel", *idx)))
+                .is_some()
+        })
+        .count();
+    assert!((1..40).contains(&active));
+    ui.app.scroll_to_idx = Some(999);
+    ui.frames_until("scroll to last card", |app| app.scroll_to_idx.is_none());
+    assert!((ui.ctx.read_response(id).unwrap().rect.top() - first.top()).abs() < 1.0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let target = loop {
+        ui.frame(vec![]);
+        if let Some(card) = ui.ctx.read_response(id) {
+            if ui.ctx.screen_rect().contains(card.rect.center()) {
+                break card.rect;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "last card stayed offscreen"
+        );
+    };
+    ui.click(target.center());
+    assert_eq!(ui.app.selected_idx, Some(999));
+    ui.frame(vec![eg::Event::Key {
+        key: eg::Key::ArrowLeft,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: eg::Modifiers::NONE,
+    }]);
+    assert_eq!(ui.app.selected_idx, Some(998));
+
+    ui.app.poster_width_ui = 215.0;
+    ui.frame(vec![]);
+    assert_eq!(ui.app.grid_card_sizes[0].x, 215.0);
+    ui.ctx.set_pixels_per_point(1.5);
+    ui.frame(vec![]);
+    assert_eq!(ui.app.grid_card_scale, (215.0, 1.5));
+    ui.app.search_query = "Film 0007".into();
+    ui.frame(vec![]);
+    assert_eq!(ui.app.grid_rows, [vec![6]]);
+    assert_eq!(ui.app.selected_idx, Some(6));
+}
+
 fn run_portable_test(test: &str) {
     let dir = tempfile::tempdir().unwrap();
     let result = Command::new(env::current_exe().unwrap())
@@ -327,13 +405,21 @@ fn portable_guide_details() {
     let library = source.join("library.db");
     database(&guide);
     database(&library);
+    let poster_key = format!(
+        "{}__s",
+        super::cache::url_to_cache_key("https://fixture.invalid/poster.jpg")
+    );
+    let poster = super::cache::poster_cache_dir().join(format!("{poster_key}.png"));
+    image::RgbaImage::new(2, 3).save(&poster).unwrap();
+    fs::write(
+        super::prefs::hotset_manifest_path(),
+        format!("{poster_key}\t{}", source.join("old-poster.png").display()),
+    )
+    .unwrap();
     {
         let db = Connection::open(&guide).unwrap();
-        db.execute_batch(
-            "ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;
-             UPDATE metadata_items SET user_thumb_url=NULL;",
-        )
-        .unwrap();
+        db.execute_batch("ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;")
+            .unwrap();
         db.execute(
             "UPDATE media_items SET begins_at=?1,extra_data=?2,media_analysis_version=8",
             params![start, r#"{"at:channelCallSign":"Channel One"}"#],
@@ -405,6 +491,15 @@ fn portable_guide_details() {
                 .iter()
                 .any(|r| r.scheduled == super::scheduled::RecordingStatus::Exact)
     });
+    let cached = ui
+        .app
+        .rows
+        .iter()
+        .filter(|row| row.key == poster_key)
+        .collect::<Vec<_>>();
+    assert_eq!(cached.len(), 3);
+    assert!(cached.iter().all(|row| row.path.as_ref() == Some(&poster)));
+    assert!(ui.app.poster_textures.contains_key(&poster_key));
     ui.press("Other REC");
     ui.press("Other showings (2)");
     ui.label("Scheduled to record");

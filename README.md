@@ -295,6 +295,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 
 - Format the code with `cargo fmt`.
 - Run tests with `cargo test`.
+- To test a portable ZIP, set `SNAPSHOT_TEST_ZIP` to its path and run `cargo test --locked --test portable_snapshot_smoke -- --ignored`. This launches the packaged app in a temporary folder with read-only fixture databases. On headless Linux, prefix the command with `xvfb-run -a`.
 - Optional: `cargo clippy --all-targets -- -D warnings` (requires the Clippy
   component).
 - DB inspection helpers:

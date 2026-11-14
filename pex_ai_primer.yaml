@@ -115,7 +115,8 @@ runtime_model:
   prep_item_schema:
     - title: String
     - thumb_url: String
-    - key: String (md5 of URL, empty if no usable poster)
+    - key: String (MD5 of URL plus "__s", empty if no usable poster)
+    - cached_path: Option<PathBuf> (resolved on the prep worker)
     - film_key: "GUID, or title/year, or local metadata ID for an undated film"
     - begins_at_unix: Option<i64>
     - year: Option<i32>
@@ -137,9 +138,7 @@ flow:
     - Show splash with status heartbeat
   prep_done_in_ui:
     - Map PrepItem → PosterRow (with channel badge metadata)
-    - Derive small_key = base_key + "__s"
-    - Try find_any_by_key(small_key) to attach cached path
-    - Load "hotset.txt", attach known paths, prewarm textures
+    - The prep worker resolves the hotset and indexes the poster directory once. The UI prewarms textures from the supplied paths.
     - Kick channel icon prefetch for unseen URLs
     - apply scheduled flags when the library worker supplies its index
     - apply_owned_flags() if owned data ready (GUID-first owned matching, then title/year key fallback; sets owned flags + recorded dates)

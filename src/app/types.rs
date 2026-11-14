@@ -75,6 +75,7 @@ pub struct PrepItem {
     pub title: String,
     pub thumb_url: String,
     pub key: String,
+    pub cached_path: Option<PathBuf>,
     pub begins_at: Option<i64>,
     pub year: Option<i32>,
     pub tags_genre: Option<String>,

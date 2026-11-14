@@ -48,6 +48,13 @@ impl crate::app::PexApp {
         let card_w: f32 = self.poster_width_ui;
         let text_h: f32 = 56.0;
         let card_h: f32 = card_w.mul_add(1.5, text_h);
+        let scale = (card_w, ctx.pixels_per_point());
+        if self.grid_card_scale != scale {
+            self.grid_card_sizes.clear();
+            self.grid_card_scale = scale;
+        }
+        self.grid_card_sizes.resize(self.rows.len(), eg::Vec2::ZERO);
+        let screen_reader = ctx.options(|options| options.screen_reader);
 
         eg::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -73,7 +80,19 @@ impl crate::app::PexApp {
                             ui.add_space(left_pad);
 
                             for &idx in row_indices {
-                                ui.allocate_ui_with_layout(
+                                // Wrapped captions can grow beyond card_h. Reserve the exact
+                                // measured bounds so scrolling and keyboard targets stay stable.
+                                let measured = self.grid_card_sizes[idx];
+                                let bounds = eg::Rect::from_min_size(ui.next_widget_position(), measured);
+                                if measured != eg::Vec2::ZERO
+                                    && !screen_reader
+                                    && self.scroll_to_idx != Some(idx)
+                                    && !ui.is_rect_visible(bounds.expand(2.0))
+                                {
+                                    ui.allocate_space(measured);
+                                    continue;
+                                }
+                                let card = ui.allocate_ui_with_layout(
                                     eg::vec2(card_w, card_h),
                                     eg::Layout::top_down(eg::Align::Min),
                                     |ui| {
@@ -207,15 +226,11 @@ impl crate::app::PexApp {
                                                 || row.title.clone(),
                                                 |y| format!("{} ({})", row.title, y),
                                             );
-                                            let ch = row
-                                                .channel
-                                                .as_deref()
-                                                .map(crate::app::utils::humanize_channel)
-                                                .unwrap_or_else(|| "—".into());
+                                            let ch = row.channel.as_deref().unwrap_or("—");
                                             let line2 = match row.airing_quality {
                                                 AiringQuality::Hd => format!("{ch} • HD"),
                                                 AiringQuality::Sd => format!("{ch} • SD"),
-                                                AiringQuality::Unknown => ch,
+                                                AiringQuality::Unknown => ch.to_owned(),
                                             };
                                             let tm = row
                                                 .airing
@@ -249,6 +264,7 @@ impl crate::app::PexApp {
                                         }
                                     },
                                 );
+                                self.grid_card_sizes[idx] = card.response.rect.size();
                             }
                         });
                         self.grid_rows.push(row_indices.to_vec());

@@ -43,6 +43,24 @@ struct LegacyCache {
     hd_keys: HashSet<String>,
 }
 
+// Write directly from the scan index. On a large live library, collecting
+// these borrowed keys into a second hash table would still cost many megabytes.
+struct CachedTitles<'a>(Option<&'a OwnedLibrary>);
+
+impl Serialize for CachedTitles<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map =
+            serializer.serialize_map(Some(self.0.map_or(0, |scan| scan.by_title.len())))?;
+        if let Some(scan) = self.0 {
+            for (key, entries) in &scan.by_title {
+                map.serialize_entry(key, &scan.quality(entries.as_slice()))?;
+            }
+        }
+        map.end()
+    }
+}
+
 pub(in crate::app) fn preload(
     cache_dir: &Path,
     source: Option<&LibrarySource>,
@@ -88,15 +106,7 @@ pub(super) fn save(
     scan: &OwnedLibrary,
 ) -> io::Result<()> {
     // A non-live scan only has to invalidate an earlier live generation.
-    // Borrow live title keys for serialization instead of retaining duplicate strings.
-    let titles: HashMap<&str, OwnedQuality> = if matches!(source, LibrarySource::Live(_)) {
-        scan.by_title
-            .iter()
-            .map(|(key, entries)| (key.as_str(), scan.quality(entries.as_slice())))
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let titles = CachedTitles(matches!(source, LibrarySource::Live(_)).then_some(scan));
     let mut temp = tempfile::NamedTempFile::new_in(cache_dir)?;
     let mut writer = BufWriter::new(temp.as_file_mut());
     serde_json::to_writer(&mut writer, &TitleCache { source, titles })?;

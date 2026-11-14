@@ -1,6 +1,6 @@
 pub(crate) mod owned_scan_plex;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use eframe::egui as eg;
 
@@ -375,45 +375,45 @@ impl crate::app::PexApp {
             return Vec::new();
         }
 
-        let mut titles = Vec::new();
-        titles.push(trimmed.to_string());
-
-        // Drop leading English articles so "The Return of Sabata" matches "Return of Sabata".
-        let lower = trimmed.to_ascii_lowercase();
-        for article in ["the ", "a ", "an "] {
-            if lower.starts_with(article) && trimmed.len() > article.len() {
-                let candidate = trimmed[article.len()..].trim_start();
-                if !candidate.is_empty() && candidate != trimmed {
-                    titles.push(candidate.to_string());
-                }
+        // Preserve lookup priority: full and article-stripped names precede spelling variants.
+        let without_article = trimmed.split_once(' ').and_then(|(first, rest)| {
+            ["the", "a", "an"]
+                .iter()
+                .any(|article| first.eq_ignore_ascii_case(article))
+                .then(|| rest.trim_start())
+        });
+        let titles = [Some(trimmed), without_article];
+        let mut names = Vec::new();
+        let mut add = |candidate: &str| {
+            let name = crate::app::utils::normalize_title(candidate);
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        };
+        for title in titles.into_iter().flatten() {
+            add(title);
+        }
+        for title in titles.into_iter().flatten() {
+            if let Some(candidate) = Self::variant_drop_g_suffix(title) {
+                add(&candidate);
+            }
+            if let Some((candidate, _)) = Self::trailing_title_year(title) {
+                add(candidate);
+            }
+            if let Some(candidate) = Self::variant_swap_word(title, "thru", "through") {
+                add(&candidate);
+            }
+            if let Some(candidate) = Self::variant_swap_word(title, "through", "thru") {
+                add(&candidate);
             }
         }
-
-        let mut extra: Vec<String> = Vec::new();
-        for existing in &titles {
-            if let Some(candidate) = Self::variant_drop_g_suffix(existing) {
-                extra.push(candidate);
-            }
-            if let Some((candidate, _)) = Self::trailing_title_year(existing) {
-                extra.push(candidate.to_string());
-            }
-            if let Some(candidate) = Self::variant_swap_word(existing, "thru", "through") {
-                extra.push(candidate);
-            }
-            if let Some(candidate) = Self::variant_swap_word(existing, "through", "thru") {
-                extra.push(candidate);
-            }
-        }
-        titles.extend(extra);
-        let mut seen = HashSet::new();
-        titles
-            .into_iter()
-            .map(|title| crate::app::utils::normalize_title(&title))
-            .filter(|name| !name.is_empty() && seen.insert(name.clone()))
-            .collect()
+        names
     }
 
     fn variant_drop_g_suffix(input: &str) -> Option<String> {
+        if !input.contains(['\'', '’']) {
+            return None;
+        }
         let mut changed = false;
         let mut words: Vec<String> = Vec::new();
         for token in input.split_whitespace() {
@@ -437,17 +437,24 @@ impl crate::app::PexApp {
     }
 
     fn variant_swap_word(input: &str, needle: &str, replacement: &str) -> Option<String> {
-        let mut changed = false;
-        let mut words: Vec<String> = Vec::new();
-        for token in input.split_whitespace() {
-            if token.eq_ignore_ascii_case(needle) {
-                words.push(replacement.to_string());
-                changed = true;
-            } else {
-                words.push(token.to_string());
-            }
+        if !input
+            .split_whitespace()
+            .any(|token| token.eq_ignore_ascii_case(needle))
+        {
+            return None;
         }
-        changed.then(|| words.join(" "))
+        let mut variant = String::with_capacity(input.len());
+        for token in input.split_whitespace() {
+            if !variant.is_empty() {
+                variant.push(' ');
+            }
+            variant.push_str(if token.eq_ignore_ascii_case(needle) {
+                replacement
+            } else {
+                token
+            });
+        }
+        Some(variant)
     }
 
     fn trailing_title_year(title: &str) -> Option<(&str, i32)> {

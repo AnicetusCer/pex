@@ -205,7 +205,11 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedLibrary {
     for (movie, entry) in entries.into_iter().enumerate() {
         let path = Path::new(&entry.file_path);
         let stem = path.file_stem().and_then(|s| s.to_str());
-        let titles = [Some(entry.title.as_str()), entry.original_title.as_deref()];
+        let original_title = entry
+            .original_title
+            .as_deref()
+            .filter(|name| *name != entry.title);
+        let titles = [Some(entry.title.as_str()), original_title];
         let year = entry.year.or_else(|| {
             titles
                 .into_iter()
@@ -217,7 +221,7 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedLibrary {
         let mut keys = HashMap::new();
         for (title, field) in [
             (Some(entry.title.as_str()), OwnedField::Title),
-            (entry.original_title.as_deref(), OwnedField::OriginalTitle),
+            (original_title, OwnedField::OriginalTitle),
             (stem, OwnedField::Filename),
             (
                 path.file_name().and_then(|s| s.to_str()),
@@ -582,6 +586,37 @@ pub(super) mod tests {
             "The Hunger Games: Mockingjay, Part 1",
             Some(2014)
         ));
+    }
+
+    #[test]
+    fn title_variants_keep_lookup_order_and_deduplicate_equivalent_spellings() {
+        assert_eq!(
+            PexApp::owned_title_variants("THE  Walkin’ THRU Town (1999)"),
+            [
+                "the walkin thru town 1999",
+                "walkin thru town 1999",
+                "the walking thru town 1999",
+                "the walkin thru town",
+                "the walkin through town 1999",
+                "walking thru town 1999",
+                "walkin thru town",
+                "walkin through town 1999",
+            ]
+        );
+        assert_eq!(
+            PexApp::owned_title_variants("A Way Through the Woods"),
+            [
+                "a way through the woods",
+                "way through the woods",
+                "a way thru the woods",
+                "way thru the woods"
+            ]
+        );
+        assert!(PexApp::owned_title_variants("...").is_empty());
+        assert_eq!(
+            PexApp::owned_title_variants("  L’Île&&Straße «İSTANBUL»  "),
+            ["lîle and and straße i\u{307}stanbul"]
+        );
     }
 
     #[test]

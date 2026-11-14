@@ -180,9 +180,6 @@ fn rgba_dimensions(file: &mut fs::File) -> std::io::Result<(u32, u32)> {
 /// or a raw rgba file we now write as: 8-byte header (u32 LE width, u32 LE height) + bytes.
 pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String> {
     let p = Path::new(path);
-    if !p.exists() {
-        return Err("not found".into());
-    }
     if let Some(ext) = p
         .extension()
         .and_then(|e| e.to_str())
@@ -208,27 +205,55 @@ pub fn load_rgba_raw_or_image(path: &str) -> Result<(u32, u32, Vec<u8>), String>
         .decode()
         .map_err(|e| format!("decode {}: {e}", p.display()))?;
     let (w, h) = img.dimensions();
-    let rgba = img.to_rgba8().to_vec();
+    let rgba = img.into_rgba8().into_raw();
     Ok((w, h, rgba))
 }
 
 pub fn find_any_by_key(key: &str) -> Option<PathBuf> {
     let poster_dir = poster_cache_dir();
-    let candidates = [
-        format!("{}.png", key),
-        format!("{}.jpg", key),
-        format!("{}.jpeg", key),
-        format!("{}.webp", key),
-        format!("{}.rgba", key),
-        format!("rgba_{}.rgba", key),
-    ];
-    for c in candidates {
-        let p = poster_dir.join(c);
-        if p.exists() {
-            return Some(p);
+    poster_names(key)
+        .map(|name| poster_dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn poster_names(key: &str) -> impl Iterator<Item = String> + '_ {
+    ["png", "jpg", "jpeg", "webp", "rgba"]
+        .into_iter()
+        .map(move |ext| format!("{key}.{ext}"))
+        .chain(std::iter::once_with(move || format!("rgba_{key}.rgba")))
+}
+
+pub(super) struct PosterFiles {
+    dir: PathBuf,
+    names: std::collections::HashSet<String>,
+}
+
+impl PosterFiles {
+    // One listing replaces up to six filesystem probes per missing poster.
+    pub(super) fn read(dir: PathBuf) -> std::io::Result<Self> {
+        let mut names = std::collections::HashSet::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            #[cfg(windows)]
+            let name = name.to_ascii_lowercase();
+            if has_poster_key(Path::new(&name)) {
+                let kind = entry.file_type()?;
+                if kind.is_file() || (kind.is_symlink() && entry.path().is_file()) {
+                    names.insert(name);
+                }
+            }
         }
+        Ok(Self { dir, names })
     }
-    None
+
+    pub(super) fn find(&self, key: &str) -> Option<PathBuf> {
+        poster_names(key)
+            .find(|name| self.names.contains(name))
+            .map(|name| self.dir.join(name))
+    }
 }
 
 /// Download, normalize to PNG and store in cache. Returns the stored path.
@@ -246,10 +271,7 @@ pub fn download_and_store(url: &str, key: &str) -> Result<PathBuf, String> {
     if !resp.status().is_success() {
         return Err(format!("HTTP {} for {url}", resp.status()));
     }
-    let body = resp
-        .bytes()
-        .map_err(|e| format!("read body: {e}"))?
-        .to_vec();
+    let body = resp.bytes().map_err(|e| format!("read body: {e}"))?;
 
     let img = image::load_from_memory(&body).map_err(|e| format!("decode poster: {e}"))?;
     let mut png_bytes = Vec::new();
@@ -529,6 +551,28 @@ fn preferred_cache_dir(configured: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_poster_lookup_preserves_format_preference_and_legacy_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let key = "00001111222233334444555566667777__s";
+        let names: Vec<_> = poster_names(key).collect();
+        for name in &names {
+            fs::write(dir.join(name), b"fixture").unwrap();
+        }
+        for name in &names {
+            let files = PosterFiles::read(dir.to_owned()).unwrap();
+            assert_eq!(files.find(key), Some(dir.join(name)));
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+        fs::create_dir(dir.join(&names[1])).unwrap();
+        fs::write(dir.join(format!("{key}.jpg.part")), b"incomplete").unwrap();
+        assert!(PosterFiles::read(dir.to_owned())
+            .unwrap()
+            .find(key)
+            .is_none());
+    }
 
     #[cfg(windows)]
     #[test]

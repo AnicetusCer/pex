@@ -38,3 +38,6 @@ path = "epg_explorer_tool/db_explorer.rs"
 [[bin]]
 name = "library_db_explorer"
 path = "epg_explorer_tool/library_db_explorer.rs"
+
+[dev-dependencies]
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

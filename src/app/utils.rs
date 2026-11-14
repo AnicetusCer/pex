@@ -10,26 +10,26 @@ pub(crate) fn normalize_title(s: &str) -> String {
                 // Drop apostrophes entirely so “Schindler's” matches “Schindlers”.
             }
             '&' => {
-                normalized.push(' ');
-                normalized.push_str("and");
-                normalized.push(' ');
+                if !normalized.is_empty() && !normalized.ends_with(' ') {
+                    normalized.push(' ');
+                }
+                normalized.push_str("and ");
             }
             ch if ch.is_alphanumeric() => {
                 for lower in ch.to_lowercase() {
                     normalized.push(lower);
                 }
             }
-            _ => {
+            _ if !normalized.is_empty() && !normalized.ends_with(' ') => {
                 normalized.push(' ');
             }
+            _ => {}
         }
     }
-
+    if normalized.ends_with(' ') {
+        normalized.pop();
+    }
     normalized
-        .split_whitespace()
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(crate) fn canonicalize_guid(raw: &str) -> Option<String> {

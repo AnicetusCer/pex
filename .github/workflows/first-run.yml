@@ -64,7 +64,7 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: '1'
           PEX_RENDERER: glow
           SNAPSHOT_TEST_ZIP: ${{ steps.bundle.outputs.zip }}
-        run: xvfb-run -a python3 tests/portable_snapshot_smoke.py "$SNAPSHOT_TEST_ZIP"
+        run: xvfb-run -a cargo test --locked --test portable_snapshot_smoke -- --ignored
       - name: Exercise packaged Windows app with read-only Plex files
         if: runner.os == 'Windows'
         env:
@@ -77,7 +77,7 @@ jobs:
             Select-Object -First 1
           if (!$driver) { throw 'Chrome software Vulkan driver not found on this runner.' }
           $env:SNAPSHOT_TEST_SWIFTSHADER = $driver.FullName
-          python tests/portable_snapshot_smoke.py "$env:SNAPSHOT_TEST_ZIP"
+          cargo test --locked --test portable_snapshot_smoke -- --ignored
       - uses: actions/upload-artifact@v4
         with:
           name: pex-portable-${{ matrix.platform }}-${{ steps.bundle.outputs.tag }}

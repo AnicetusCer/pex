@@ -143,7 +143,7 @@ fn read_guide_airings(
         let key = if thumb_url.is_empty() {
             String::new()
         } else {
-            url_to_cache_key(&thumb_url)
+            format!("{}__s", url_to_cache_key(&thumb_url))
         };
         let channel = row
             .get_ref(6)?
@@ -165,6 +165,7 @@ fn read_guide_airings(
             title,
             thumb_url,
             key,
+            cached_path: None,
             begins_at: Some(begins_at),
             year,
             guid,
@@ -648,6 +649,31 @@ fn recover_library(
     Err(format!("No usable library snapshot. Live file copy failed: {failure}. No completed, valid dated backup was available. {} Check the share, or use Retry owned scan after the recording finishes. You can also choose Guide only in Connect to Plex.", rejected.join("; ")))
 }
 
+fn attach_cached_posters(items: &mut [PrepItem]) {
+    if !items.iter().any(|item| !item.key.is_empty()) {
+        return;
+    }
+    let hotset = super::prefs::load_hotset_manifest().unwrap_or_default();
+    let files = super::cache::PosterFiles::read(super::cache::poster_cache_dir()).ok();
+    let mut paths = std::collections::HashMap::new();
+    for item in items.iter_mut().filter(|item| !item.key.is_empty()) {
+        let path = paths.entry(item.key.as_str()).or_insert_with(|| {
+            hotset
+                .get(&item.key)
+                .filter(|p| p.is_file())
+                .cloned()
+                .or_else(|| {
+                    match &files {
+                        Some(files) => files.find(&item.key),
+                        // A folder can allow opening known files while denying enumeration.
+                        None => super::cache::find_any_by_key(&item.key),
+                    }
+                })
+        });
+        item.cached_path.clone_from(path);
+    }
+}
+
 /// Spawn the background thread that prepares the poster list (no downloads here).
 pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
     std::thread::spawn(move || {
@@ -745,7 +771,9 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                 "Stage 2/4 - Read {count} film airings…"
             )));
         }) {
-            Ok(list) => {
+            Ok(mut list) => {
+                drop(conn);
+                attach_cached_posters(&mut list);
                 info!("prep: read {} film airings", list.len());
                 send(PrepMsg::Done(list));
             }
@@ -804,8 +832,6 @@ impl crate::app::PexApp {
                         // Convert manifest rows into UI rows
                         self.rating_states.clear();
                         self.channel_icon_textures.clear();
-                        let mut cached_posters = std::collections::HashMap::new();
-                        let hotset = self.last_hotset.take().unwrap_or_default();
                         self.rows = list
                             .into_iter()
                             .map(|item| {
@@ -816,43 +842,17 @@ impl crate::app::PexApp {
 
                                 let channel_raw = item
                                     .channel_call_sign
-                                    .clone()
                                     .or_else(|| item.channel_title.clone())
                                     .or_else(|| crate::app::utils::host_from_url(&item.thumb_url));
 
                                 let channel_title_original =
-                                    item.channel_title.clone().filter(|s| !s.trim().is_empty());
+                                    item.channel_title.filter(|s| !s.trim().is_empty());
 
-                                let normalized_title = channel_title_original
+                                let channel_display = channel_title_original
                                     .as_ref()
+                                    .or(channel_raw.as_ref())
                                     .map(|s| crate::app::utils::humanize_channel(s));
-
-                                let channel_display =
-                                    normalized_title.as_ref().cloned().or_else(|| {
-                                        channel_raw
-                                            .as_ref()
-                                            .map(|c| crate::app::utils::humanize_channel(c))
-                                    });
-
-                                let (small_k, path) = if item.key.is_empty() {
-                                    (String::new(), None)
-                                } else {
-                                    let key = Self::small_key(&item.key);
-                                    let path = cached_posters
-                                        .entry(key.clone())
-                                        .or_insert_with(|| {
-                                            hotset
-                                                .get(&key)
-                                                .filter(|p| p.is_file())
-                                                .cloned()
-                                                .or_else(|| {
-                                                    crate::app::cache::find_any_by_key(&key)
-                                                })
-                                        })
-                                        .clone();
-                                    (key, path)
-                                };
-                                let state = if path.is_some() {
+                                let state = if item.cached_path.is_some() {
                                     crate::app::PosterState::Cached
                                 } else {
                                     crate::app::PosterState::Pending
@@ -875,7 +875,7 @@ impl crate::app::PexApp {
                                     film_key: item.film_key,
                                     title: item.title,
                                     url: item.thumb_url,
-                                    key: small_k,
+                                    key: item.key,
                                     airing,
                                     year: item.year,
                                     channel: channel_display,
@@ -888,7 +888,7 @@ impl crate::app::PexApp {
                                     summary,
                                     audience_rating: item.audience_rating,
                                     critic_rating: item.critic_rating,
-                                    path,
+                                    path: item.cached_path,
                                     state,
                                     owned: false, // filled in by apply_owned_flags()
                                     owned_modified: None,

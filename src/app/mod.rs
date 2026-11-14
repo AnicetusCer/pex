@@ -2,7 +2,6 @@
 
 // ---- Standard lib imports ----
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -185,10 +184,10 @@ pub struct PexApp {
     prefs_dirty: bool,
     prefs_last_write: Instant,
 
-    last_hotset: Option<std::collections::HashMap<String, PathBuf>>,
-
     selected_idx: Option<usize>,
     grid_rows: Vec<Vec<usize>>,
+    grid_card_sizes: Vec<eg::Vec2>,
+    grid_card_scale: (f32, f32),
     scroll_to_idx: Option<usize>,
     // UI state
     detail_panel_width: f32,
@@ -283,10 +282,10 @@ impl Default for PexApp {
             prefs_dirty: false,
             prefs_last_write: Instant::now(),
 
-            last_hotset: prefs::load_hotset_manifest().ok(),
-
             selected_idx: None,
             grid_rows: Vec::new(),
+            grid_card_sizes: Vec::new(),
+            grid_card_scale: (0.0, 0.0),
             scroll_to_idx: None,
 
             detail_panel_width: 320.0,
@@ -456,12 +455,6 @@ impl PexApp {
         });
         self.selected_idx = same_film.or_else(|| visible.next());
         self.scroll_to_idx = self.selected_idx;
-    }
-    // ----- tiny helpers ----
-
-    /// Derive a “small” variant cache key from the base key (separate file entry).
-    fn small_key(base: &str) -> String {
-        format!("{base}__s")
     }
 }
 
@@ -649,9 +642,9 @@ impl PexApp {
         self.phase = Phase::Prefetching;
         self.phase_started = Instant::now();
         self.boot_phase = BootPhase::Starting;
-        self.last_hotset = crate::app::prefs::load_hotset_manifest().ok();
         self.selected_idx = None;
         self.grid_rows.clear();
+        self.grid_card_sizes.clear();
         self.scroll_to_idx = None;
         self.rating_states.clear();
         self.channel_icon_textures.clear();

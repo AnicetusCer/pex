@@ -117,12 +117,11 @@ ties_to_gui:
   prep.rs alignment:
     - Uses the same joins/filters as above.
     - Prefers `user_thumb_url`, falls back to `thumb_url`.
-    - Orders by `COALESCE(mi.begins_at, m.added_at)`.
+    - Orders by airing time, then metadata and media IDs.
     - Parses `mi.extra_data` for channel.
-    - Dedupes titles (case-insensitive) before sending `PrepMsg::Done(Vec<PrepItem>)`.
+    - Sends each airing in `PrepMsg::Done(Vec<PrepItem>)`.
   mod.rs expectations:
-    - Receives `PrepItem` and derives `small_key = base_cache_key + "__s"`.
-    - Calls `find_any_by_key(small_key)` to reattach cached path if present.
+    - Receives the small artwork key and cached path from the prep worker.
     - Prefetches missing small posters; UI does lazy texture upload.
 
 export_format:
