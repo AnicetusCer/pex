@@ -293,6 +293,125 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    #[test]
+    fn owned_badges_follow_the_connection_across_restarts() {
+        let root = tempfile::tempdir().unwrap();
+        for phase in [
+            "snapshot",
+            "offline-live",
+            "manual",
+            "guide-only",
+            "live",
+            "failed-live",
+        ] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::setup::tests::owned_source_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .current_dir(root.path())
+                .env("PEX_OWNED_SOURCE_FIXTURE", phase)
+                .env("PEX_BASE_DIR", root.path())
+                .env("HOME", root.path())
+                .env("USERPROFILE", root.path())
+                .env("APPDATA", root.path().join("roaming"))
+                .env("LOCALAPPDATA", root.path().join("local"))
+                .env("XDG_CONFIG_HOME", root.path().join("config"))
+                .env("XDG_CACHE_HOME", root.path().join("cache"))
+                .env_remove("PEX_CONFIG")
+                .env("PEX_DISABLE_PREFETCH", "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{phase}: {}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "parent supplies a clean portable directory across launches"]
+    fn owned_source_fixture() {
+        use crate::app::test_fixtures::{database, TestUi};
+        let phase = std::env::var("PEX_OWNED_SOURCE_FIXTURE").unwrap();
+        let root = std::env::current_dir().unwrap();
+        assert_eq!(config::base_dir(), root);
+        let guide = root.join("guide.db");
+        let folder = root.join("snapshot-A");
+        let offline = root
+            .join("offline-B")
+            .join("com.plexapp.plugins.library.db");
+        if phase == "snapshot" {
+            fs::create_dir(&folder).unwrap();
+            database(&guide);
+            database(&folder.join("com.plexapp.plugins.library.db-2020-01-01"));
+            config::save_connection_with_snapshots(&guide, Some(&offline), Some(&folder), false)
+                .unwrap();
+        }
+        if phase == "live" {
+            fs::create_dir(offline.parent().unwrap()).unwrap();
+            database(&offline);
+            config::save_connection_with_snapshots(&guide, Some(&offline), None, false).unwrap();
+        }
+        let mut ui = TestUi::default();
+        // The last launch has a title cache for the selected live source, but
+        // both that source and its mirror have gone away since the scan.
+        assert_eq!(ui.app.owned_keys.is_some(), phase == "failed-live");
+        if phase == "snapshot" || phase == "live" {
+            ui.frames_until("verified library", |a| {
+                a.rows.first().is_some_and(|r| r.owned && r.owned_hd)
+                    && a.owned_library.is_some()
+                    && !a.owned_scan_in_progress
+            });
+            assert!(root.join(".pex_cache/owned_titles_v4.json").is_file());
+            if phase == "live" {
+                fs::remove_file(&offline).unwrap();
+                fs::remove_file(config::local_library_db_path()).unwrap();
+                return;
+            }
+            ui.app.open_connection_setup();
+            ui.app.connection.use_snapshots = false;
+            ui.app.save_selected_connection(&ui.ctx);
+        }
+        ui.frames_until("library scan or guide-only mode", |a| {
+            !a.rows.is_empty() && !a.owned_scan_in_progress && a.owned_notice.is_some()
+        });
+        assert!(!ui.app.rows[0].owned && !ui.app.rows[0].owned_hd);
+        assert!(ui.app.owned_library.is_none());
+        ui.app.hide_owned = true;
+        assert!(!ui.app.filtered_guide().days.is_empty());
+        if phase == "guide-only" {
+            assert!(!ui.app.owned_scan_available);
+        } else {
+            assert!(ui
+                .app
+                .owned_notice
+                .as_deref()
+                .unwrap()
+                .contains("Owned scan error"));
+        }
+        match phase.as_str() {
+            "offline-live" => {
+                config::save_connection_with_snapshots(&guide, None, None, false).unwrap();
+            }
+            "manual" => {
+                assert!(ui
+                    .app
+                    .owned_notice
+                    .as_deref()
+                    .unwrap()
+                    .contains("previous connection"));
+                config::save_connection_with_snapshots(&guide, Some(&offline), None, true).unwrap();
+            }
+            "snapshot" | "guide-only" | "failed-live" => {}
+            _ => panic!("unexpected fixture phase"),
+        }
+    }
+
     fn frames_until(app: &mut PexApp, ctx: &eg::Context, condition: impl Fn(&PexApp) -> bool) {
         let start = Instant::now();
         loop {
@@ -388,6 +507,8 @@ mod tests {
                 INSERT INTO media_items (id,metadata_item_id,begins_at,extra_data) VALUES
                     (4,2,unixepoch('now')+10800,'{"at:channelCallSign":"A"}'),
                     (5,3,unixepoch('now')+14400,'{"at:channelCallSign":"B"}');
+                UPDATE media_items SET width=720,height=576 WHERE id=2;
+                UPDATE media_items SET width=1920,height=1080 WHERE id=3;
             "#).unwrap();
         }
         if scenario == "recording_schedule" {
@@ -409,9 +530,7 @@ mod tests {
             fs::copy(&library, config::local_library_db_path()).unwrap();
             fs::create_dir_all(portable.join(".pex_cache")).unwrap();
             fs::write(
-                portable
-                    .join(".pex_cache")
-                    .join(super::super::owned::ALL_SIDECAR),
+                portable.join(".pex_cache").join("owned_all_v3.txt"),
                 "fixture movie|2020\n",
             )
             .unwrap();
@@ -481,7 +600,7 @@ mod tests {
             "grouped_airings" => {
                 // The first showing is in the past. The next two are distinct
                 // showings of the same film, the fourth a remake sharing art.
-                app.rows[2].scheduled = true;
+                app.rows[2].scheduled = crate::app::scheduled::RecordingStatus::Exact;
                 assert_eq!(app.rows[1].url, "https://fixture.invalid/shared.jpg");
                 assert_eq!(app.rows[1].key, app.rows[3].key);
                 assert_ne!(app.rows[1].film_key, app.rows[3].film_key);
@@ -495,7 +614,7 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![1, 3, 4]
                 );
-                assert!(guide.scheduled_elsewhere.contains(&1));
+                assert!(guide.scheduled_elsewhere.contains_key(&1));
                 assert_eq!(app.filtered_showings_for(1), vec![1, 2]);
                 app.selected_channels.insert("B".into());
                 let guide = app.filtered_guide();
@@ -509,16 +628,38 @@ mod tests {
                 );
                 assert!(guide.scheduled_elsewhere.is_empty());
                 assert_eq!(app.filtered_showings_for(2), vec![2]);
+                app.selected_channels.clear();
+                app.filter_hd_only = true;
+                assert_eq!(app.filtered_showings_for(1), vec![2]);
+                app.filter_hd_only = false;
+                app.hide_owned = true;
+                for row in &mut app.rows {
+                    row.owned = true;
+                    row.owned_hd = false;
+                }
+                let upgrades: Vec<_> = app
+                    .filtered_guide()
+                    .days
+                    .into_iter()
+                    .flat_map(|(_, v)| v)
+                    .collect();
+                assert_eq!(upgrades, vec![2]);
             }
             "recording_schedule" => {
-                assert!(app.rows[0].scheduled);
+                assert_eq!(
+                    app.rows[0].scheduled,
+                    crate::app::scheduled::RecordingStatus::Exact
+                );
                 rusqlite::Connection::open(&library)
                     .unwrap()
                     .execute("DROP TABLE media_grabs", [])
                     .unwrap();
                 app.start_owned_scan(true);
                 frames_until(&mut app, &ctx, |app| !app.owned_scan_in_progress);
-                assert!(!app.rows[0].scheduled);
+                assert_eq!(
+                    app.rows[0].scheduled,
+                    crate::app::scheduled::RecordingStatus::None
+                );
                 assert!(app.rows[0].owned);
             }
             "snapshots_only" => {

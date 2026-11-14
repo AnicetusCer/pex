@@ -26,7 +26,7 @@ project:
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
     - "Advanced menu: clear/prune poster cache, refresh owned scan, backup/restore UI prefs."
-    - "DVR badges use the library snapshot. REC means this airing, Other REC means a different matching airing."
+    - "DVR badges use the library snapshot. REC and Other REC identify confirmed showings, REC? an unresolved channel, and Film REC a film-level request."
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)
@@ -61,7 +61,7 @@ project:
     Cargo.toml
   tips_for_new_work:
     - "Start from `src/app/mod.rs` to understand app state transitions; it wires prep, owned, filters, and UI."
-    - "`PosterRow` carries precomputed `owned_hd` + `broadcast_hd`; prefer using those instead of recomputing."
+    - "`PosterRow` carries precomputed `owned_hd` and `airing_quality`."
     - "Any new UI lives under `src/app/ui/`; keep expensive work off the paint path and return early when splash is active."
     - "Reuse helpers in `utils.rs` for date/ordinal logic and channel normalization."
     - "When touching caching logic, review `cache.rs` + `prefs.rs` to keep sidecars/prefs consistent."
@@ -96,7 +96,7 @@ runtime_model:
   threads_channels:
     - UI thread: egui paint/input, status updates; lazy texture uploads (GPU creation on UI only).
     - Prep thread: app::prep::spawn_poster_prep(tx).
-    - Owned-scan thread: reads Plex library metadata, hydrates owned_all / owned_hd sidecars, and records modified timestamps.
+    - Owned-scan thread: reads Plex library metadata, caches owned and HD keys together with their source, and records modified timestamps.
     - Prefetch pool (N = worker_count_ui): shared reqwest::blocking::Client (keep-alive + HTTP/2 via rustls).
     - Scheduled loader: read of the local mirror on the owned worker after library refresh (`app::scheduled::load_scheduled_index`).
   messages:
@@ -182,8 +182,7 @@ config:
       - detail_w: "persisted detail panel width"
     hotset_path: "<cache_dir>/hotset.txt"
     hotset_line: "<cache_key>\t<abs_path>"
-    owned_hd_sidecar: "<cache_dir>/owned_hd_v3.txt"
-    owned_all_sidecar: "<cache_dir>/owned_all_v3.txt"
+    owned_title_cache: "<cache_dir>/owned_titles_v4.json (source, keys and hd_keys written together). Live preloads require matching source. Snapshot and manual modes wait for scan validation."
     owned_modified: "in-memory map keyed by owned key (timestamp from Plex library)"
   env_flags:
     - PEX_DISABLE_PREFETCH=1
@@ -217,7 +216,7 @@ ui:
     - day_range: [2, 4, 5, 7, 14]
     - search: "substring on title"
   badges:
-    - "REC: displayed airing is scheduled. Other REC: another qualifying airing of the same film is scheduled."
+    - "REC or Other REC: displayed or alternate airing is scheduled. REC?: channel unresolved. Film REC: film-level request with no identified airing."
     - channel filter:
         state: "selected_channels: BTreeSet<String> (raw call signs)"
         behavior:
@@ -234,7 +233,7 @@ ui:
         dim_strength: 0.10..0.90
         rules:
           - "Do NOT dim when a better HD is airing"
-    - hd_only toggle: bool (row broadcast_hd must be true)
+    - hd_only toggle: bool (airing_quality must be Hd)
   sort:
     key: [time, title, channel, genre]
     desc: togglable
@@ -248,7 +247,7 @@ ui:
           - title(year)
           - channel display label • HD
           - HH:MM UTC
-        badges: "HD / HD ↑, REC / Other REC"
+        badges: "HD / HD ↑, REC / Other REC / REC? / Film REC"
       behavior:
         - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
         - "Apply filters first, then display one representative airing per film. Group on film_key independently from artwork."
@@ -261,17 +260,17 @@ ui:
         - poster preview (cached or placeholder)
         - channel icon (64px), long-title scroller, copy button
         - airing line and optional TMDb rating button
-        - "Other showings (N) lists additional qualifying airings with time, channel, HD/SD and scheduled state."
-        - "Owned Details shows the match reason, Plex titles, years and server paths with a copy action. Multiple matching movies are counted."
+        - "Other showings (N) lists additional qualifying airings with time, channel, HD/SD/unknown quality and recording status."
+        - "Owned Details shows the match reason, Plex titles, years and server paths with a copy action. Both adjacent years are considered together after identifier and exact title/year matches."
         - description and genres
 
 hd_logic:
   broadcast_hd_inference:
-    fn: "utils::infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool"
+    fn: "utils::airing_quality(width, height, resolution, call_sign, channel_title) -> AiringQuality (Hd, Sd or Unknown)"
   owned_hd_inference:
-    stored in owned_hd_v3.txt, recorded during owned scan (positive HD detections)
+    stored in owned_titles_v4.json with the source and owned keys
   better_hd_available_rule:
-    definition: "row.owned && !owned_is_hd && broadcast_hd"
+    definition: "row.owned && !row.owned_hd && row.airing_quality == AiringQuality::Hd"
     effects:
       - "Grid shows 'HD ↑' badge"
       - "Detail panel suppresses dimming message"

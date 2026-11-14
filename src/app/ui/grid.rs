@@ -1,4 +1,5 @@
 // src/app/ui/grid.rs
+use crate::app::types::AiringQuality;
 use eframe::egui as eg;
 
 pub const H_SPACING: f32 = 4.0;
@@ -125,9 +126,18 @@ impl crate::app::PexApp {
                                                 );
                                             }
 
-                                            if row.scheduled || guide.scheduled_elsewhere.contains(&idx) {
+                                            use crate::app::scheduled::RecordingStatus;
+                                            let other = guide.scheduled_elsewhere.get(&idx).copied().unwrap_or_default();
+                                            let badge = match row.scheduled.max(other) {
+                                                RecordingStatus::Exact if row.scheduled == RecordingStatus::Exact => Some(("REC", "Scheduled to record this showing")),
+                                                RecordingStatus::Exact => Some(("Other REC", "A different showing of this film is scheduled to record")),
+                                                RecordingStatus::Slot => Some(("REC?", "Recording scheduled; channel unconfirmed")),
+                                                RecordingStatus::Film => Some(("Film REC", "Recording requested for this film")),
+                                                RecordingStatus::None => None,
+                                            };
+                                            if let Some((label, tooltip)) = badge {
                                                 let pad = 6.0;
-                                                let size = eg::vec2(if row.scheduled { 44.0 } else { 64.0 }, 22.0);
+                                                let size = eg::vec2(if label.len() <= 4 { 44.0 } else { 76.0 }, 22.0);
                                                 let rec_rect = eg::Rect::from_min_size(
                                                     eg::pos2(
                                                         poster_rect.left() + pad,
@@ -150,17 +160,17 @@ impl crate::app::PexApp {
                                                 ui.painter().text(
                                                     rec_rect.center(),
                                                     eg::Align2::CENTER_CENTER,
-                                                    if row.scheduled { "REC" } else { "Other REC" },
+                                                    label,
                                                     eg::FontId::monospace(13.0),
                                                     eg::Color32::WHITE,
                                                 );
                                                 ui.interact(rec_rect, id.with("rec"), eg::Sense::hover()).on_hover_text(
-                                                    if row.scheduled { "Scheduled to record this showing" } else { "A different showing of this film is scheduled to record" }
+                                                    tooltip
                                                 );
                                             }
 
                                             // --- Compute statuses (needed for badges & dimming) ---
-                                            let broadcast_hd = Self::row_broadcast_hd(row);
+                                            let broadcast_hd = row.airing_quality == AiringQuality::Hd;
                                             let owned_is_hd = row.owned_hd;
                                             let better_hd_available =
                                                 row.owned && !owned_is_hd && broadcast_hd;
@@ -201,10 +211,10 @@ impl crate::app::PexApp {
                                                 .as_deref()
                                                 .map(crate::app::utils::humanize_channel)
                                                 .unwrap_or_else(|| "—".into());
-                                            let line2 = if broadcast_hd {
-                                                format!("{ch} • HD")
-                                            } else {
-                                                ch
+                                            let line2 = match row.airing_quality {
+                                                AiringQuality::Hd => format!("{ch} • HD"),
+                                                AiringQuality::Sd => format!("{ch} • SD"),
+                                                AiringQuality::Unknown => ch,
                                             };
                                             let tm = row
                                                 .airing

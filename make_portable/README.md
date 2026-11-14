@@ -16,9 +16,11 @@ Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the
 
 The guide opens when listings are ready. Posters load in the background, and films without artwork still show their title and airtime. Your date range and filters determine which showing appears on each film’s card.
 
-Select a film and expand **Other showings (N)** for the additional matching airings, with channel, UTC time and HD/SD. **REC** on the card means Plex has scheduled that showing. **Other REC** means one of the additional showings is scheduled.
+Select a film and expand **Other showings (N)** for the channel, UTC time and picture quality of each additional airing. PEX checks the airing’s dimensions or resolution and can also recognise HD and SD in station names. **Airing quality unknown** means the guide lacks enough information. **HD only** shows confirmed HD airings.
 
-For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. If multiple Plex movies match, PEX shows the count and lists the matches. **Copy file path** copies the path as Plex sees it on the server.
+**REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. If Plex supplies a recording time but leaves the channel unclear, **REC?** marks the time slot. **Film REC** means Plex has a recording request for the film without a confirmed showing.
+
+For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. A matching Plex identifier takes priority, followed by a matching title and year. If the only title matches are a year earlier and a year later, PEX lists both. **Copy file path** copies the path as Plex sees it on the server.
 
 ## Optional film ratings
 
@@ -33,6 +35,8 @@ In **Live library** mode, **Refresh owned scan** checks the database and its SQL
 If Plex starts writing during the transfer, PEX limits the read to the file sizes it saw at the start and discards a copy that fails its consistency checks. When the live copy is unavailable, PEX keeps a usable previous mirror from the configured source. If there is no usable mirror, PEX looks for an existing, completed `com.plexapp.plugins.library.db-YYYY-MM-DD` backup alongside the live library. It tries the newest dates first and checks that each candidate is complete, stable and readable as a Plex library.
 
 The guide shows the source and date used for owned and scheduled recording badges. A backup can predate new films, recording requests or cancellations. Choose **Retry owned scan** to check the live library again. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
+
+Saved owned badges belong to the library that produced them. After switching libraries, or upgrading from a version with an older badge cache, the new library’s first successful scan fills in its badges.
 
 ## Refresh from completed snapshots
 

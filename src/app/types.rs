@@ -78,6 +78,7 @@ impl OwnedCandidates {
 
 #[derive(Clone, Debug)]
 pub struct PrepItem {
+    pub airing_quality: AiringQuality,
     pub film_key: String,
     pub title: String,
     pub thumb_url: String,
@@ -88,6 +89,7 @@ pub struct PrepItem {
     pub channel_call_sign: Option<String>,
     pub channel_title: Option<String>,
     pub channel_thumb: Option<String>,
+    pub guide_channel: super::scheduled::GuideChannel,
     pub guid: Option<String>,
     pub summary: Option<String>,
     pub audience_rating: Option<f32>,
@@ -220,6 +222,7 @@ pub struct PosterRow {
     pub channel_raw: Option<String>,
     pub channel_title: Option<String>,
     pub channel_thumb: Option<String>,
+    pub guide_channel: super::scheduled::GuideChannel,
     pub genres: Vec<String>,
     pub guid: Option<String>,
     pub summary: Option<String>,
@@ -231,8 +234,25 @@ pub struct PosterRow {
     pub owned: bool,
     pub owned_modified: Option<u64>,
     pub owned_hd: bool,
-    pub broadcast_hd: bool,
-    pub scheduled: bool,
+    pub airing_quality: AiringQuality,
+    pub scheduled: super::scheduled::RecordingStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiringQuality {
+    Hd,
+    Sd,
+    Unknown,
+}
+
+impl AiringQuality {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Hd => "Airing HD",
+            Self::Sd => "Airing SD",
+            Self::Unknown => "Airing quality unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

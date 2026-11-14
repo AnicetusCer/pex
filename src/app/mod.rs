@@ -2,7 +2,6 @@
 
 // ---- Standard lib imports ----
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -18,7 +17,7 @@ pub mod cache;
 use crate::app::filters::{
     parse_owned_cutoff, OWNED_BEFORE_CUTOFF_DEFAULT_STR, OWNED_BEFORE_CUTOFF_DEFAULT_TS,
 };
-use crate::app::scheduled::{ScheduledIndex, ScheduledMatchKind};
+use crate::app::scheduled::ScheduledIndex;
 use crate::config::load_config;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -130,6 +129,7 @@ pub struct PexApp {
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
     owned_library: Option<types::OwnedLibrary>,
+    owned_source: Option<owned::LibrarySource>,
     owned_hd_keys: Option<HashSet<String>>,
     owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
@@ -197,9 +197,9 @@ pub struct PexApp {
 impl Default for PexApp {
     fn default() -> Self {
         let cfg = load_config();
-        // The title sidecars alone do not identify which folder supplied their snapshot.
-        // In snapshot mode let the worker verify provenance before displaying badges.
-        let preload_owned = !cfg.guide_only && cfg.library_snapshot_dir.is_none();
+        let owned_source = owned::LibrarySource::configured(&cfg);
+        let (owned_keys, owned_hd_keys) =
+            owned::title_cache::preload(&cache::cache_dir(), owned_source.as_ref()).unzip();
         Self {
             rows: Vec::new(),
 
@@ -232,17 +232,10 @@ impl Default for PexApp {
             dim_strength_ui: 0.8, // stronger dimming by default
 
             owned_rx: None,
-            owned_keys: if preload_owned {
-                Self::load_owned_keys_sidecar()
-            } else {
-                None
-            },
+            owned_keys,
+            owned_hd_keys,
             owned_library: None,
-            owned_hd_keys: if preload_owned {
-                Self::load_owned_hd_sidecar()
-            } else {
-                None
-            },
+            owned_source,
             owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
             owned_scan_available: false,
@@ -471,57 +464,19 @@ impl PexApp {
     fn small_key(base: &str) -> String {
         format!("{base}__s")
     }
-
-    /// Determine whether the airing metadata implies an HD broadcast.
-    pub(crate) const fn row_broadcast_hd(row: &PosterRow) -> bool {
-        row.broadcast_hd
-    }
-
-    fn load_owned_keys_sidecar() -> Option<HashSet<String>> {
-        Self::load_sidecar_file(owned::ALL_SIDECAR)
-    }
-
-    fn load_owned_hd_sidecar() -> Option<HashSet<String>> {
-        Self::load_sidecar_file(owned::HD_SIDECAR)
-    }
-
-    fn load_sidecar_file(file_name: &str) -> Option<HashSet<String>> {
-        let path = crate::app::cache::cache_dir().join(file_name);
-        let text = fs::read_to_string(path).ok()?;
-        let mut set = HashSet::new();
-        for line in text.lines().map(str::trim) {
-            if !line.is_empty() {
-                set.insert(line.to_owned());
-            }
-        }
-        Some(set)
-    }
 }
 
 impl PexApp {
     fn apply_scheduled_flags(&mut self) {
-        self.scheduled_match_stats = ScheduledMatchStats::default();
-        for row in &mut self.rows {
-            row.scheduled = false;
-        }
-        let Some(index) = self.scheduled_index.as_ref() else {
-            self.scheduled_match_stats.misses = self.rows.len();
-            return;
-        };
-        for row in &mut self.rows {
-            match index.match_kind(row.guid.as_deref(), &row.title, row.year, row.airing) {
-                ScheduledMatchKind::Guid => {
-                    row.scheduled = true;
-                    self.scheduled_match_stats.by_guid += 1;
-                }
-                ScheduledMatchKind::TitleSlot => {
-                    row.scheduled = true;
-                    self.scheduled_match_stats.by_title_slot += 1;
-                }
-                ScheduledMatchKind::None => {
-                    row.scheduled = false;
-                    self.scheduled_match_stats.misses += 1;
-                }
+        if let Some(index) = &self.scheduled_index {
+            self.scheduled_match_stats = index.apply(&mut self.rows);
+        } else {
+            self.scheduled_match_stats = ScheduledMatchStats {
+                misses: self.rows.len(),
+                ..Default::default()
+            };
+            for row in &mut self.rows {
+                row.scheduled = Default::default();
             }
         }
     }

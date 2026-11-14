@@ -226,44 +226,55 @@ pub fn humanize_channel(raw: &str) -> String {
     }
 }
 
-/// Very cheap HD inference from tags/channel.
-/// We treat >=720p or “HD/UHD/4K/HDR” as HD. No serde; all substring checks.
-pub fn infer_broadcast_hd(tags_genre: Option<&str>, channel: Option<&str>) -> bool {
-    // Tags are strongest: UHD/4K/HDR/1080/720 -> HD
-    if let Some(tags) = tags_genre {
-        let t = tags.to_ascii_lowercase();
-        for needle in [
-            "2160", "uhd", "4k", "hdr", "1080", "720", " hd ", "(hd)", "[hd]",
-        ] {
-            if t.contains(needle) {
-                return true;
-            }
-        }
+/// Dimensions describe the airing itself. Older guides may only supply a
+/// resolution label or mark the station as HD/SD in its name or call sign.
+pub(super) fn airing_quality(
+    width: Option<i64>,
+    height: Option<i64>,
+    resolution: Option<&str>,
+    call_sign: Option<&str>,
+    channel_title: Option<&str>,
+) -> super::types::AiringQuality {
+    use super::types::AiringQuality::{Hd, Sd, Unknown};
+
+    if let Some(height) = height.filter(|&n| n > 0) {
+        return if height >= 720 { Hd } else { Sd };
     }
 
-    // Channel-name checks (support "ITV HD", "ITVHD", "ITVHDG", "BBCONEHD", etc.)
-    if let Some(ch) = channel {
-        let spaced = ch.trim().to_ascii_lowercase();
-        if spaced.ends_with(" hd") || spaced.contains(" hd ") {
-            return true;
+    let from_resolution = |label: &str| match label {
+        "hd" | "uhd" | "720" | "720i" | "720p" | "1080" | "1080i" | "1080p" | "2160" | "2160p"
+        | "4k" | "4320" | "4320p" | "8k" => Some(Hd),
+        "sd" | "240" | "240p" | "360" | "360p" | "480" | "480i" | "480p" | "576" | "576i"
+        | "576p" => Some(Sd),
+        _ => None,
+    };
+    // Width alone is sufficient for the usual HD and SD broadcast formats.
+    // Intermediate widths are ambiguous without the height.
+    match width {
+        Some(n) if n >= 1280 => return Hd,
+        Some(1..=720) => return Sd,
+        _ => {}
+    }
+    if let Some(quality) = resolution.and_then(|s| from_resolution(&s.trim().to_ascii_lowercase()))
+    {
+        return quality;
+    }
+    for name in [call_sign, channel_title].into_iter().flatten() {
+        let name = name.trim().to_ascii_lowercase();
+        if let Some(quality) = name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| token.chars().any(|c| c.is_ascii_alphabetic()))
+            .find_map(from_resolution)
+        {
+            return quality;
         }
-        let compact: String = spaced
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
-        let cc = compact.to_ascii_uppercase();
-
-        // UHD/4K anywhere → HD
-        if cc.contains("UHD") || cc.contains("4K") {
-            return true;
+        // Some EPG providers omit the space, e.g. BBCONEHD or SkyCinemaSD.
+        if name.ends_with("hd") || name.ends_with("4k") {
+            return Hd;
         }
-        // "HD" token near the end (optionally followed by up to 3 region letters: HD, HDA, HDG, HDUK, etc.)
-        if let Some(pos) = cc.rfind("HD") {
-            if cc.len().saturating_sub(pos + 2) <= 3 {
-                return true;
-            }
+        if name.ends_with("sd") {
+            return Sd;
         }
     }
-
-    false
+    Unknown
 }

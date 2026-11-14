@@ -1,6 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -18,7 +17,12 @@ use crate::config::local_library_db_path;
 pub struct OwnedScanPlex;
 
 impl OwnedScanPlex {
-    pub(crate) fn spawn_scan(tx: Sender<OwnedMsg>, force_copy: bool) {
+    pub(super) fn spawn_scan(
+        tx: Sender<OwnedMsg>,
+        force_copy: bool,
+        source: super::LibrarySource,
+        configured_databases: Vec<std::path::PathBuf>,
+    ) {
         thread::spawn(move || {
             use OwnedMsg::{Done, Error, Info};
 
@@ -29,9 +33,14 @@ impl OwnedScanPlex {
             let db_path = local_library_db_path();
             // Refresh and read the same mirror on one worker. The UI remains
             // usable during a slow NAS copy, including an explicit refresh.
-            let snapshot = match crate::app::prep::sync_library_db_from_source(force_copy, |s| {
-                let _ = tx.send(Info(s));
-            }) {
+            let snapshot = match crate::app::prep::sync_library_db_from_source(
+                &source,
+                &configured_databases,
+                force_copy,
+                |s| {
+                    let _ = tx.send(Info(s));
+                },
+            ) {
                 Ok(message) => {
                     let _ = tx.send(OwnedMsg::Snapshot(message.clone()));
                     message
@@ -44,13 +53,6 @@ impl OwnedScanPlex {
             let _ = tx.send(OwnedMsg::Scheduled(
                 crate::app::scheduled::load_scheduled_index(),
             ));
-            if !db_path.exists() {
-                let cfg = crate::config::load_config();
-                if cfg.plex_library_db_source.is_none() && cfg.library_snapshot_dir.is_none() {
-                    let _ = tx.send(Done(Box::default()));
-                    return;
-                }
-            }
             let conn = match Connection::open_with_flags(
                 &db_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -70,16 +72,8 @@ impl OwnedScanPlex {
                 Ok(entries) => {
                     let mut index = index_owned_entries(entries);
                     index.library.snapshot = Some(snapshot);
-                    let cache_dir = cache::cache_dir();
-                    if let Err(err) =
-                        persist_owned_sidecar(&cache_dir.join(super::ALL_SIDECAR), &index.keys)
-                    {
-                        warn!("Failed to persist owned sidecar: {err}");
-                    }
-                    if let Err(err) =
-                        persist_owned_sidecar(&cache_dir.join(super::HD_SIDECAR), &index.hd_keys)
-                    {
-                        warn!("Failed to persist owned HD sidecar: {err}");
+                    if let Err(e) = super::title_cache::save(&cache::cache_dir(), &source, &index) {
+                        warn!("Could not save the owned title cache: {e}");
                     }
 
                     let _ = tx.send(Done(Box::new(index)));
@@ -331,16 +325,6 @@ fn is_hd(width: Option<u32>, height: Option<u32>) -> bool {
     width.map(|w| w >= 1280).unwrap_or(false) || height.map(|h| h >= 720).unwrap_or(false)
 }
 
-fn persist_owned_sidecar(path: &Path, owned_keys: &HashSet<String>) -> Result<(), String> {
-    let mut keys: Vec<&String> = owned_keys.iter().collect();
-    keys.sort_unstable();
-    fs::write(
-        path,
-        keys.iter().map(|k| format!("{k}\n")).collect::<String>(),
-    )
-    .map_err(|err| format!("Failed to write {}: {err}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +355,48 @@ mod tests {
     }
 
     #[test]
+    fn both_adjacent_years_are_equal_candidates_and_share_hd_evidence() {
+        use super::super::{lookup, MatchMethod};
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../test_fixtures.sql"))
+            .unwrap();
+        db.execute_batch("
+            UPDATE metadata_items SET title='The Return', year=2024;
+            UPDATE media_items SET width=720, height=576;
+            INSERT INTO metadata_items(id,title,year,metadata_type) VALUES(2,'The Return',2026,1);
+            INSERT INTO media_items(id,metadata_item_id,width,height) VALUES(2,2,1920,1080);
+            INSERT INTO media_parts(id,media_item_id,file) VALUES(2,2,'/media/The Return (2026).mkv');
+        ").unwrap();
+        let scan = index_owned_entries(collect_plex_owned_entries(&db).unwrap());
+        let find = |y, lib| {
+            lookup(
+                "The Return",
+                Some(y),
+                None,
+                &scan.keys,
+                Some(&scan.hd_keys),
+                lib,
+            )
+            .unwrap()
+        };
+        let matched = find(2025, Some(&scan.library));
+        assert!(matched.method == MatchMethod::AdjacentYear);
+        assert_eq!(
+            matched
+                .candidates
+                .iter()
+                .map(|c| scan.library.movies[c.movie].year)
+                .collect::<Vec<_>>(),
+            [Some(2024), Some(2026)]
+        );
+        assert!(matched.hd && find(2025, None).hd);
+        let exact = find(2024, Some(&scan.library));
+        assert!(exact.method == MatchMethod::ExactYear);
+        assert_eq!(exact.candidates.len(), 1);
+        assert!(!exact.hd && !find(2024, None).hd);
+    }
+
+    #[test]
     fn scan_counts_distinct_movies_and_keeps_the_file_and_field_behind_each_match() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("../test_fixtures.sql"))
@@ -392,11 +418,19 @@ mod tests {
         assert_eq!(scan.library.movies.len(), 2);
         assert!(scan.keys.len() > 2);
         let find = |title, year, guid| {
-            super::super::lookup(title, year, guid, &scan.keys, Some(&scan.library)).unwrap()
+            super::super::lookup(
+                title,
+                year,
+                guid,
+                &scan.keys,
+                Some(&scan.hd_keys),
+                Some(&scan.library),
+            )
+            .unwrap()
         };
         // GUID wins over the conflicting title/year. The chosen part is the HD copy.
         let by_id = find("Fixture Movie", Some(1999), Some("IMDB://tt1234567"));
-        assert!(by_id.title_key.is_none());
+        assert!(by_id.method == super::super::MatchMethod::Id);
         for (found, field) in [
             (by_id, OwnedField::Guid),
             (
@@ -406,7 +440,7 @@ mod tests {
             (find("Evening Film", Some(2021), None), OwnedField::Filename),
             (find("Fixture Movie", Some(2020), None), OwnedField::Title),
         ] {
-            let [candidate] = found.candidates else {
+            let [candidate] = found.candidates.as_ref() else {
                 panic!("expected one movie")
             };
             assert_eq!(candidate.field, field);
@@ -418,7 +452,15 @@ mod tests {
         let ambiguous = find("Fixture Movie", None, None);
         assert_eq!(ambiguous.candidates.len(), 2);
         assert_ne!(ambiguous.candidates[0].movie, ambiguous.candidates[1].movie);
-        let cached = super::super::lookup("Fixture Movie", None, None, &scan.keys, None).unwrap();
+        let cached = super::super::lookup(
+            "Fixture Movie",
+            None,
+            None,
+            &scan.keys,
+            Some(&scan.hd_keys),
+            None,
+        )
+        .unwrap();
         assert!(cached.candidates.is_empty());
     }
 

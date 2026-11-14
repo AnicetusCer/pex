@@ -233,6 +233,7 @@ mod tests {
             channel_raw: None,
             channel_title: None,
             channel_thumb: None,
+            guide_channel: Default::default(),
             genres: Vec::new(),
             guid: None,
             summary: None,
@@ -244,8 +245,8 @@ mod tests {
             owned: false,
             owned_modified: None,
             owned_hd: false,
-            broadcast_hd: false,
-            scheduled: false,
+            airing_quality: crate::app::types::AiringQuality::Unknown,
+            scheduled: Default::default(),
         }
     }
 

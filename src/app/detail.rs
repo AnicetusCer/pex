@@ -1,5 +1,5 @@
 // src/app/detail.rs
-use crate::app::types::RatingState;
+use crate::app::types::{AiringQuality, RatingState};
 use eframe::egui as eg;
 
 impl crate::app::PexApp {
@@ -44,7 +44,7 @@ impl crate::app::PexApp {
                             return;
                         };
 
-                        let broadcast_hd = Self::row_broadcast_hd(row);
+                        let airing_quality = row.airing_quality;
                         let owned_is_hd = row.owned_hd;
 
                         // Snapshot values so we can release the immutable borrow on self.rows
@@ -136,9 +136,9 @@ impl crate::app::PexApp {
                             ui.weak(format!("{channel_display}  •  {}", format_airtime(airing)));
                         }
 
-                        if scheduled {
+                        if let Some(label) = scheduled.detail() {
                             ui.label(
-                                eg::RichText::new("Scheduled to record")
+                                eg::RichText::new(label)
                                     .color(eg::Color32::from_rgb(220, 80, 80))
                                     .strong(),
                             );
@@ -161,13 +161,9 @@ impl crate::app::PexApp {
                                             channel_name(other)
                                         ));
                                         ui.horizontal_wrapped(|ui| {
-                                            ui.weak(if Self::row_broadcast_hd(other) {
-                                                "Airing HD"
-                                            } else {
-                                                "Airing SD"
-                                            });
-                                            if other.scheduled {
-                                                ui.strong("Scheduled to record");
+                                            ui.weak(other.airing_quality.label());
+                                            if let Some(label) = other.scheduled.detail() {
+                                                ui.strong(label);
                                             }
                                         });
                                     }
@@ -242,13 +238,8 @@ impl crate::app::PexApp {
                                 // Airing chip (HD/SD)
                                 ui.add(
                                     eg::Label::new(
-                                        eg::RichText::new(if broadcast_hd {
-                                            "Airing HD"
-                                        } else {
-                                            "Airing SD"
-                                        })
-                                        .color(
-                                            if broadcast_hd {
+                                        eg::RichText::new(airing_quality.label()).color(
+                                            if airing_quality == AiringQuality::Hd {
                                                 eg::Color32::from_rgb(120, 180, 255)
                                             } else {
                                                 eg::Color32::GRAY

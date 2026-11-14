@@ -1,6 +1,6 @@
 // src/app/filters.rs
 use chrono::{NaiveDate, TimeZone, Utc};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
 use super::SortKey;
@@ -16,7 +16,7 @@ pub(crate) fn parse_owned_cutoff(input: &str) -> Option<u64> {
 
 pub(super) struct FilteredGuide {
     pub(super) days: Vec<(i64, Vec<usize>)>,
-    pub(super) scheduled_elsewhere: HashSet<usize>,
+    pub(super) scheduled_elsewhere: HashMap<usize, super::scheduled::RecordingStatus>,
 }
 
 impl crate::app::PexApp {
@@ -31,19 +31,21 @@ impl crate::app::PexApp {
                 .duration_since(now)
                 .unwrap_or_else(|past| past.duration());
             let rank = (starts < now, distance, idx, starts);
-            let (best, scheduled) = films.entry(row.film_key.as_str()).or_insert((rank, false));
+            let (best, scheduled) = films
+                .entry(row.film_key.as_str())
+                .or_insert((rank, super::scheduled::RecordingStatus::None));
             *best = (*best).min(rank);
-            *scheduled |= row.scheduled;
+            *scheduled = (*scheduled).max(row.scheduled);
         }
 
         let mut days = BTreeMap::<i64, Vec<usize>>::new();
-        let mut scheduled_elsewhere = HashSet::new();
+        let mut scheduled_elsewhere = HashMap::new();
         for ((_, _, idx, starts), scheduled) in films.into_values() {
             let row = &self.rows[idx];
             let day = crate::app::utils::day_bucket(starts);
             days.entry(day).or_default().push(idx);
-            if scheduled && !row.scheduled {
-                scheduled_elsewhere.insert(idx);
+            if scheduled > row.scheduled {
+                scheduled_elsewhere.insert(idx, scheduled);
             }
         }
         for idxs in days.values_mut() {
@@ -116,7 +118,7 @@ impl crate::app::PexApp {
             {
                 return None;
             }
-            let hd = Self::row_broadcast_hd(row);
+            let hd = row.airing_quality == super::types::AiringQuality::Hd;
             if self.filter_hd_only && !hd {
                 return None;
             }

@@ -9,39 +9,50 @@ use crate::app::types::{
     OwnedCandidate, OwnedCandidates, OwnedField, OwnedLibrary, OwnedMsg, PosterRow,
 };
 
-// v1 sidecars contain franchise prefixes and synthetic years indistinguishable from real titles.
-pub(super) const ALL_SIDECAR: &str = "owned_all_v3.txt";
-pub(super) const HD_SIDECAR: &str = "owned_hd_v3.txt";
+pub(super) mod title_cache;
+pub(super) use title_cache::LibrarySource;
 
-struct OwnedMatch<'a> {
-    // A GUID match always comes from the scanned library, even if a title also matches.
-    title_key: Option<String>,
-    candidates: &'a [OwnedCandidate],
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchMethod {
+    Id,
+    ExactYear,
+    AdjacentYear,
+    ShortTitle,
+    Undated,
 }
 
-impl OwnedMatch<'_> {
-    fn explanation(&self, guide_year: Option<i32>) -> &'static str {
-        let Some(key) = &self.title_key else {
-            return "Matched by the same Plex metadata identifier.";
-        };
-        if key.ends_with(":any") || key.ends_with(":undated") {
-            "Matched by name. A release year was unavailable."
-        } else if key.starts_with("bare:")
-            || key.starts_with("credited:")
-            || key.starts_with("prefix:")
-        {
-            "Matched a shortened title and the same release year."
-        } else if key
-            .rsplit_once(':')
-            .and_then(|(_, y)| y.parse::<i32>().ok())
-            .zip(guide_year)
-            .is_some_and(|(year, guide_year)| year != guide_year)
-        {
-            "Matched by name with a one-year release date difference."
-        } else {
-            "Matched by name and release year."
+impl MatchMethod {
+    fn explanation(self) -> &'static str {
+        match self {
+            Self::Id => "Matched by the same Plex metadata identifier.",
+            Self::Undated => "Matched by name. A release year was unavailable.",
+            Self::ShortTitle => "Matched a shortened title and the same release year.",
+            Self::AdjacentYear => "Matched by name with a one-year release date difference.",
+            Self::ExactYear => "Matched by name and release year.",
         }
     }
+}
+
+struct TitleMatch {
+    key: String,
+    // Adjacent release years have equal rank. Keep both if both exist.
+    other: Option<String>,
+    method: MatchMethod,
+}
+
+impl TitleMatch {
+    fn new(key: String, method: MatchMethod) -> Self {
+        Self {
+            key,
+            other: None,
+            method,
+        }
+    }
+}
+struct OwnedMatch<'a> {
+    method: MatchMethod,
+    candidates: std::borrow::Cow<'a, [OwnedCandidate]>,
+    hd: bool,
 }
 
 fn lookup<'a>(
@@ -49,24 +60,50 @@ fn lookup<'a>(
     year: Option<i32>,
     guid: Option<&str>,
     keys: &HashSet<String>,
+    hd_keys: Option<&HashSet<String>>,
     library: Option<&'a OwnedLibrary>,
 ) -> Option<OwnedMatch<'a>> {
-    if let Some(candidates) = library.and_then(|lib| {
-        let guid = crate::app::utils::canonicalize_guid(guid?)?;
-        lib.by_guid.get(&guid)
-    }) {
-        return Some(OwnedMatch {
-            title_key: None,
-            candidates: candidates.as_slice(),
-        });
+    use std::borrow::Cow;
+    if let Some(lib) = library {
+        if let Some(candidates) = guid
+            .and_then(crate::app::utils::canonicalize_guid)
+            .and_then(|id| lib.by_guid.get(&id))
+        {
+            let found = candidates.as_slice();
+            return Some(OwnedMatch {
+                method: MatchMethod::Id,
+                hd: found.iter().any(|c| lib.movies[c.movie].hd),
+                candidates: Cow::Borrowed(found),
+            });
+        }
     }
-    let key = crate::app::PexApp::match_owned_title(title, year, keys)?;
-    let candidates = library
-        .and_then(|lib| lib.by_title.get(&key))
-        .map_or(&[][..], OwnedCandidates::as_slice);
+    let matched = crate::app::PexApp::match_owned_title(title, year, keys)?;
+    let get = |key: &str| {
+        library
+            .and_then(|lib| lib.by_title.get(key))
+            .map_or(&[][..], OwnedCandidates::as_slice)
+    };
+    let primary = get(&matched.key);
+    let secondary = matched.other.as_deref().map_or(&[][..], get);
+    let candidates = if secondary.is_empty() {
+        Cow::Borrowed(primary)
+    } else {
+        let mut merged = [primary, secondary].concat();
+        merged.sort_by_key(|candidate| candidate.movie);
+        merged.dedup_by_key(|candidate| candidate.movie);
+        Cow::Owned(merged)
+    };
+    let hd = hd_keys.is_some_and(|hd| {
+        hd.contains(&matched.key)
+            || matched
+                .other
+                .as_ref()
+                .is_some_and(|other| hd.contains(other))
+    });
     Some(OwnedMatch {
-        title_key: Some(key),
+        method: matched.method,
         candidates,
+        hd,
     })
 }
 
@@ -77,11 +114,19 @@ impl crate::app::PexApp {
             return;
         }
         let cfg = crate::config::load_config();
-        if cfg.guide_only
-            || (cfg.plex_library_db_source.is_none()
-                && cfg.library_snapshot_dir.is_none()
-                && !crate::config::local_library_db_path().exists())
-        {
+        let source = LibrarySource::configured(&cfg);
+        if source != self.owned_source {
+            self.owned_source.clone_from(&source);
+            self.owned_keys = None;
+            self.owned_hd_keys = None;
+            self.owned_library = None;
+            self.scheduled_index = None;
+            self.apply_owned_flags();
+            self.apply_scheduled_flags();
+        }
+        let Some(source) =
+            source.filter(|s| !matches!(s, LibrarySource::Manual(path) if !path.exists()))
+        else {
             self.owned_scan_available = false;
             self.owned_notice = Some("Guide only: owned and recording badges are disabled. Use Connect to Plex to enable them.".into());
             self.owned_keys = None;
@@ -91,7 +136,7 @@ impl crate::app::PexApp {
             self.apply_owned_flags();
             self.apply_scheduled_flags();
             return;
-        }
+        };
         self.owned_scan_available = true;
         self.owned_notice = None;
         let (tx, rx) = std::sync::mpsc::channel::<OwnedMsg>();
@@ -105,7 +150,16 @@ impl crate::app::PexApp {
         self.set_status(
             "Stage 3/4 - Loading owned titles from Plex (marks Owned titles and HD upgrades).",
         );
-        OwnedScanPlex::spawn_scan(tx, force_copy);
+        // Live mode already checks its own source inside recover_library.
+        let snapshot_live_path = cfg
+            .plex_library_db_source
+            .filter(|_| matches!(source, LibrarySource::Snapshots(_)));
+        let databases = cfg
+            .plex_epg_db_source
+            .into_iter()
+            .chain(snapshot_live_path)
+            .collect();
+        OwnedScanPlex::spawn_scan(tx, force_copy, source, databases);
     }
 
     /// Apply owned flags, clearing them when the scan is disabled or unavailable.
@@ -122,8 +176,14 @@ impl crate::app::PexApp {
         self.owned_match_stats = crate::app::OwnedMatchStats::default();
         let library = self.owned_library.as_ref();
         for row in &mut self.rows {
-            let Some(found) = lookup(&row.title, row.year, row.guid.as_deref(), keys, library)
-            else {
+            let Some(found) = lookup(
+                &row.title,
+                row.year,
+                row.guid.as_deref(),
+                keys,
+                self.owned_hd_keys.as_ref(),
+                library,
+            ) else {
                 row.owned = false;
                 row.owned_hd = false;
                 row.owned_modified = None;
@@ -131,19 +191,14 @@ impl crate::app::PexApp {
                 continue;
             };
             row.owned = true;
-            if let Some(key) = found.title_key {
-                row.owned_hd = self
-                    .owned_hd_keys
-                    .as_ref()
-                    .is_some_and(|set| set.contains(&key));
-                self.owned_match_stats.by_key += 1;
-            } else {
-                row.owned_hd = library
-                    .is_some_and(|lib| found.candidates.iter().any(|c| lib.movies[c.movie].hd));
+            row.owned_hd = found.hd;
+            if found.method == MatchMethod::Id {
                 self.owned_match_stats.by_guid += 1;
+            } else {
+                self.owned_match_stats.by_key += 1;
             }
             // A single file date is meaningful only for an unambiguous match.
-            row.owned_modified = match (library, found.candidates) {
+            row.owned_modified = match (library, found.candidates.as_ref()) {
                 (Some(lib), [c]) => lib.movies[c.movie].updated_at,
                 _ => None,
             };
@@ -165,19 +220,20 @@ impl crate::app::PexApp {
                 row.year,
                 row.guid.as_deref(),
                 keys,
+                self.owned_hd_keys.as_ref(),
                 Some(library),
             )
         }) else {
             return;
         };
-        ui.label(found.explanation(row.year));
+        ui.label(found.method.explanation());
         if found.candidates.len() > 1 {
             ui.label(format!(
                 "{} Plex movies match this airing.",
                 found.candidates.len()
             ));
         }
-        for candidate in found.candidates {
+        for candidate in found.candidates.iter() {
             let movie = &library.movies[candidate.movie];
             let title = match movie.year {
                 Some(year) => format!("{} ({year})", movie.title),
@@ -214,7 +270,11 @@ impl crate::app::PexApp {
         keys
     }
 
-    fn match_owned_title(title: &str, year: Option<i32>, keys: &HashSet<String>) -> Option<String> {
+    fn match_owned_title(
+        title: &str,
+        year: Option<i32>,
+        keys: &HashSet<String>,
+    ) -> Option<TitleMatch> {
         let year = year.or_else(|| Self::trailing_title_year(title).map(|(_, year)| year));
         let names = Self::owned_title_variants(title);
         let find = |suffix: &str| {
@@ -224,15 +284,21 @@ impl crate::app::PexApp {
                 .find(|key| keys.contains(key))
         };
         let Some(year) = year else {
-            return find("any");
+            return find("any").map(|key| TitleMatch::new(key, MatchMethod::Undated));
         };
-        for candidate in [Some(year), year.checked_sub(1), year.checked_add(1)]
+        if let Some(key) = find(&year.to_string()) {
+            return Some(TitleMatch::new(key, MatchMethod::ExactYear));
+        }
+        let mut adjacent = [year.checked_sub(1), year.checked_add(1)]
             .into_iter()
             .flatten()
-        {
-            if let Some(key) = find(&candidate.to_string()) {
-                return Some(key);
-            }
+            .filter_map(|year| find(&year.to_string()));
+        if let Some(key) = adjacent.next() {
+            return Some(TitleMatch {
+                key,
+                other: adjacent.next(),
+                method: MatchMethod::AdjacentYear,
+            });
         }
 
         // One source may omit a subtitle. Require the same year and a bare title on
@@ -243,7 +309,7 @@ impl crate::app::PexApp {
         };
         let short_key = Self::short_title_key(kind, name, year);
         if keys.contains(&short_key) {
-            return Some(short_key);
+            return Some(TitleMatch::new(short_key, MatchMethod::ShortTitle));
         }
         // Only one side may omit a possessive credit, and both must agree on year.
         let (kind, name) = match Self::credited_title_remainder(title) {
@@ -252,9 +318,9 @@ impl crate::app::PexApp {
         };
         let credit_key = Self::short_title_key(kind, name, year);
         if keys.contains(&credit_key) {
-            return Some(credit_key);
+            return Some(TitleMatch::new(credit_key, MatchMethod::ShortTitle));
         }
-        find("undated")
+        find("undated").map(|key| TitleMatch::new(key, MatchMethod::Undated))
     }
 
     fn short_title_key(kind: &str, title: &str, year: i32) -> String {
@@ -418,6 +484,14 @@ impl crate::app::PexApp {
                     self.mark_dirty();
                 }
                 Error(e) => {
+                    if self.owned_library.is_none() && self.owned_keys.is_some() {
+                        // A preload is provisional until this connection has a
+                        // usable mirror. A failed first scan cannot verify it.
+                        self.owned_keys = None;
+                        self.owned_hd_keys = None;
+                        self.apply_owned_flags();
+                        self.mark_dirty();
+                    }
                     let msg = format!("Owned scan error: {e}");
                     self.owned_notice = Some(msg.clone());
                     self.record_owned_message(msg.clone());

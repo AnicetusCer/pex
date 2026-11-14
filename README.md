@@ -92,7 +92,7 @@ Highlights:
 - 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
 and genre selectors, plus multiple sort orders.
 - **Owned library awareness** – expand **Owned Details** on an owned film to see the matching Plex title, year, file path and reason for the match. If several Plex movies match, PEX gives the count and lists them.
-- 🎯 **DVR awareness** – **REC** marks the showing on the card. **Other REC** means another showing of that film in the filtered guide is scheduled.
+- 🎯 **DVR awareness** – **REC** marks the scheduled showing and **Other REC** points to a scheduled alternative in the filtered guide. **REC?** marks a time slot whose channel Plex leaves unclear. **Film REC** means there is a recording request for the film without a confirmed showing.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional TMDb ratings, and formatted descriptions.
 - 🧰 **Operator controls** – quick refresh/clear actions for poster and owned caches as well as worker tuning knobs.
@@ -256,14 +256,15 @@ Map the server path to a readable client path when PEX runs on another machine. 
 
 ### Daily usage
 - Choose your day range and filters. Each film gets one card showing its next matching airing, or the most recent matching airing when all have started. Films with the same title but different release years can have separate cards.
-- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime, channel, HD/SD and recording status.
+- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime, channel, picture quality and recording status. PEX uses the airing’s dimensions or resolution, then station labels where needed. Listings with insufficient information show **Airing quality unknown**. The **HD only** filter includes confirmed HD airings.
+- **Owned Details** gives priority to a matching Plex identifier, then a title and exact year. When the best title matches are one year earlier and one year later, both are listed with their Plex file paths.
 - If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
   day whether the respective database copy needs refreshing.
 - Owned and HD badges stay up-to-date thanks to scanning the mirrored Plex library database.
 
 ### Keeping the owned cache fresh
 - Use **Advanced ▸ Refresh owned scan** after adding/removing many files.
-- On the first run after upgrading from 1.2.3, Pex scans the library and writes a new owned cache automatically.
+- PEX associates cached owned and HD badges with their library source. When you change libraries or upgrade from an older badge cache, the new library’s first successful scan populates the badges.
 
 ### Poster cache maintenance
 - **Advanced ▸ Clear & rebuild poster cache** wipes cached artwork and immediately restarts prefetching.

@@ -36,7 +36,7 @@ def assert_title(database, expected):
 def launch(app, expected_title, live_copy=False):
     root = app.parent
     mirror = app / "db/plex_library.db"
-    cache = app / ".pex_cache/owned_all_v3.txt"
+    cache = app / ".pex_cache/owned_titles_v4.json"
     cache.unlink(missing_ok=True)  # A successful scan must regenerate this file.
     env = dict(os.environ, PEX_CONFIG=str(app / "pex-config.json"), PEX_DISABLE_PREFETCH="1",
                HOME=str(root), USERPROFILE=str(root), APPDATA=str(root / "roaming"),
@@ -60,7 +60,7 @@ def launch(app, expected_title, live_copy=False):
                     details = log.read().decode(errors="replace")
                     raise RuntimeError(f"Fixture PEX exited early ({proc.returncode}):\n{details[-4000:]}")
                 if (app / "db/plex_epg.db.last_sync").is_file() and cache.is_file():
-                    if expected_title.lower() + ":2020" in cache.read_text().splitlines():
+                    if expected_title.lower() + ":2020" in json.loads(cache.read_text(encoding="utf-8"))["keys"]:
                         break
                 time.sleep(0.2)
             else:

@@ -28,6 +28,7 @@ fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
 
 #[derive(Default, Clone, Debug)]
 struct ChannelMeta {
+    guide_channel: super::scheduled::GuideChannel,
     call_sign: Option<String>,
     title: Option<String>,
     thumb: Option<String>,
@@ -35,26 +36,22 @@ struct ChannelMeta {
 
 /// Extract channel metadata from `media_items.extra_data`
 fn parse_channel_meta(extra: &str) -> ChannelMeta {
-    fn find_val(hay: &str, key: &str) -> Option<String> {
-        let needle = format!("\"{}\":\"", key);
-        let start = hay.find(&needle)? + needle.len();
-        let rest = &hay[start..];
-        let end = rest.find('"')?;
-        let val = &rest[..end];
-        if val.is_empty() {
-            None
-        } else {
-            Some(val.to_string())
-        }
-    }
-    let call_sign = find_val(extra, "at:channelCallSign");
-    let title = find_val(extra, "at:channelTitle");
-    let thumb = find_val(extra, "at:channelThumb");
-
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(extra) else {
+        return ChannelMeta::default();
+    };
+    let text = |key: &str| {
+        value
+            .get(key)?
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
     ChannelMeta {
-        call_sign,
-        title,
-        thumb,
+        call_sign: text("at:channelCallSign"),
+        title: text("at:channelTitle"),
+        thumb: text("at:channelThumb"),
+        guide_channel: super::scheduled::GuideChannel::read(&value),
     }
 }
 /// A film can have many media_items (airings). Artwork is optional and belongs
@@ -63,24 +60,31 @@ fn read_guide_airings(
     db: &Connection,
     progress: impl Fn(usize),
 ) -> rusqlite::Result<Vec<PrepItem>> {
-    let mut columns = db.prepare("SELECT name FROM pragma_table_info('metadata_items')")?;
-    let names = columns
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
-    // Older Plex schemas can have either artwork column, both, or neither.
-    let preferred = if names.contains("user_thumb_url") {
-        "m.user_thumb_url"
-    } else {
-        "NULL"
+    // Discover optional columns once. Old guides may omit both artwork and video dimensions.
+    let mut columns = db.prepare("SELECT name FROM pragma_table_info(?1)")?;
+    let mut optional_columns = |table: &str| {
+        columns
+            .query_map([table], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()
     };
-    let secondary = if names.contains("thumb_url") {
-        "m.thumb_url"
-    } else {
-        "NULL"
+    let metadata = optional_columns("metadata_items")?;
+    let media = optional_columns("media_items")?;
+    let column = |names: &std::collections::HashSet<String>, alias: &str, name: &str| {
+        if names.contains(name) {
+            format!("{alias}.{name}")
+        } else {
+            "NULL".into()
+        }
     };
+    let preferred = column(&metadata, "m", "user_thumb_url");
+    let secondary = column(&metadata, "m", "thumb_url");
+    let width = column(&media, "mi", "width");
+    let height = column(&media, "mi", "height");
+    let resolution = column(&media, "mi", "video_resolution");
     let sql = format!(
         "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
-        mi.extra_data, m.summary, m.audience_rating, m.rating, {preferred}, {secondary}
+        mi.extra_data, m.summary, m.audience_rating, m.rating, {preferred}, {secondary},
+        {width} AS airing_width, {height} AS airing_height, CAST({resolution} AS TEXT) AS airing_resolution
         FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id = m.id
         WHERE m.metadata_type = 1 AND mi.begins_at >= 0 AND trim(m.title) <> ''
         ORDER BY mi.begins_at, m.id, mi.id"
@@ -125,7 +129,16 @@ fn read_guide_airings(
         };
         let extra: Option<String> = row.get(6).ok();
         let channel = extra.as_deref().map(parse_channel_meta).unwrap_or_default();
+        let resolution: Option<String> = row.get("airing_resolution")?;
+        let airing_quality = crate::app::utils::airing_quality(
+            row.get("airing_width").ok(),
+            row.get("airing_height").ok(),
+            resolution.as_deref(),
+            channel.call_sign.as_deref(),
+            channel.title.as_deref(),
+        );
         list.push(PrepItem {
+            airing_quality,
             film_key,
             title,
             thumb_url,
@@ -137,6 +150,7 @@ fn read_guide_airings(
             channel_call_sign: channel.call_sign,
             channel_title: channel.title,
             channel_thumb: channel.thumb,
+            guide_channel: channel.guide_channel,
             summary: row.get(7).ok(),
             audience_rating: row.get::<_, f64>(8).ok().map(|value| value as f32),
             critic_rating: row.get::<_, f64>(9).ok().map(|value| value as f32),
@@ -467,22 +481,28 @@ fn sync_mirror(src: &Path, dst: &Path, force: bool) -> io::Result<bool> {
     Ok(true)
 }
 
-pub(crate) fn sync_library_db_from_source(
+pub(super) fn sync_library_db_from_source(
+    source: &super::owned::LibrarySource,
+    configured_databases: &[PathBuf],
     force: bool,
     report: impl Fn(String),
 ) -> Result<String, String> {
-    let config = load_config();
+    use super::owned::LibrarySource;
     let dst = local_library_db_path();
-    source_guard::check(&dst, config.plex_epg_db_source.as_deref()).map_err(|e| e.to_string())?;
-    if let Some(folder) = config.library_snapshot_dir {
-        source_guard::check(&dst, config.plex_library_db_source.as_deref())
-            .map_err(|e| e.to_string())?;
-        return snapshots::refresh(&folder, &dst, report);
+    source_guard::check(&dst, configured_databases.iter().map(PathBuf::as_path))
+        .map_err(|e| e.to_string())?;
+    match source {
+        LibrarySource::Snapshots(dir) => snapshots::refresh(dir, &dst, report),
+        LibrarySource::Live(src) => recover_library(src, &dst, force, report),
+        LibrarySource::Manual(_) => {
+            for marker in [provenance_path(&dst), last_sync_marker_path(&dst)] {
+                if marker.try_exists().map_err(|e| e.to_string())? {
+                    return Err("The local library mirror belongs to a previous connection. Choose its live library or completed snapshot folder in Connect to Plex, or select Guide only.".into());
+                }
+            }
+            Ok("Using the manually supplied local library snapshot.".into())
+        }
     }
-    let Some(src) = config.plex_library_db_source else {
-        return Ok("Using the manually supplied local library snapshot.".into());
-    };
-    recover_library(&src, &dst, force, report)
 }
 
 fn provenance_path(dst: &Path) -> PathBuf {
@@ -811,11 +831,6 @@ impl crate::app::PexApp {
                                     .as_deref()
                                     .map(crate::app::utils::parse_genres)
                                     .unwrap_or_default();
-                                let tags_joined = (!genres.is_empty()).then(|| genres.join("|"));
-                                let broadcast_hd = crate::app::utils::infer_broadcast_hd(
-                                    tags_joined.as_deref(),
-                                    channel_display.as_deref(),
-                                );
                                 let summary = item.summary.and_then(|s| {
                                     let trimmed = s.trim();
                                     if trimmed.is_empty() {
@@ -836,6 +851,7 @@ impl crate::app::PexApp {
                                     channel_raw,
                                     channel_title: channel_title_original,
                                     channel_thumb: item.channel_thumb,
+                                    guide_channel: item.guide_channel,
                                     genres,
                                     guid: item.guid,
                                     summary,
@@ -847,8 +863,8 @@ impl crate::app::PexApp {
                                     owned: false, // filled in by apply_owned_flags()
                                     owned_modified: None,
                                     owned_hd: false,
-                                    broadcast_hd,
-                                    scheduled: false,
+                                    airing_quality: item.airing_quality,
+                                    scheduled: Default::default(),
                                 }
                             })
                             .collect();
@@ -944,6 +960,43 @@ impl crate::app::PexApp {
 #[cfg(test)]
 mod guide_tests {
     use super::*;
+
+    #[test]
+    fn each_airing_uses_its_own_quality_and_preserves_unknown() {
+        use crate::app::types::AiringQuality::{Hd, Sd, Unknown};
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("test_fixtures.sql")).unwrap();
+        db.execute_batch(r#"
+            ALTER TABLE media_items ADD COLUMN video_resolution TEXT;
+            UPDATE metadata_items SET tags_genre='HD|Drama';
+            INSERT INTO media_items(id,metadata_item_id,begins_at,width,height,video_resolution,extra_data) VALUES
+                (2,1,2,720,576,'1080p','{"at:channelTitle":"Cinema HD"}'),
+                (3,1,3,0,0,'1080i',NULL),
+                (4,1,4,NULL,NULL,NULL,'{"at:channelCallSign":"StationSD"}'),
+                (5,1,5,NULL,NULL,NULL,'{"at:channelTitle":"Cinema 720"}'),
+                (6,1,6,NULL,NULL,NULL,'{"at:channelCallSign":"Cinema","at:channelTitle":"Cinema HD"}'),
+                (7,1,7,NULL,NULL,'SD',NULL),
+                (8,1,8,1280,NULL,NULL,NULL);
+        "#).unwrap();
+        let qualities = || {
+            read_guide_airings(&db, |_| {})
+                .unwrap()
+                .into_iter()
+                .map(|airing| airing.airing_quality)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(qualities(), [Hd, Sd, Hd, Sd, Unknown, Hd, Sd, Hd]);
+        db.execute_batch(
+            "ALTER TABLE media_items DROP COLUMN width;
+                          ALTER TABLE media_items DROP COLUMN height;
+                          ALTER TABLE media_items DROP COLUMN video_resolution;",
+        )
+        .unwrap();
+        assert_eq!(
+            qualities(),
+            [Unknown, Hd, Unknown, Sd, Unknown, Hd, Unknown, Unknown]
+        );
+    }
 
     #[test]
     fn reads_airings_with_either_artwork_column_or_neither() {
