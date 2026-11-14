@@ -312,6 +312,7 @@ mod tests {
             "busy_backup",
             "busy_no_backup",
             "snapshots_only",
+            "recording_schedule",
             "legacy",
             "local_only",
         ] {
@@ -360,6 +361,20 @@ mod tests {
             );
         } else {
             super::super::test_fixtures::database(&library);
+        }
+        if scenario == "recording_schedule" {
+            let guide_db = rusqlite::Connection::open(&guide).unwrap();
+            let airing: i64 = guide_db
+                .query_row("SELECT begins_at FROM media_items", [], |r| r.get(0))
+                .unwrap();
+            let db = rusqlite::Connection::open(&library).unwrap();
+            db.execute_batch(
+                "CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+                CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+                CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);",
+            )
+            .unwrap();
+            db.execute("INSERT INTO media_grabs VALUES (0, json_object('mt:title', 'Fixture Movie', 'mt:year', 2020, 'me:beginsAt', ?1))", [airing]).unwrap();
         }
         if scenario == "guide_only" {
             fs::create_dir_all(portable.join("db")).unwrap();
@@ -415,8 +430,9 @@ mod tests {
             let (guides, found_library) = config::discover_databases(&plex).unwrap();
             app.connection
                 .apply_discovery(plex.display().to_string(), guides, found_library);
-            app.connection.guide_only =
-                !(scenario.starts_with("busy_") || scenario == "snapshots_only");
+            app.connection.guide_only = !(scenario.starts_with("busy_")
+                || scenario == "snapshots_only"
+                || scenario == "recording_schedule");
             if scenario == "snapshots_only" {
                 app.connection.use_snapshots = true;
                 assert_eq!(app.connection.selected_snapshot_dir(), Some(plex.clone()));
@@ -433,6 +449,17 @@ mod tests {
         assert_eq!(app.rows[0].title, "Fixture Movie");
         assert!(app.should_show_grid());
         match scenario.as_str() {
+            "recording_schedule" => {
+                assert!(app.rows[0].scheduled);
+                rusqlite::Connection::open(&library)
+                    .unwrap()
+                    .execute("DROP TABLE media_grabs", [])
+                    .unwrap();
+                app.start_owned_scan(true);
+                frames_until(&mut app, &ctx, |app| !app.owned_scan_in_progress);
+                assert!(!app.rows[0].scheduled);
+                assert!(app.rows[0].owned);
+            }
             "snapshots_only" => {
                 assert!(app.rows[0].owned);
                 assert!(app.owned_notice.as_deref().unwrap().contains("2026-01-02"));

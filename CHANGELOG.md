@@ -1,3 +1,8 @@
+# Unreleased
+
+- A manual refresh makes one read-only copy attempt against the live Plex library. If Plex changes it during the copy, PEX can use its previous mirror or an existing completed library backup.
+- **Completed snapshots** lets PEX read backups from an existing folder. The guide shows the backup date for owned and scheduled recording badges. All scanning and SQLite validation take place on the PEX computer.
+
 # Pex 1.2.5
 
 - On first launch, **Connect to Plex** lets you select your Plex Databases folder or paste a Windows network share. PEX finds the guide and library databases and lets you choose the guide if several are available. Working portable configurations continue to load.

@@ -1,5 +1,6 @@
 // src/app/prep.rs
 mod snapshots;
+mod source_guard;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -272,13 +273,9 @@ fn copy_snapshot_with_hook(
     completed_backup: bool,
     after_copy: impl FnOnce(),
 ) -> io::Result<FileState> {
+    source_guard::check(dst, [src])?;
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    if dst.exists() && fs::canonicalize(src)? == fs::canonicalize(dst)? {
-        return Err(io::Error::other(
-            "source and destination refer to the same database",
-        ));
-    }
     let scratch = tempfile::tempdir_in(parent)?;
     let staged = tempfile::NamedTempFile::new_in(scratch.path())?.into_temp_path();
     let staged_path: &Path = staged.as_ref();
@@ -367,19 +364,17 @@ pub(crate) fn sync_library_db_from_source(
     report: impl Fn(String),
 ) -> Result<String, String> {
     let config = load_config();
+    let dst = local_library_db_path();
+    source_guard::check(&dst, config.plex_epg_db_source.as_deref()).map_err(|e| e.to_string())?;
     if let Some(folder) = config.library_snapshot_dir {
-        return snapshots::refresh(&folder, &local_library_db_path(), report);
+        source_guard::check(&dst, config.plex_library_db_source.as_deref())
+            .map_err(|e| e.to_string())?;
+        return snapshots::refresh(&folder, &dst, report);
     }
     let Some(src) = config.plex_library_db_source else {
         return Ok("Using the manually supplied local library snapshot.".into());
     };
-    recover_library(
-        &src,
-        &local_library_db_path(),
-        force,
-        Duration::from_millis(750),
-        report,
-    )
+    recover_library(&src, &dst, force, report)
 }
 
 fn provenance_path(dst: &Path) -> PathBuf {
@@ -430,6 +425,7 @@ fn backup_candidates(src: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         };
         if parsed.format("%Y-%m-%d").to_string() != date
             || parsed > chrono::Local::now().date_naive()
+            || !entry.file_type()?.is_file()
         {
             continue;
         }
@@ -448,42 +444,34 @@ fn backup_candidates(src: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     Ok(candidates)
 }
 
-/// Bounded retries use the same staging and consistency checks as ordinary copies.
+/// Read the live library once per refresh. A busy DVR can be retried by the user later.
 /// A backup never advances the live-source freshness marker.
 fn recover_library(
     src: &Path,
     dst: &Path,
     force: bool,
-    delay: Duration,
     report: impl Fn(String),
 ) -> Result<String, String> {
+    source_guard::check(dst, [src]).map_err(|e| e.to_string())?;
     if !force && !mirror_due(dst) {
         if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
             return Ok(previous);
         }
     }
-    let mut failure = String::new();
-    for attempt in 1..=3 {
-        report(format!(
-            "Copying live Plex library (attempt {attempt}/3)..."
-        ));
-        match copy_validated_snapshot(src, dst, true, false) {
-            Ok(_) => {
-                let message = format!(
-                    "Library snapshot: live source {}, copied {}.",
-                    src.display(),
-                    chrono::Local::now().format("%Y-%m-%d %H:%M")
-                );
-                let _ = fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
-                let _ = fs::write(last_sync_marker_path(dst), b"ok");
-                return Ok(message);
-            }
-            Err(e) => failure = e.to_string(),
+    report("Copying the live Plex library (read-only)...".into());
+    let failure = match copy_validated_snapshot(src, dst, true, false) {
+        Ok(_) => {
+            let message = format!(
+                "Library snapshot: live source {}, copied {}.",
+                src.display(),
+                chrono::Local::now().format("%Y-%m-%d %H:%M")
+            );
+            let _ = fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
+            let _ = fs::write(last_sync_marker_path(dst), b"ok");
+            return Ok(message);
         }
-        if attempt < 3 {
-            std::thread::sleep(delay);
-        }
-    }
+        Err(error) => error,
+    };
     if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
         return Ok(format!("Live library unavailable ({failure}). Keeping {previous} Use Retry owned scan when Plex is idle."));
     }
@@ -507,7 +495,7 @@ fn recover_library(
         }
         Err(e) => rejected.push(e.to_string()),
     }
-    Err(format!("No usable library snapshot. Live copy failed after 3 attempts: {failure}. No completed, valid dated backup was available. {} Connect the share or wait for Plex to finish its activity/backup, then use Retry owned scan. You can also choose Guide only in Connect to Plex.", rejected.join("; ")))
+    Err(format!("No usable library snapshot. Live file copy failed: {failure}. No completed, valid dated backup was available. {} Check the share, or use Retry owned scan after the recording finishes. You can also choose Guide only in Connect to Plex.", rejected.join("; ")))
 }
 
 // Set to true if you want to synthesize a tiny fake list for debugging.
@@ -578,6 +566,14 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
         // Resolve DB paths from config
         let cfg = load_config();
         let db_path = local_db_path();
+        let sources = cfg
+            .plex_epg_db_source
+            .iter()
+            .chain(&cfg.plex_library_db_source);
+        if let Err(err) = source_guard::check(&db_path, sources.map(PathBuf::as_path)) {
+            send(PrepMsg::Error(err.to_string()));
+            return;
+        }
         if let Some(parent) = db_path.parent() {
             if let Err(err) = fs::create_dir_all(parent) {
                 send(PrepMsg::Error(format!(
@@ -1143,19 +1139,19 @@ mod mirror_tests {
         );
         library(&dir.path().join("com.plexapp.plugins.library.db-2020-13-01"));
         let attempts = std::cell::Cell::new(0);
-        let message = recover_library(&src, &dst, false, Duration::ZERO, |s| {
-            if s.contains("attempt") {
+        let message = recover_library(&src, &dst, false, |s| {
+            if s.starts_with("Copying the live Plex library") {
                 attempts.set(attempts.get() + 1);
             }
         })
         .unwrap();
-        assert_eq!(attempts.get(), 3);
+        assert_eq!(attempts.get(), 1);
         assert!(message.contains("2020-01-02"));
         assert!(usable_library(&dst));
         assert!(mirror_due(&dst));
         assert!(!last_sync_marker_path(&dst).exists());
         fs::remove_file(sqlite_sidecar_path(&src, "journal")).unwrap();
-        let live = recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap();
+        let live = recover_library(&src, &dst, false, |_| {}).unwrap();
         assert!(live.contains("live source"));
         assert!(!mirror_due(&dst));
         assert!(fs::read_to_string(provenance_path(&dst))
@@ -1170,8 +1166,8 @@ mod mirror_tests {
         let dst = dir.path().join("local.db");
         library(&src);
         fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
-        let error = recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap_err();
-        assert!(error.contains("after 3 attempts"));
+        let error = recover_library(&src, &dst, false, |_| {}).unwrap_err();
+        assert!(error.contains("Live file copy failed"));
         assert!(error.contains("Retry owned scan"));
         assert!(!dst.exists());
         assert!(!last_sync_marker_path(&dst).exists());
@@ -1186,7 +1182,7 @@ mod mirror_tests {
         fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
         library(&dir.path().join("com.plexapp.plugins.library.db-2020-01-01"));
         fs::write(&dst, b"corrupt old mirror").unwrap();
-        recover_library(&src, &dst, false, Duration::ZERO, |_| {}).unwrap();
+        recover_library(&src, &dst, false, |_| {}).unwrap();
         assert!(usable_library(&dst));
     }
 
@@ -1216,7 +1212,7 @@ mod mirror_tests {
     }
 
     #[test]
-    fn transient_busy_source_succeeds_on_a_bounded_retry() {
+    fn busy_source_is_read_once_then_a_later_user_refresh_can_succeed() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("com.plexapp.plugins.library.db");
         let dst = dir.path().join("local.db");
@@ -1224,16 +1220,17 @@ mod mirror_tests {
         let journal = sqlite_sidecar_path(&src, "journal");
         fs::write(&journal, b"busy").unwrap();
         let attempts = std::cell::Cell::new(0);
-        recover_library(&src, &dst, false, Duration::ZERO, |s| {
-            if s.contains("attempt") {
+        let first = recover_library(&src, &dst, true, |message| {
+            if message.starts_with("Copying the live Plex library") {
                 attempts.set(attempts.get() + 1);
             }
-            if s.contains("attempt 2/") {
-                fs::remove_file(&journal).unwrap();
-            }
-        })
-        .unwrap();
-        assert_eq!(attempts.get(), 2);
+        });
+        assert!(first.is_err());
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(fs::read(&journal).unwrap(), b"busy");
+        assert!(!dst.exists());
+        fs::remove_file(&journal).unwrap();
+        recover_library(&src, &dst, true, |_| {}).unwrap();
         assert!(usable_library(&dst));
         assert!(!mirror_due(&dst));
     }
@@ -1244,10 +1241,10 @@ mod mirror_tests {
         let src = dir.path().join("com.plexapp.plugins.library.db");
         let dst = dir.path().join("local.db");
         library(&src);
-        let initial = recover_library(&src, &dst, true, Duration::ZERO, |_| {}).unwrap();
+        let initial = recover_library(&src, &dst, true, |_| {}).unwrap();
         let old = fs::read(&dst).unwrap();
         fs::write(sqlite_sidecar_path(&src, "journal"), b"busy").unwrap();
-        let message = recover_library(&src, &dst, true, Duration::ZERO, |_| {}).unwrap();
+        let message = recover_library(&src, &dst, true, |_| {}).unwrap();
         assert!(message.contains(&initial));
         assert!(message.contains("Keeping"));
         assert_eq!(old, fs::read(&dst).unwrap());

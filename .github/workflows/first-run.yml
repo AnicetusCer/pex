@@ -7,19 +7,6 @@ permissions:
   contents: read
 
 jobs:
-  snapshot-exporter:
-    name: Snapshot exporter (${{ matrix.os }})
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-22.04, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: python -m unittest discover -s tests -p "test_*.py"
-
   portable:
     name: ${{ matrix.platform }}
     strategy:
@@ -71,14 +58,14 @@ jobs:
           Test-ArtifactChecksums -ChecksumPath $checksumPath -ArtifactDir $assetDir
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "zip=$assetDir/$zipName" >> $env:GITHUB_OUTPUT
-      - name: Exercise packaged Linux app with completed snapshots
+      - name: Exercise packaged Linux app with read-only Plex files
         if: runner.os == 'Linux'
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
           PEX_RENDERER: glow
           SNAPSHOT_TEST_ZIP: ${{ steps.bundle.outputs.zip }}
         run: xvfb-run -a python3 tests/portable_snapshot_smoke.py "$SNAPSHOT_TEST_ZIP"
-      - name: Exercise packaged Windows app with completed snapshots
+      - name: Exercise packaged Windows app with read-only Plex files
         if: runner.os == 'Windows'
         env:
           SNAPSHOT_TEST_ZIP: ${{ steps.bundle.outputs.zip }}

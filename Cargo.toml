@@ -25,6 +25,9 @@ urlencoding = "2.1"
 tempfile = "3.10"
 rfd = "0.15"
 
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
+
 [build-dependencies]
 winresource = "0.1"
 

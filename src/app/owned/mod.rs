@@ -295,16 +295,19 @@ impl crate::app::PexApp {
                     self.owned_scan_in_progress = true;
                     self.set_status(s);
                 }
-                OwnedMsg::Scheduled(result) => match result {
-                    Ok(index) => {
-                        self.scheduled_index = (!index.is_empty()).then_some(index);
-                        self.apply_scheduled_flags();
-                        self.mark_dirty();
-                    }
-                    Err(err) => self.record_owned_message(format!(
-                        "Loading scheduled recordings failed: {err}"
-                    )),
-                },
+                OwnedMsg::Scheduled(result) => {
+                    self.scheduled_index = match result {
+                        Ok(index) => (!index.is_empty()).then_some(index),
+                        Err(err) => {
+                            self.record_owned_message(format!(
+                                "Could not read recording schedules from the local library copy: {err}. REC badges cleared."
+                            ));
+                            None
+                        }
+                    };
+                    self.apply_scheduled_flags();
+                    self.mark_dirty();
+                }
                 Error(e) => {
                     let msg = format!("Owned scan error: {e}");
                     self.owned_notice = Some(msg.clone());

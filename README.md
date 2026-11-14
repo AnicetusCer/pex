@@ -154,9 +154,9 @@ the accompanying WAL/SHM files) exist on disk.
 
 For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip owned and scheduled-recording badges, then **Save and load guide**. Settings are saved automatically; a TMDb key is optional.
 
-If Plex is busy, the owned scan retries the consistent live copy up to three times. It keeps a usable local mirror. On a first scan without a usable mirror, it tries completed date-stamped Plex library backups in newest-first order, validating stability, SQLite integrity and library schema before installing a local snapshot. The guide retains the snapshot filename/date or an actionable error with **Retry owned scan**. The live source remains configured, and a fallback does not advance the live-refresh marker.
+A live owned refresh makes one attempt to read the library and its WAL from the server. PEX checks that the files stayed stable and validates them locally. If Plex is busy, PEX keeps its usable local mirror. On a first scan it can read an existing completed dated backup alongside the library. The guide shows the source and date used for owned and recording badges, and offers **Retry owned scan**.
 
-For a busy or remote server, choose **Completed snapshots** in **Connect to Plex** and select the directory where Plex writes its dated library backups. PEX checks for a new backup on refresh and reuses the local database when the snapshot is unchanged. For fresher copies, the optional Python exporter runs on the Plex host while the server is active. Both modes work with local folders and shares visible to PEX. [Portable setup and exporter instructions](make_portable/README.md#refresh-from-completed-snapshots)
+If completed backups already exist, choose **Completed snapshots** in **Connect to Plex** and select their folder. PEX checks for a newer backup on refresh and reuses its validated local mirror when the backup is unchanged. Both modes need only read access to a local directory or mounted/network share. [Portable setup instructions](make_portable/README.md#refresh-from-completed-snapshots)
 
 For development:
 
@@ -177,7 +177,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | --- | --- | --- | --- |
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
 | `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
-| `library_snapshot_dir` | string or `null` | `null` | Use completed Plex backups or PEX exports from this directory for owned/recording badges. The live library path can stay configured. |
+| `library_snapshot_dir` | string or `null` | `null` | Use existing completed library backups from this directory for owned/recording badges. The live library path can stay configured. |
 | `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
 | `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
@@ -279,7 +279,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 
 - **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
   `plex_library_db_source` paths are reachable and readable.
-- **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup or export. In live mode, verify the configured library path.
+- **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup. In live mode, verify the configured library path.
 - **REC badge missing:** confirm `plex_library_db_source` is configured, the copied `db/plex_library.db` contains up-to-date `media_subscriptions` rows, and you restarted after scheduling the recording.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days

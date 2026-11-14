@@ -1,12 +1,13 @@
 """Smoke-test a portable PEX ZIP on Windows or Linux (use Xvfb on headless Linux)."""
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,7 @@ def assert_title(database, expected):
         assert db.execute("SELECT title FROM metadata_items WHERE id=1").fetchone() == (expected,)
 
 
-def launch(app, expected_title):
+def launch(app, expected_title, live_copy=False):
     root = app.parent
     mirror = app / "db/plex_library.db"
     cache = app / ".pex_cache/owned_all_v3.txt"
@@ -66,7 +67,7 @@ def launch(app, expected_title):
                 raise RuntimeError(f"Timed out waiting for guide and owned entry {expected_title}")
             assert_title(app / "db/plex_epg.db", "Snapshot Fixture")
             assert_title(mirror, expected_title)
-            assert not (app / "db/plex_library.db.last_sync").exists()
+            assert (app / "db/plex_library.db.last_sync").exists() == live_copy
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -77,12 +78,34 @@ def launch(app, expected_title):
                     proc.wait(timeout=5)
 
 
+def source_state(folder):
+    return {
+        file.relative_to(folder): (file.stat().st_mtime_ns, hashlib.sha256(file.read_bytes()).digest())
+        for file in folder.rglob("*") if file.is_file()
+    }
+
+
+@contextmanager
+def readonly_source(folder):
+    modes = {file: file.stat().st_mode for file in folder.rglob("*") if file.is_file()}
+    try:
+        for file, mode in modes.items():
+            file.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        before = source_state(folder)
+        yield
+        assert source_state(folder) == before, f"PEX changed files in source directory {folder}"
+    finally:
+        for file, mode in modes.items():
+            file.chmod(mode)
+
+
 def smoke(bundle, root):
     app = root / "portable"
     app.mkdir()
     with ZipFile(bundle) as archive:
         # Only extract known flat package members to paths we control.
-        for name in [EXECUTABLE, "pex_snapshot.py", "config.json"]:
+        assert "pex_snapshot.py" not in archive.namelist()
+        for name in [EXECUTABLE, "config.json"]:
             with archive.open(name) as src, (app / name).open("xb") as dst:
                 shutil.copyfileobj(src, dst)
     (app / EXECUTABLE).chmod(0o755)
@@ -91,33 +114,52 @@ def smoke(bundle, root):
         shutil.copyfile(os.environ["SNAPSHOT_TEST_SWIFTSHADER"], app / "vulkan-1.dll")
     data = root / "Plex Databases"
     data.mkdir()
-    exports = root / "Shared snapshots"
-    exports.mkdir()
+    backups = root / "Completed Plex backups"
+    backups.mkdir()
     guide = data / "tv.plex.providers.epg.cloud-smoke.db"
     library = data / "com.plexapp.plugins.library.db"
     seed(guide, "Snapshot Fixture")
-    seed(library, "Snapshot Fixture")
-    (app / "pex-config.json").write_text(json.dumps({
+    seed(library, "Live Library")
+    config = {
         "plex_epg_db_source": str(guide),
-        "plex_library_db_source": str(root / "absent-live-source.db"),
-        "library_snapshot_dir": str(exports),
-    }))
-    publish = [sys.executable, str(app / "pex_snapshot.py"), str(library), str(exports)]
-    subprocess.run(publish, check=True, timeout=60)
-    launch(app, "Snapshot Fixture")
+        "plex_library_db_source": str(library),
+    }
+    config_file = app / "pex-config.json"
+    config_file.write_text(json.dumps(config))
+    with readonly_source(data):
+        launch(app, "Live Library", live_copy=True)
+
+    # A busy first scan uses an existing dated backup. Each directory below
+    # represents the state of a server share before PEX opens the app.
+    fallback_app = root / "fallback-portable"
+    fallback_app.mkdir()
+    shutil.copy2(app / EXECUTABLE, fallback_app / EXECUTABLE)
+    if (app / "vulkan-1.dll").is_file():
+        shutil.copy2(app / "vulkan-1.dll", fallback_app / "vulkan-1.dll")
+    (fallback_app / "pex-config.json").write_text(json.dumps(config))
+    seed(data / (library.name + "-2024-01-01"), "Fallback Backup")
+    (data / (library.name + "-journal")).write_bytes(b"busy fixture")
+    with readonly_source(data):
+        launch(fallback_app, "Fallback Backup")
+
+    # Snapshot-only mode works with read access to already completed files.
+    seed(backups / (library.name + "-2024-01-02"), "Saved Backup")
+    config["library_snapshot_dir"] = str(backups)
+    config["plex_library_db_source"] = str(data / "absent-live-source.db")
+    config_file.write_text(json.dumps(config))
     mirror = app / "db/plex_library.db"
-    stamp = mirror.stat().st_mtime_ns
-    digest = hashlib.sha256(mirror.read_bytes()).digest()
-    launch(app, "Snapshot Fixture")
-    assert mirror.stat().st_mtime_ns == stamp
-    assert hashlib.sha256(mirror.read_bytes()).digest() == digest
-    with closing(sqlite3.connect(library)) as db:
-        db.execute("UPDATE metadata_items SET title='New Generation', original_title='New Generation'")
-        db.commit()
-    subprocess.run(publish, check=True, timeout=60)
-    launch(app, "New Generation")
-    assert hashlib.sha256(mirror.read_bytes()).digest() != digest
-    print("Portable snapshot smoke passed: installed, reused, then refreshed the library.")
+    with readonly_source(data), readonly_source(backups):
+        launch(app, "Saved Backup")
+        stamp = mirror.stat().st_mtime_ns
+        digest = hashlib.sha256(mirror.read_bytes()).digest()
+        launch(app, "Saved Backup")
+        assert mirror.stat().st_mtime_ns == stamp
+        assert hashlib.sha256(mirror.read_bytes()).digest() == digest
+    seed(backups / (library.name + "-2024-01-03"), "Newer Backup")
+    with readonly_source(data), readonly_source(backups):
+        launch(app, "Newer Backup")
+        assert hashlib.sha256(mirror.read_bytes()).digest() != digest
+    print("Portable smoke passed for live, busy and pre-existing backup sources.")
 
 
 if __name__ == "__main__":

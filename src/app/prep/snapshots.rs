@@ -190,7 +190,7 @@ pub(super) fn refresh(
         .first()
         .cloned()
         .unwrap_or_else(|| format!("No completed snapshots found in {}.", folder.display()));
-    Err(format!("{reason} Check the snapshot folder in Connect to Plex, then publish a completed Plex backup or PEX export and retry the owned scan."))
+    Err(format!("{reason} Choose a folder containing an existing completed copy in Connect to Plex, or select Live library and retry after the recording finishes."))
 }
 
 #[cfg(test)]
@@ -199,7 +199,6 @@ mod tests {
     use crate::app::prep::recover_library;
     use crate::app::test_fixtures::database;
     use rusqlite::Connection;
-    use std::time::Duration;
 
     const BACKUP: &str = "com.plexapp.plugins.library.db-2020-03-25";
     const EXPORT: &str = "pex-library-2020-03-25T134530123456Z.db";
@@ -311,17 +310,17 @@ mod tests {
         fixture(&folder, BACKUP, "From snapshot");
         let live = fixture(root.path(), "source.db", "From live");
         let dst = root.path().join("local.db");
-        recover_library(&live, &dst, true, Duration::ZERO, |_| {}).unwrap();
+        recover_library(&live, &dst, true, |_| {}).unwrap();
         let notice = refresh(&folder, &dst, |_| {}).unwrap();
         assert!(notice.contains(BACKUP));
         assert!(!last_sync_marker_path(&dst).exists());
         fs::write(last_sync_marker_path(&dst), b"stale").unwrap();
         let missing = root.path().join("different-source.db");
-        assert!(recover_library(&missing, &dst, false, Duration::ZERO, |_| {}).is_err());
+        assert!(recover_library(&missing, &dst, false, |_| {}).is_err());
         assert_eq!(title(&dst), "From snapshot");
-        recover_library(&live, &dst, false, Duration::ZERO, |_| {}).unwrap();
+        recover_library(&live, &dst, false, |_| {}).unwrap();
         assert_eq!(title(&dst), "From live");
-        assert!(recover_library(&missing, &dst, false, Duration::ZERO, |_| {}).is_err());
+        assert!(recover_library(&missing, &dst, false, |_| {}).is_err());
         assert!(refresh(&root.path().join("missing"), &dst, |_| {}).is_err());
     }
 
