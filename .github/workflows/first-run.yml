@@ -86,11 +86,10 @@ jobs:
         run: |
           # The hosted runner has no dedicated GPU. Chrome includes a software Vulkan driver.
           $chrome = Join-Path $env:ProgramFiles 'Google/Chrome/Application'
-          $driver = Get-ChildItem -LiteralPath $chrome -Recurse -Filter vk_swiftshader_icd.json |
+          $driver = Get-ChildItem -LiteralPath $chrome -Recurse -Filter vk_swiftshader.dll |
             Select-Object -First 1
           if (!$driver) { throw 'Chrome software Vulkan driver not found on this runner.' }
-          $env:VK_ICD_FILENAMES = $driver.FullName
-          $env:PATH = "$($driver.DirectoryName);$env:PATH"
+          $env:SNAPSHOT_TEST_SWIFTSHADER = $driver.FullName
           python tests/portable_snapshot_smoke.py "$env:SNAPSHOT_TEST_ZIP"
       - uses: actions/upload-artifact@v4
         with:

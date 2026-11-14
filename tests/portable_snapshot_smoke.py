@@ -86,6 +86,9 @@ def smoke(bundle, root):
             with archive.open(name) as src, (app / name).open("xb") as dst:
                 shutil.copyfileobj(src, dst)
     (app / EXECUTABLE).chmod(0o755)
+    if os.name == "nt" and os.environ.get("SNAPSHOT_TEST_SWIFTSHADER"):
+        # SwiftShader supports direct loading without a system Vulkan installation.
+        shutil.copyfile(os.environ["SNAPSHOT_TEST_SWIFTSHADER"], app / "vulkan-1.dll")
     data = root / "Plex Databases"
     data.mkdir()
     exports = root / "Shared snapshots"
