@@ -168,9 +168,31 @@ fn source_state(src: &Path) -> io::Result<(FileState, Option<FileState>)> {
     Ok((main, wal))
 }
 
-fn copy_contents(src: &Path, dst: &Path) -> io::Result<()> {
+const COPY_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
+
+fn copy_contents(
+    src: &Path,
+    dst: &Path,
+    mut remaining: u64,
+    mut after_chunk: impl FnMut(u64) -> io::Result<()>,
+) -> io::Result<()> {
     // Keep the staging files writable when the NAS files are read-only.
-    io::copy(&mut fs::File::open(src)?, &mut fs::File::create(dst)?)?;
+    let mut input = fs::File::open(src)?;
+    let mut output = fs::File::create(dst)?;
+    // Copy only the length captured before the transfer. A writer can keep
+    // appending to its WAL faster than a client can read it over a slow share.
+    while remaining > 0 {
+        let amount = remaining.min(COPY_CHUNK_BYTES);
+        let copied = io::copy(&mut input.by_ref().take(amount), &mut output)?;
+        if copied != amount {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{} became shorter during copy", src.display()),
+            ));
+        }
+        remaining -= copied;
+        after_chunk(copied)?;
+    }
     Ok(())
 }
 
@@ -263,39 +285,76 @@ fn copy_validated_snapshot(
     library: bool,
     completed_backup: bool,
 ) -> io::Result<FileState> {
-    copy_snapshot_with_hook(src, dst, library, completed_backup, || {})
+    copy_snapshot_with_hooks(
+        src,
+        dst,
+        library,
+        completed_backup,
+        || std::thread::sleep(Duration::from_millis(250)),
+        || {},
+    )
 }
 
-fn copy_snapshot_with_hook(
+fn copy_snapshot_with_hooks(
     src: &Path,
     dst: &Path,
     library: bool,
     completed_backup: bool,
+    wait_for_quiet: impl FnOnce(),
     after_copy: impl FnOnce(),
 ) -> io::Result<FileState> {
     source_guard::check(dst, [src])?;
+    let before = source_state(src)?;
+    let live_library = library && !completed_backup;
+    if live_library {
+        wait_for_quiet();
+        if before != source_state(src)? {
+            return Err(io::Error::other(
+                "live library changed before transfer; skipped the full copy",
+            ));
+        }
+    }
+    if completed_backup && before.1.as_ref().is_some_and(|wal| wal.len > 0) {
+        return Err(io::Error::other("backup still has an active WAL"));
+    }
     let parent = dst.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let scratch = tempfile::tempdir_in(parent)?;
     let staged = tempfile::NamedTempFile::new_in(scratch.path())?.into_temp_path();
     let staged_path: &Path = staged.as_ref();
-    let before = source_state(src)?;
-    if completed_backup && before.1.as_ref().is_some_and(|wal| wal.len > 0) {
-        return Err(io::Error::other("backup still has an active WAL"));
-    }
-    copy_contents(src, staged_path)?;
-    if before.1.is_some() {
+    let verify_source = || {
+        if before != source_state(src)? {
+            return Err(io::Error::other(
+                "source changed during copy; no new snapshot installed",
+            ));
+        }
+        Ok(())
+    };
+    let mut last_probe = Instant::now();
+    let mut bytes_since_probe = 0;
+    let mut check_progress = |bytes| {
+        bytes_since_probe += bytes;
+        if live_library
+            && bytes_since_probe >= COPY_CHUNK_BYTES
+            && last_probe.elapsed() >= Duration::from_secs(1)
+        {
+            verify_source()?;
+            last_probe = Instant::now();
+            bytes_since_probe = 0;
+        }
+        Ok(())
+    };
+    copy_contents(src, staged_path, before.0.len, &mut check_progress)?;
+    if let Some(wal) = &before.1 {
         copy_contents(
             &sqlite_sidecar_path(src, "wal"),
             &sqlite_sidecar_path(staged_path, "wal"),
+            wal.len,
+            check_progress,
         )?;
     }
     after_copy();
-    if before != source_state(src)? {
-        return Err(io::Error::other(
-            "source changed during copy; no new snapshot installed",
-        ));
-    }
+    verify_source()?;
     // Rebuild SHM locally, validate the guide/library schema and let SQLite replay
     // committed WAL frames. Never copy a live SHM file or touch SQLite on the NAS.
     let db = Connection::open(staged_path).map_err(io::Error::other)?;
@@ -458,7 +517,7 @@ fn recover_library(
             return Ok(previous);
         }
     }
-    report("Copying the live Plex library (read-only)...".into());
+    report("Checking the live Plex library before copying...".into());
     let failure = match copy_validated_snapshot(src, dst, true, false) {
         Ok(_) => {
             let message = format!(
@@ -1140,7 +1199,7 @@ mod mirror_tests {
         library(&dir.path().join("com.plexapp.plugins.library.db-2020-13-01"));
         let attempts = std::cell::Cell::new(0);
         let message = recover_library(&src, &dst, false, |s| {
-            if s.starts_with("Copying the live Plex library") {
+            if s.starts_with("Checking the live Plex library") {
                 attempts.set(attempts.get() + 1);
             }
         })
@@ -1221,7 +1280,7 @@ mod mirror_tests {
         fs::write(&journal, b"busy").unwrap();
         let attempts = std::cell::Cell::new(0);
         let first = recover_library(&src, &dst, true, |message| {
-            if message.starts_with("Copying the live Plex library") {
+            if message.starts_with("Checking the live Plex library") {
                 attempts.set(attempts.get() + 1);
             }
         });
@@ -1258,15 +1317,100 @@ mod mirror_tests {
         library(&src);
         copy_validated_snapshot(&src, &dst, true, false).unwrap();
         let old = fs::read(&dst).unwrap();
-        let error = copy_snapshot_with_hook(&src, &dst, true, false, || {
-            Connection::open(&src)
-                .unwrap()
-                .execute("UPDATE metadata_items SET title='changed'", [])
-                .unwrap();
-        })
+        let error = copy_snapshot_with_hooks(
+            &src,
+            &dst,
+            true,
+            false,
+            || {},
+            || {
+                Connection::open(&src)
+                    .unwrap()
+                    .execute("UPDATE metadata_items SET title='changed'", [])
+                    .unwrap();
+            },
+        )
         .unwrap_err();
         assert!(error.to_string().contains("source changed during copy"));
         assert_eq!(old, fs::read(&dst).unwrap());
+    }
+
+    #[test]
+    fn wal_only_commit_in_preflight_skips_transfer_then_a_quiet_refresh_replays_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("library.db");
+        // Staging is created beside the destination only when the transfer starts.
+        let dst = dir.path().join("local/plex_library.db");
+        library(&src);
+        let writer = Connection::open(&src).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        writer
+            .execute("UPDATE metadata_items SET title='First commit'", [])
+            .unwrap();
+        let main = file_state(&src, 100).unwrap();
+        let err = copy_snapshot_with_hooks(
+            &src,
+            &dst,
+            true,
+            false,
+            || {
+                writer
+                    .execute("UPDATE metadata_items SET title='Later commit'", [])
+                    .unwrap();
+            },
+            || panic!("copied an active library"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("skipped the full copy"));
+        assert_eq!(main, file_state(&src, 100).unwrap());
+        assert!(!dst.parent().unwrap().exists());
+        assert!(source_state(&src).unwrap().1.unwrap().len > 0);
+        recover_library(&src, &dst, true, |_| {}).unwrap();
+        let local = Connection::open_with_flags(&dst, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let title: String = local
+            .query_row("SELECT title FROM metadata_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "Later commit");
+    }
+
+    #[test]
+    fn bounded_transfer_does_not_follow_growth_and_detects_truncation_between_chunks() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("payload");
+        let dst = dir.path().join("staged");
+        let length = COPY_CHUNK_BYTES + 8;
+        let writer = fs::File::create(&src).unwrap();
+        writer.set_len(length).unwrap();
+        drop(writer);
+        let mut bytes_copied = 0;
+        copy_contents(&src, &dst, length, |bytes| {
+            bytes_copied += bytes;
+            if bytes_copied == COPY_CHUNK_BYTES {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&src)?
+                    .write_all(b"new frames")?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(bytes_copied, length);
+        assert_eq!(fs::metadata(&dst).unwrap().len(), length);
+        assert!(fs::metadata(&src).unwrap().len() > length);
+
+        let err = copy_contents(&src, &dst, length, |bytes| {
+            assert_eq!(bytes, COPY_CHUNK_BYTES);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&src)?
+                .set_len(bytes)
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(fs::metadata(&dst).unwrap().len(), COPY_CHUNK_BYTES);
     }
 
     fn source(path: &Path) -> Connection {

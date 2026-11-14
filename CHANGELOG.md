@@ -1,6 +1,6 @@
 # Unreleased
 
-- A manual refresh makes one read-only copy attempt against the live Plex library. If Plex changes it during the copy, PEX can use its previous mirror or an existing completed library backup.
+- A live owned refresh checks the library and its WAL twice before transferring either file. PEX skips the live copy if the files are changing and bounds each transfer by its starting size. When the live source is busy, PEX keeps its previous usable mirror or tries an existing completed library backup.
 - **Completed snapshots** lets PEX read backups from an existing folder. The guide shows the backup date for owned and scheduled recording badges. All scanning and SQLite validation take place on the PEX computer.
 
 # Pex 1.2.5

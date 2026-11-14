@@ -14,11 +14,11 @@ Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the
 
 ## Refresh the owned library
 
-In **Live library** mode, **Refresh owned scan** makes one attempt to copy the library database and its SQLite write-ahead log (WAL) over the share. PEX checks their state before and after the copy, then opens and validates the files on your computer. You can keep using Plex and browsing the guide during the refresh.
+In **Live library** mode, **Refresh owned scan** checks the database and its SQLite write-ahead log (WAL) twice before starting a transfer. If the files are changing, PEX skips the live copy. If they look stable, PEX copies them once, checks again for changes and validates the copy on your computer. You can keep using Plex and browsing the guide during the refresh.
 
-If Plex changes the files during the copy, PEX discards the incomplete local copy. It keeps a usable previous mirror from the configured source. If there is no usable mirror, PEX looks for an existing, completed `com.plexapp.plugins.library.db-YYYY-MM-DD` backup alongside the live library. It tries the newest dates first and checks that each candidate is complete, stable and readable as a Plex library.
+If Plex starts writing during the transfer, PEX limits the read to the file sizes it saw at the start and discards a copy that fails its consistency checks. When the live copy is unavailable, PEX keeps a usable previous mirror from the configured source. If there is no usable mirror, PEX looks for an existing, completed `com.plexapp.plugins.library.db-YYYY-MM-DD` backup alongside the live library. It tries the newest dates first and checks that each candidate is complete, stable and readable as a Plex library.
 
-The guide shows the source and date used for owned and scheduled recording badges. A backup can predate new films, recording requests or cancellations. **Retry owned scan** requests a fresh live copy. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
+The guide shows the source and date used for owned and scheduled recording badges. A backup can predate new films, recording requests or cancellations. Choose **Retry owned scan** to check the live library again. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
 
 ## Refresh from completed snapshots
 

@@ -154,7 +154,7 @@ the accompanying WAL/SHM files) exist on disk.
 
 For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip owned and scheduled-recording badges, then **Save and load guide**. Settings are saved automatically; a TMDb key is optional.
 
-A live owned refresh makes one attempt to read the library and its WAL from the server. PEX checks that the files stayed stable and validates them locally. If Plex is busy, PEX keeps its usable local mirror. On a first scan it can read an existing completed dated backup alongside the library. The guide shows the source and date used for owned and recording badges, and offers **Retry owned scan**.
+A live owned refresh checks the library and its write-ahead log (WAL) twice before transferring them. If they look stable, PEX copies them once, checks for changes and validates them locally. If Plex is busy, PEX keeps its usable local mirror. When there is no usable mirror, it can use an existing completed dated backup alongside the library. The guide shows the source and date used for owned and recording badges, and offers **Retry owned scan**.
 
 If completed backups already exist, choose **Completed snapshots** in **Connect to Plex** and select their folder. PEX checks for a newer backup on refresh and reuses its validated local mirror when the backup is unchanged. Both modes need only read access to a local directory or mounted/network share. [Portable setup instructions](make_portable/README.md#refresh-from-completed-snapshots)
 
@@ -176,7 +176,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
-| `plex_library_db_source` | string or `null` | `null` | When set, Pex copies Plex’s library SQLite file into `db/plex_library.db` on the same 24-hour freshness cadence. Leave unset if you manage `db/plex_library.db` yourself. |
+| `plex_library_db_source` | string or `null` | `null` | Live Plex library used for `db/plex_library.db`. PEX refreshes the mirror on a 24-hour cadence or when you choose **Refresh owned scan**. Leave unset if you manage the local mirror yourself. |
 | `library_snapshot_dir` | string or `null` | `null` | Use existing completed library backups from this directory for owned/recording badges. The live library path can stay configured. |
 | `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |

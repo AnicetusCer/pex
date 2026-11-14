@@ -286,7 +286,7 @@ ratings:
 
 advanced_controls:
   - Poster cache: clear, prune to limit, or light refresh for stale files
-  - Owned cache: refresh owned scan (incremental)
+  - Owned cache: manual refresh checks the live library and WAL for changes before copying them and rebuilding the owned index
   - UI prefs: backup / restore latest snapshot
   - Status readouts: active config path, Plex DB path existence, TMDb key state
 

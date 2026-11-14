@@ -129,6 +129,22 @@ def smoke(bundle, root):
     with readonly_source(data):
         launch(app, "Live Library", live_copy=True)
 
+    # Make the mirror due for a refresh. Keep a committed title change in the
+    # fixture's WAL while the packaged app copies it over the old local mirror.
+    marker = app / "db/plex_library.db.last_sync"
+    old_time = time.time() - 2 * 24 * 60 * 60
+    os.utime(marker, (old_time, old_time))
+    with closing(sqlite3.connect(library)) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("UPDATE metadata_items SET title=?, original_title=?",
+                       ("Updated Live Library", "Updated Live Library"))
+        writer.commit()
+        assert (data / (library.name + "-wal")).stat().st_size > 0
+        with readonly_source(data):
+            launch(app, "Updated Live Library", live_copy=True)
+    assert marker.stat().st_mtime > old_time
+
     # A busy first scan uses an existing dated backup. Each directory below
     # represents the state of a server share before PEX opens the app.
     fallback_app = root / "fallback-portable"
