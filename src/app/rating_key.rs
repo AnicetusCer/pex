@@ -16,11 +16,12 @@ impl PexApp {
             return;
         }
         self.rating_key_feedback = None;
+        self.has_ratings_key = load_config()
+            .tmdb_api_key
+            .is_some_and(|key| !key.trim().is_empty());
         self.rating_key_editor = Some(RatingKeyEditor {
             draft: String::new(),
-            has_saved_key: load_config()
-                .tmdb_api_key
-                .is_some_and(|key| !key.trim().is_empty()),
+            has_saved_key: self.has_ratings_key,
             requested_film,
             error: None,
             focus_input: true,
@@ -91,6 +92,7 @@ impl PexApp {
             };
             match save_tmdb_api_key(key) {
                 Ok(_) => {
+                    self.has_ratings_key = !remove;
                     self.rating_tx = None;
                     self.rating_rx = None;
                     self.rating_states.clear();

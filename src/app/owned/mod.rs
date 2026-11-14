@@ -5,11 +5,70 @@ use std::collections::HashSet;
 use eframe::egui as eg;
 
 use self::owned_scan_plex::OwnedScanPlex;
-use crate::app::types::OwnedMsg;
+use crate::app::types::{
+    OwnedCandidate, OwnedCandidates, OwnedField, OwnedLibrary, OwnedMsg, PosterRow,
+};
 
 // v1 sidecars contain franchise prefixes and synthetic years indistinguishable from real titles.
 pub(super) const ALL_SIDECAR: &str = "owned_all_v3.txt";
 pub(super) const HD_SIDECAR: &str = "owned_hd_v3.txt";
+
+struct OwnedMatch<'a> {
+    // A GUID match always comes from the scanned library, even if a title also matches.
+    title_key: Option<String>,
+    candidates: &'a [OwnedCandidate],
+}
+
+impl OwnedMatch<'_> {
+    fn explanation(&self, guide_year: Option<i32>) -> &'static str {
+        let Some(key) = &self.title_key else {
+            return "Matched by the same Plex metadata identifier.";
+        };
+        if key.ends_with(":any") || key.ends_with(":undated") {
+            "Matched by name. A release year was unavailable."
+        } else if key.starts_with("bare:")
+            || key.starts_with("credited:")
+            || key.starts_with("prefix:")
+        {
+            "Matched a shortened title and the same release year."
+        } else if key
+            .rsplit_once(':')
+            .and_then(|(_, y)| y.parse::<i32>().ok())
+            .zip(guide_year)
+            .is_some_and(|(year, guide_year)| year != guide_year)
+        {
+            "Matched by name with a one-year release date difference."
+        } else {
+            "Matched by name and release year."
+        }
+    }
+}
+
+fn lookup<'a>(
+    title: &str,
+    year: Option<i32>,
+    guid: Option<&str>,
+    keys: &HashSet<String>,
+    library: Option<&'a OwnedLibrary>,
+) -> Option<OwnedMatch<'a>> {
+    if let Some(candidates) = library.and_then(|lib| {
+        let guid = crate::app::utils::canonicalize_guid(guid?)?;
+        lib.by_guid.get(&guid)
+    }) {
+        return Some(OwnedMatch {
+            title_key: None,
+            candidates: candidates.as_slice(),
+        });
+    }
+    let key = crate::app::PexApp::match_owned_title(title, year, keys)?;
+    let candidates = library
+        .and_then(|lib| lib.by_title.get(&key))
+        .map_or(&[][..], OwnedCandidates::as_slice);
+    Some(OwnedMatch {
+        title_key: Some(key),
+        candidates,
+    })
+}
 
 impl crate::app::PexApp {
     /// Kick off a non-blocking owned scan against the Plex library database.
@@ -27,6 +86,7 @@ impl crate::app::PexApp {
             self.owned_notice = Some("Guide only: owned and recording badges are disabled. Use Connect to Plex to enable them.".into());
             self.owned_keys = None;
             self.owned_hd_keys = None;
+            self.owned_library = None;
             self.scheduled_index = None;
             self.apply_owned_flags();
             self.apply_scheduled_flags();
@@ -60,37 +120,86 @@ impl crate::app::PexApp {
             return;
         };
         self.owned_match_stats = crate::app::OwnedMatchStats::default();
-        let owned_guids = self.owned_guids.as_ref();
-        let guid_modified = self.owned_guid_modified.as_ref();
-        let modified = self.owned_modified.as_ref();
+        let library = self.owned_library.as_ref();
         for row in &mut self.rows {
-            let guid = row
-                .guid
-                .as_deref()
-                .and_then(crate::app::utils::canonicalize_guid)
-                .filter(|guid| owned_guids.is_some_and(|set| set.contains(guid)));
-            if let Some(guid) = guid {
-                row.owned = true;
-                row.owned_hd = self
-                    .owned_hd_guids
-                    .as_ref()
-                    .is_some_and(|set| set.contains(&guid));
-                row.owned_modified = guid_modified.and_then(|m| m.get(&guid)).copied().flatten();
-                self.owned_match_stats.by_guid += 1;
-            } else if let Some(key) = Self::match_owned_title(&row.title, row.year, keys) {
-                row.owned = true;
-                row.owned_hd = self
-                    .owned_hd_keys
-                    .as_ref()
-                    .is_some_and(|set| set.contains(&key));
-                row.owned_modified = modified.and_then(|m| m.get(&key)).copied().flatten();
-                self.owned_match_stats.by_key += 1;
-            } else {
+            let Some(found) = lookup(&row.title, row.year, row.guid.as_deref(), keys, library)
+            else {
                 row.owned = false;
                 row.owned_hd = false;
                 row.owned_modified = None;
                 self.owned_match_stats.misses += 1;
+                continue;
+            };
+            row.owned = true;
+            if let Some(key) = found.title_key {
+                row.owned_hd = self
+                    .owned_hd_keys
+                    .as_ref()
+                    .is_some_and(|set| set.contains(&key));
+                self.owned_match_stats.by_key += 1;
+            } else {
+                row.owned_hd = library
+                    .is_some_and(|lib| found.candidates.iter().any(|c| lib.movies[c.movie].hd));
+                self.owned_match_stats.by_guid += 1;
             }
+            // A single file date is meaningful only for an unambiguous match.
+            row.owned_modified = match (library, found.candidates) {
+                (Some(lib), [c]) => lib.movies[c.movie].updated_at,
+                _ => None,
+            };
+        }
+    }
+
+    pub(super) fn ui_owned_details(&self, ui: &mut eg::Ui, row: &PosterRow) {
+        let Some(library) = &self.owned_library else {
+            ui.label(if self.owned_scan_in_progress {
+                "This badge comes from the saved title list. The current scan will look up the Plex file."
+            } else {
+                "This badge comes from the saved title list. Choose Refresh owned scan in Advanced to look up the Plex file."
+            });
+            return;
+        };
+        let Some(found) = self.owned_keys.as_ref().and_then(|keys| {
+            lookup(
+                &row.title,
+                row.year,
+                row.guid.as_deref(),
+                keys,
+                Some(library),
+            )
+        }) else {
+            return;
+        };
+        ui.label(found.explanation(row.year));
+        if found.candidates.len() > 1 {
+            ui.label(format!(
+                "{} Plex movies match this airing.",
+                found.candidates.len()
+            ));
+        }
+        for candidate in found.candidates {
+            let movie = &library.movies[candidate.movie];
+            let title = match movie.year {
+                Some(year) => format!("{} ({year})", movie.title),
+                None => format!("{} (year unknown)", movie.title),
+            };
+            ui.strong(title);
+            match candidate.field {
+                OwnedField::OriginalTitle => {
+                    ui.label("Matched the original title in Plex.");
+                }
+                OwnedField::Filename => {
+                    ui.label("Matched the filename in Plex.");
+                }
+                _ => {}
+            }
+            ui.add(eg::Label::new(&movie.path).wrap().selectable(true));
+            if ui.small_button("Copy file path").clicked() {
+                ui.output_mut(|o| o.copied_text = movie.path.clone());
+            }
+        }
+        if let Some(snapshot) = &library.snapshot {
+            ui.weak(snapshot);
         }
     }
 
@@ -322,25 +431,24 @@ impl crate::app::PexApp {
                 Done(done) => {
                     let crate::app::types::OwnedDone {
                         keys,
-                        guids,
                         hd_keys,
-                        hd_guids,
-                        guid_modified,
-                        modified,
+                        library,
                     } = *done;
                     self.set_startup_progress_floor(crate::app::STARTUP_STAGE3_DONE);
 
-                    let count = keys.len();
+                    let count = library.movies.len();
                     self.owned_keys = Some(keys);
-                    self.owned_guids = Some(guids);
                     self.owned_hd_keys = Some(hd_keys);
-                    self.owned_hd_guids = Some(hd_guids);
-                    self.owned_guid_modified = Some(guid_modified);
-                    self.owned_modified = Some(modified);
+                    self.owned_library = Some(library);
                     self.apply_owned_flags();
                     self.mark_dirty();
                     self.owned_scan_in_progress = false;
-                    self.record_owned_message(format!("Owned scan complete ({count} titles)."));
+                    let unit = if count == 1 {
+                        "Plex movie"
+                    } else {
+                        "Plex movies"
+                    };
+                    self.record_owned_message(format!("Owned scan complete ({count} {unit})."));
                     if let Some(msg) = self.stage4_complete_message.clone() {
                         self.set_status(msg);
                     } else {

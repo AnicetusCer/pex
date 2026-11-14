@@ -34,7 +34,8 @@ impl crate::app::PexApp {
     pub(crate) fn ui_render_grouped_grid(&mut self, ui: &mut eg::Ui, ctx: &eg::Context) {
         self.handle_keyboard_navigation(ctx);
 
-        let groups = self.build_grouped_indices();
+        let guide = self.filtered_guide();
+        let groups = guide.days;
         self.sync_selection_with_groups(&groups);
         self.grid_rows.clear();
 
@@ -62,13 +63,10 @@ impl crate::app::PexApp {
                     let used =
                         (cols as f32).mul_add(card_w, (cols.saturating_sub(1)) as f32 * H_SPACING);
                     let left_pad = ((avail - used) * 0.5).max(0.0);
-                    if left_pad > 0.0 {
-                        ui.add_space(left_pad);
-                    }
-
                     for row_indices in idxs.chunks(cols) {
                         ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing = eg::vec2(H_SPACING, V_SPACING);
+                            ui.add_space(left_pad);
 
                             for &idx in row_indices {
                                 ui.allocate_ui_with_layout(
@@ -85,7 +83,7 @@ impl crate::app::PexApp {
                                         }
 
                                         // opportunistic upload
-                                        if uploads_left > 0 && self.try_lazy_upload_row(ctx, idx) {
+                                        if uploads_left > 0 && ui.is_rect_visible(rect) && self.try_lazy_upload_row(ctx, idx) {
                                             uploads_left -= 1;
                                         }
 
@@ -127,9 +125,9 @@ impl crate::app::PexApp {
                                                 );
                                             }
 
-                                            if row.scheduled {
+                                            if row.scheduled || guide.scheduled_elsewhere.contains(&idx) {
                                                 let pad = 6.0;
-                                                let size = eg::vec2(56.0, 22.0);
+                                                let size = eg::vec2(if row.scheduled { 44.0 } else { 64.0 }, 22.0);
                                                 let rec_rect = eg::Rect::from_min_size(
                                                     eg::pos2(
                                                         poster_rect.left() + pad,
@@ -152,9 +150,12 @@ impl crate::app::PexApp {
                                                 ui.painter().text(
                                                     rec_rect.center(),
                                                     eg::Align2::CENTER_CENTER,
-                                                    "REC",
+                                                    if row.scheduled { "REC" } else { "Other REC" },
                                                     eg::FontId::monospace(13.0),
                                                     eg::Color32::WHITE,
+                                                );
+                                                ui.interact(rec_rect, id.with("rec"), eg::Sense::hover()).on_hover_text(
+                                                    if row.scheduled { "Scheduled to record this showing" } else { "A different showing of this film is scheduled to record" }
                                                 );
                                             }
 
@@ -243,5 +244,8 @@ impl crate::app::PexApp {
                     }
                 }
             });
+        if uploads_left == 0 {
+            ctx.request_repaint();
+        }
     }
 }

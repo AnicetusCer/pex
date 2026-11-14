@@ -1,5 +1,9 @@
 # Unreleased
 
+- The guide keeps repeat airings, remakes and films without artwork. Each card reflects the current filters. Expand **Other showings (N)** for additional times and channels. **REC** identifies the displayed showing and **Other REC** identifies a scheduled alternative.
+- Film listings appear while posters load in the background. Repeated airings share poster downloads.
+- **Owned Details** explains the match and shows the Plex title, year and server file path. It lists all candidates when a match is ambiguous. The scan total counts each Plex movie once, including movies with multiple files or title variants.
+- **Advanced → Refresh path status** checks configured sources and local paths in the background, so an unreachable share leaves the guide available.
 - Manage an optional TMDb v3 API key from **Set up ratings…** on **Connect to Plex** or **Advanced → Ratings key…**. Choosing **⭐ Rating** in film details opens the same masked key entry when needed and resumes the lookup after saving. The key is saved with your portable settings.
 - A live owned refresh checks the library and its WAL twice before transferring either file. PEX skips the live copy if the files are changing and bounds each transfer by its starting size. When the live source is busy, PEX keeps its previous usable mirror or tries an existing completed library backup.
 - **Completed snapshots** lets PEX read backups from an existing folder. The guide shows the backup date for owned and scheduled recording badges. All scanning and SQLite validation take place on the PEX computer.

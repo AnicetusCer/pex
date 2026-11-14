@@ -88,12 +88,11 @@ Expected output: `...zip: OK`
 
 Highlights:
 
-- 🚀 **Fast start-up** – poster and channel artwork are cached and uploaded on
-demand, keeping the UI responsive even on large guides.
+- 🚀 **Browse while posters load** – the grid opens when film listings are ready. Films with missing artwork still show their titles, channels and times.
 - 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
 and genre selectors, plus multiple sort orders.
-- **Owned library awareness** - mirrored Plex library data feeds owned/HD badges and "recorded on" timestamps directly into the grid.
-- 🎯 **DVR awareness** – scheduled recordings show a red *REC* badge and detail call-out pulled from the Plex library database.
+- **Owned library awareness** – expand **Owned Details** on an owned film to see the matching Plex title, year, file path and reason for the match. If several Plex movies match, PEX gives the count and lists them.
+- 🎯 **DVR awareness** – **REC** marks the showing on the card. **Other REC** means another showing of that film in the filtered guide is scheduled.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional TMDb ratings, and formatted descriptions.
 - 🧰 **Operator controls** – quick refresh/clear actions for poster and owned caches as well as worker tuning knobs.
@@ -253,14 +252,13 @@ Map the server path to a readable client path when PEX runs on another machine. 
 1. Launch PEX and select your Plex Databases folder in **Connect to Plex**.
 2. Select a guide and choose whether to enable the owned scan.
 3. Click **Save and load guide**.
-4. Let the initial owned scan and poster prefetch finish (progress appears in
-the status bar). Large libraries may take several minutes.
+4. Start browsing when the listings appear. Posters load in the background and library badges update when the owned scan finishes.
 
 ### Daily usage
-- Launch the app; the UI resumes where you left off.
+- Choose your day range and filters. Each film gets one card showing its next matching airing, or the most recent matching airing when all have started. Films with the same title but different release years can have separate cards.
+- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime, channel, HD/SD and recording status.
 - If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
   day whether the respective database copy needs refreshing.
-- Scheduled recordings sync automatically after poster prep; queued movies show a red *REC* badge in the grid and detail panel.
 - Owned and HD badges stay up-to-date thanks to scanning the mirrored Plex library database.
 
 ### Keeping the owned cache fresh
@@ -281,7 +279,8 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 - **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
   `plex_library_db_source` paths are reachable and readable.
 - **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup. In live mode, verify the configured library path.
-- **REC badge missing:** confirm `plex_library_db_source` is configured, the copied `db/plex_library.db` contains up-to-date `media_subscriptions` rows, and you restarted after scheduling the recording.
+- If a **REC** badge is missing, check **Other showings** for the scheduled slot. After a new recording request, choose **Advanced → Refresh owned scan**. Badges reflect the date of the library snapshot used.
+- If a NAS disconnects, choose **Advanced → Refresh path status** to check the configured sources, local mirrors and cache. You can use the guide while PEX checks the paths in the background.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days
   automatically, so re-open the app after a while to fetch fresh artwork.

@@ -12,6 +12,14 @@ Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed
 
 Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the executable. Keep this portable folder writable. Use **Connect to Plex** in the guide to change the connection later; saving is available after active scans and downloads finish.
 
+## Browse film showings
+
+The guide opens when listings are ready. Posters load in the background, and films without artwork still show their title and airtime. Your date range and filters determine which showing appears on each film’s card.
+
+Select a film and expand **Other showings (N)** for the additional matching airings, with channel, UTC time and HD/SD. **REC** on the card means Plex has scheduled that showing. **Other REC** means one of the additional showings is scheduled.
+
+For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. If multiple Plex movies match, PEX shows the count and lists the matches. **Copy file path** copies the path as Plex sees it on the server.
+
 ## Optional film ratings
 
 You can browse the guide without a ratings key. To fetch TMDb ratings, choose **Set up ratings…** on **Connect to Plex**. You can also choose **⭐ Rating** in a film’s details. If you have no saved key, PEX opens **TMDb ratings key**. Enter your personal TMDb v3 API key in the masked field and choose **Save key**. When opened from film details, saving resumes that film’s lookup.
@@ -56,6 +64,7 @@ For manual JSON edits, escape Windows backslashes or use forward slashes. `confi
 
 ## Troubleshooting
 
+- If a NAS disconnects, choose **Advanced → Refresh path status** to recheck the sources, local mirrors and cache. The checks run in the background while you browse.
 - **Folder cannot be read:** open the same share in File Explorer as the same Windows user, check permissions, and use **Find databases** again.
 - **No guide databases found:** select the `Databases` folder itself and ensure Plex DVR/EPG has been configured.
 - **Guide cannot load:** PEX returns to **Connect to Plex**, showing the error and a next action. Choose another guide when several are listed, or correct the saved file and use **Retry saved configuration**.

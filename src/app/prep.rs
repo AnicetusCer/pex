@@ -16,49 +16,6 @@ use crate::app::{PrepItem, PrepMsg}; // <- use the re-export from app::types
 use crate::config::{load_config, local_db_path, local_library_db_path};
 use eframe::egui as eg; // <- gives us eg::Context
 
-// --- local SQL (newer plex uses user_thumb_url; older uses thumb_url) ---
-const SQL_POSTERS_USER_THUMB: &str = r#"
-SELECT
-  m.title,
-  m.user_thumb_url,
-  mi.begins_at,
-  m.year,
-  m.tags_genre,
-  mi.extra_data,
-  m.guid,
-  m.summary,
-  m.audience_rating,
-  m.rating
-FROM metadata_items m
-LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
-WHERE m.metadata_type = 1
-  AND m.user_thumb_url IS NOT NULL
-  AND m.user_thumb_url <> ''
-ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-LIMIT ?1
-"#;
-
-const SQL_POSTERS_THUMB: &str = r#"
-SELECT
-  m.title,
-  m.thumb_url,
-  mi.begins_at,
-  m.year,
-  m.tags_genre,
-  mi.extra_data,
-  m.guid,
-  m.summary,
-  m.audience_rating,
-  m.rating
-FROM metadata_items m
-LEFT JOIN media_items mi ON mi.metadata_item_id = m.id
-WHERE m.metadata_type = 1
-  AND m.thumb_url IS NOT NULL
-  AND m.thumb_url <> ''
-ORDER BY COALESCE(mi.begins_at, m.added_at) ASC
-LIMIT ?1
-"#;
-
 // ---- helpers only used in this module ----
 fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
     conn.query_row(
@@ -100,6 +57,98 @@ fn parse_channel_meta(extra: &str) -> ChannelMeta {
         thumb,
     }
 }
+/// A film can have many media_items (airings). Artwork is optional and belongs
+/// to the metadata item, so neither its URL nor its absence identifies the film.
+fn read_guide_airings(
+    db: &Connection,
+    progress: impl Fn(usize),
+) -> rusqlite::Result<Vec<PrepItem>> {
+    let mut columns = db.prepare("SELECT name FROM pragma_table_info('metadata_items')")?;
+    let names = columns
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    // Older Plex schemas can have either artwork column, both, or neither.
+    let preferred = if names.contains("user_thumb_url") {
+        "m.user_thumb_url"
+    } else {
+        "NULL"
+    };
+    let secondary = if names.contains("thumb_url") {
+        "m.thumb_url"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
+        mi.extra_data, m.summary, m.audience_rating, m.rating, {preferred}, {secondary}
+        FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id = m.id
+        WHERE m.metadata_type = 1 AND mi.begins_at >= 0 AND trim(m.title) <> ''
+        ORDER BY mi.begins_at, m.id, mi.id"
+    );
+    let mut statement = db.prepare(&sql)?;
+    let mut rows = statement.query([])?;
+    let mut list = Vec::new();
+    let mut last_emit = Instant::now();
+    while let Some(row) = rows.next()? {
+        let metadata_id: i64 = row.get(0)?;
+        let (Ok(title), Ok(begins_at)) = (row.get::<_, String>(1), row.get::<_, i64>(2)) else {
+            continue;
+        };
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let year: Option<i32> = row.get(3).ok();
+        let guid: Option<String> = row.get(4).ok();
+        let film_key = if let Some(id) = guid
+            .as_deref()
+            .and_then(crate::app::utils::canonicalize_guid)
+        {
+            format!("guid:{id}")
+        } else if let Some(year) = year.filter(|year| *year > 0) {
+            format!("title:{year}:{}", title.to_lowercase())
+        } else {
+            // Avoid merging two undated, same-title films.
+            format!("metadata:{metadata_id}")
+        };
+        let artwork: [Option<String>; 2] = [row.get(10).ok(), row.get(11).ok()];
+        let thumb_url = artwork
+            .into_iter()
+            .flatten()
+            .map(|url| url.trim().to_owned())
+            .find(|url| super::prefetch::usable_poster_url(url))
+            .unwrap_or_default();
+        let key = if thumb_url.is_empty() {
+            String::new()
+        } else {
+            url_to_cache_key(&thumb_url)
+        };
+        let extra: Option<String> = row.get(6).ok();
+        let channel = extra.as_deref().map(parse_channel_meta).unwrap_or_default();
+        list.push(PrepItem {
+            film_key,
+            title,
+            thumb_url,
+            key,
+            begins_at: Some(begins_at),
+            year,
+            guid,
+            tags_genre: row.get(5).ok(),
+            channel_call_sign: channel.call_sign,
+            channel_title: channel.title,
+            channel_thumb: channel.thumb,
+            summary: row.get(7).ok(),
+            audience_rating: row.get::<_, f64>(8).ok().map(|value| value as f32),
+            critic_rating: row.get::<_, f64>(9).ok().map(|value| value as f32),
+        });
+        if last_emit.elapsed() >= Duration::from_millis(600) {
+            progress(list.len());
+            last_emit = Instant::now();
+        }
+    }
+    Ok(list)
+}
+
 const MIN_COPY_INTERVAL_HOURS: u64 = 24;
 
 fn last_sync_marker_path(local_db: &Path) -> PathBuf {
@@ -557,70 +606,12 @@ fn recover_library(
     Err(format!("No usable library snapshot. Live file copy failed: {failure}. No completed, valid dated backup was available. {} Check the share, or use Retry owned scan after the recording finishes. You can also choose Guide only in Connect to Plex.", rejected.join("; ")))
 }
 
-// Set to true if you want to synthesize a tiny fake list for debugging.
-const DIAG_FAKE_STARTUP: bool = false;
-
 /// Spawn the background thread that prepares the poster list (no downloads here).
 pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
     std::thread::spawn(move || {
         let send = |m: PrepMsg| {
             let _ = tx.send(m);
         };
-
-        if DIAG_FAKE_STARTUP {
-            send(PrepMsg::Info(
-                "DIAG: synthesizing small poster list…".into(),
-            ));
-            let fake: Vec<PrepItem> = vec![
-                PrepItem {
-                    title: "Blade Runner".into(),
-                    thumb_url: "https://example.com/a.jpg".into(),
-                    key: url_to_cache_key("https://example.com/a.jpg"),
-                    begins_at: None,
-                    year: Some(1982),
-                    tags_genre: Some("Sci-Fi|Thriller".into()),
-                    channel_call_sign: Some("ITV2".into()),
-                    channel_title: Some("006 ITV2".into()),
-                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
-                    guid: Some("com.plexapp.agents.imdb://tt0083658".into()),
-                    summary: Some("In the future, blade runners hunt replicants.".into()),
-                    audience_rating: Some(8.5),
-                    critic_rating: Some(8.9),
-                },
-                PrepItem {
-                    title: "Alien".into(),
-                    thumb_url: "https://example.com/b.jpg".into(),
-                    key: url_to_cache_key("https://example.com/b.jpg"),
-                    begins_at: None,
-                    year: Some(1979),
-                    tags_genre: Some("Sci-Fi|Horror".into()),
-                    channel_call_sign: Some("ITV2".into()),
-                    channel_title: Some("006 ITV2".into()),
-                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
-                    guid: Some("com.plexapp.agents.imdb://tt0078748".into()),
-                    summary: Some("The crew of the Nostromo encounters a deadly alien.".into()),
-                    audience_rating: Some(8.4),
-                    critic_rating: Some(9.0),
-                },
-                PrepItem {
-                    title: "Arrival".into(),
-                    thumb_url: "https://example.com/c.jpg".into(),
-                    key: url_to_cache_key("https://example.com/c.jpg"),
-                    begins_at: None,
-                    year: Some(2016),
-                    tags_genre: Some("Sci-Fi|Drama".into()),
-                    channel_call_sign: Some("ITV2".into()),
-                    channel_title: Some("006 ITV2".into()),
-                    channel_thumb: Some("https://example.com/channel_itv2.png".into()),
-                    guid: Some("com.plexapp.agents.imdb://tt2543164".into()),
-                    summary: Some("A linguist communicates with extraterrestrial visitors.".into()),
-                    audience_rating: Some(8.0),
-                    critic_rating: Some(8.4),
-                },
-            ];
-            send(PrepMsg::Done(fake));
-            return;
-        }
 
         // Resolve DB paths from config
         let cfg = load_config();
@@ -704,135 +695,22 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
             return;
         }
 
-        // Quick counts to see if our WHERE will match anything
-        let cnt_total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM metadata_items WHERE metadata_type=1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let cnt_with_thumb: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM metadata_items \
-                 WHERE metadata_type=1 AND (COALESCE(user_thumb_url,'')<>'' OR COALESCE(thumb_url,'')<>'')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        info!("prep: movies total={cnt_total}, with_thumb={cnt_with_thumb}");
-        send(PrepMsg::Info(format!(
-            "Movies in DB: total {cnt_total}, with thumbs {cnt_with_thumb}"
-        )));
-
-        // SQL with fallback (includes mi.extra_data for channel extraction)
-        let mut st = match conn.prepare(SQL_POSTERS_USER_THUMB) {
-            Ok(s) => s,
-            Err(e1) => {
-                if e1.to_string().contains("user_thumb_url") {
-                    match conn.prepare(SQL_POSTERS_THUMB) {
-                        Ok(s) => s,
-                        Err(e2) => {
-                            send(PrepMsg::Error(format!(
-                                "prepare failed: {e1} / fallback: {e2}"
-                            )));
-                            return;
-                        }
-                    }
-                } else {
-                    send(PrepMsg::Error(format!("prepare failed: {e1}")));
-                    return;
-                }
-            }
-        };
-
-        // Harvest list — NO network here
         send(PrepMsg::Info(
-            "Stage 2/4 - Parsing Plex guide data (collecting posters and metadata for the grid)."
-                .into(),
+            "Stage 2/4 - Reading film airings from the local guide.".into(),
         ));
-        let mut q = match st.query([1_000_000_i64]) {
-            Ok(r) => r,
-            Err(e) => {
-                send(PrepMsg::Error(format!("query failed: {e}")));
-                return;
-            }
-        };
-
-        let mut list: Vec<PrepItem> = Vec::new();
-        let mut last_emit = Instant::now();
-
-        loop {
-            let row = match q.next() {
-                Ok(Some(row)) => row,
-                Ok(None) => break,
-                Err(err) => {
-                    send(PrepMsg::Error(format!("Reading guide rows failed: {err}")));
-                    return;
-                }
-            };
-            let title: Option<String> = row.get(0).ok().flatten();
-            let url: Option<String> = row.get(1).ok().flatten();
-            let begins: Option<i64> = row.get(2).ok().flatten();
-            let year: Option<i32> = row.get(3).ok().flatten();
-            let tags: Option<String> = row.get(4).ok().flatten();
-            let extra: Option<String> = row.get(5).ok().flatten();
-            let guid: Option<String> = row.get(6).ok().flatten();
-            let summary: Option<String> = row.get(7).ok().flatten();
-            let audience_rating: Option<f32> = row
-                .get::<_, Option<f64>>(8)
-                .ok()
-                .flatten()
-                .map(|v| v as f32);
-            let critic_rating: Option<f32> = row
-                .get::<_, Option<f64>>(9)
-                .ok()
-                .flatten()
-                .map(|v| v as f32);
-
-            if let (Some(t), Some(u)) = (title, url) {
-                let tt = t.trim();
-                if !tt.is_empty() && (u.starts_with("http://") || u.starts_with("https://")) {
-                    let key = url_to_cache_key(&u);
-                    let channel_meta = extra.as_deref().map(parse_channel_meta).unwrap_or_default();
-
-                    list.push(crate::app::types::PrepItem {
-                        title: tt.to_owned(),
-                        thumb_url: u,
-                        key,
-                        begins_at: begins,
-                        year,
-                        tags_genre: tags,
-                        channel_call_sign: channel_meta.call_sign,
-                        channel_title: channel_meta.title,
-                        channel_thumb: channel_meta.thumb,
-                        guid,
-                        summary,
-                        audience_rating,
-                        critic_rating,
-                    });
-                    if last_emit.elapsed() >= Duration::from_millis(600) {
-                        send(PrepMsg::Info(format!("Stage 2/4 - Parsing Plex guide data ({} posters discovered so far; powers the main grid).", list.len())));
-                        last_emit = Instant::now();
-                    }
-                }
-            }
-        }
-
-        // Dedupe by title (stable)
-        let mut seen = std::collections::HashSet::new();
-        list.retain(|item| seen.insert(item.title.to_ascii_lowercase()));
-
-        info!("prep: final poster rows after dedupe = {}", list.len());
-        if list.is_empty() {
-            warn!("prep: no posters found — likely DB path/columns mismatch");
+        match read_guide_airings(&conn, |count| {
             send(PrepMsg::Info(format!(
-                "No posters found — check DB path/type in {}",
-                crate::config::CONFIG_FILENAME
+                "Stage 2/4 - Read {count} film airings…"
             )));
+        }) {
+            Ok(list) => {
+                info!("prep: read {} film airings", list.len());
+                send(PrepMsg::Done(list));
+            }
+            Err(error) => send(PrepMsg::Error(format!(
+                "Reading guide airings failed: {error}"
+            ))),
         }
-
-        send(PrepMsg::Done(list));
     });
 }
 
@@ -846,7 +724,6 @@ impl crate::app::PexApp {
         self.boot_phase = super::BootPhase::CheckingNew;
         self.set_startup_progress_floor(crate::app::STARTUP_STAGE2_STARTED);
         self.set_status("Stage 2/4 - Preparing Plex guide data (scans the EPG so the grid knows what's airing).");
-        self.last_item_msg.clear();
 
         let (tx, rx) = std::sync::mpsc::channel::<crate::app::PrepMsg>();
         self.prep_rx = Some(rx);
@@ -885,17 +762,19 @@ impl crate::app::PexApp {
                         // Convert manifest rows into UI rows
                         self.rating_states.clear();
                         self.channel_icon_textures.clear();
+                        let mut cached_posters = std::collections::HashMap::new();
                         self.rows = list
                             .into_iter()
                             .map(|item| {
-                                let airing = item.begins_at.map(|ts| {
-                                    std::time::SystemTime::UNIX_EPOCH
-                                        + std::time::Duration::from_secs(ts as u64)
+                                let airing = item.begins_at.and_then(|ts| {
+                                    SystemTime::UNIX_EPOCH
+                                        .checked_add(Duration::from_secs(u64::try_from(ts).ok()?))
                                 });
 
                                 let channel_raw = item
                                     .channel_call_sign
                                     .clone()
+                                    .or_else(|| item.channel_title.clone())
                                     .or_else(|| crate::app::utils::host_from_url(&item.thumb_url));
 
                                 let channel_title_original =
@@ -912,8 +791,16 @@ impl crate::app::PexApp {
                                             .map(|c| crate::app::utils::humanize_channel(c))
                                     });
 
-                                let small_k = Self::small_key(&item.key);
-                                let path = crate::app::cache::find_any_by_key(&small_k);
+                                let (small_k, path) = if item.key.is_empty() {
+                                    (String::new(), None)
+                                } else {
+                                    let key = Self::small_key(&item.key);
+                                    let path = cached_posters
+                                        .entry(key.clone())
+                                        .or_insert_with(|| crate::app::cache::find_any_by_key(&key))
+                                        .clone();
+                                    (key, path)
+                                };
                                 let state = if path.is_some() {
                                     crate::app::PosterState::Cached
                                 } else {
@@ -939,6 +826,7 @@ impl crate::app::PexApp {
                                 });
 
                                 crate::app::PosterRow {
+                                    film_key: item.film_key,
                                     title: item.title,
                                     url: item.thumb_url,
                                     key: small_k,
@@ -976,7 +864,7 @@ impl crate::app::PexApp {
                             for url in &icon_urls {
                                 self.channel_icon_pending.insert(url.clone());
                             }
-                            Self::spawn_channel_icon_prefetch(icon_urls);
+                            Self::spawn_channel_icon_prefetch(icon_urls, ctx.clone());
                         }
 
                         // Warm-start: upload last hotset first (bounded)
@@ -1023,7 +911,6 @@ impl crate::app::PexApp {
                             ctx,
                             std::env::var_os("PEX_DISABLE_PREFETCH").is_some(),
                         );
-                        self.prewarm_first_screen(ctx);
 
                         keep = None;
                         seen_any = true;
@@ -1050,6 +937,34 @@ impl crate::app::PexApp {
 
         if seen_any {
             ctx.request_repaint();
+        }
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+
+    #[test]
+    fn reads_airings_with_either_artwork_column_or_neither() {
+        for (drop_columns, expected) in [
+            ("", "https://fixture.invalid/user.jpg"),
+            ("ALTER TABLE metadata_items DROP COLUMN user_thumb_url", "https://fixture.invalid/secondary.jpg"),
+            ("ALTER TABLE metadata_items DROP COLUMN thumb_url", "https://fixture.invalid/user.jpg"),
+            ("ALTER TABLE metadata_items DROP COLUMN user_thumb_url; ALTER TABLE metadata_items DROP COLUMN thumb_url", ""),
+        ] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(include_str!("test_fixtures.sql")).unwrap();
+            db.execute_batch("UPDATE metadata_items SET guid=NULL, user_thumb_url='https://fixture.invalid/user.jpg', thumb_url='https://fixture.invalid/secondary.jpg';
+                INSERT INTO metadata_items (id, metadata_type, title, year) VALUES
+                (2, 1, 'Fixture Movie', 1980), (3, 1, 'Fixture Movie', NULL), (4, 1, 'Fixture Movie', NULL);
+                INSERT INTO media_items (id,metadata_item_id,begins_at) VALUES (2,2,1), (3,3,2), (4,4,3)").unwrap();
+            db.execute_batch(drop_columns).unwrap();
+            let films = read_guide_airings(&db, |_| {}).unwrap();
+            assert_eq!(films.len(), 4);
+            assert_eq!(films[0].thumb_url, expected);
+            assert_ne!(films[0].film_key, films[1].film_key);
+            assert_ne!(films[2].film_key, films[3].film_key);
         }
     }
 }

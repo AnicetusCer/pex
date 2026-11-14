@@ -40,7 +40,10 @@ pub use types::{
 pub mod detail;
 pub mod filters;
 pub mod gfx;
+#[cfg(test)]
+mod guide_ui_tests;
 pub mod owned;
+mod path_checks;
 pub mod prefetch;
 pub mod prefs;
 mod rating_key;
@@ -56,8 +59,6 @@ pub mod ui;
 const WORKER_COUNT: usize = 16; // up from 8 — tune freely (8–32 typical)
 const RESIZE_MAX_W: u32 = 320;
 const RESIZE_QUALITY: u8 = 75;
-const SHOW_GRID_EARLY: bool = true;
-const MIN_READY_BEFORE_GRID: usize = 24;
 const STATUS_EMIT_EVERY_MS: u64 = 120;
 const MAX_DONE_PER_FRAME: usize = 12;
 const MAX_UPLOADS_PER_FRAME: usize = 4;
@@ -95,16 +96,12 @@ pub struct PexApp {
     loading_progress: f32,
     startup_progress_floor: f32,
     loading_message: String,
-    last_item_msg: String,
 
     // poster prep warm-up
     boot_phase: BootPhase,
     prep_rx: Option<Receiver<PrepMsg>>,
     prep_started: bool,
 
-    // splash heartbeat (keeps UI visibly alive)
-    heartbeat_last: Instant,
-    heartbeat_dots: u8,
     status_last_emit: Instant,
 
     // phase visibility
@@ -132,11 +129,8 @@ pub struct PexApp {
     // background owned scan
     owned_rx: Option<Receiver<OwnedMsg>>,
     owned_keys: Option<HashSet<String>>,
-    owned_guids: Option<HashSet<String>>,
+    owned_library: Option<types::OwnedLibrary>,
     owned_hd_keys: Option<HashSet<String>>,
-    owned_hd_guids: Option<HashSet<String>>,
-    owned_guid_modified: Option<HashMap<String, Option<u64>>>,
-    owned_modified: Option<HashMap<String, Option<u64>>>,
     owned_match_stats: OwnedMatchStats,
     owned_scan_in_progress: bool,
     owned_scan_available: bool,
@@ -145,6 +139,7 @@ pub struct PexApp {
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
     rating_key_editor: Option<rating_key::RatingKeyEditor>,
+    has_ratings_key: bool,
     rating_key_feedback: Option<&'static str>,
 
     scheduled_index: Option<ScheduledIndex>,
@@ -165,6 +160,7 @@ pub struct PexApp {
     selected_decades: BTreeSet<i32>,
     show_genre_filter_popup: bool,
     show_advanced_popup: bool,
+    advanced_paths: path_checks::PathChecks,
     advanced_feedback: Option<String>,
     connection: setup::ConnectionSetup,
     owned_notice: Option<String>,
@@ -212,10 +208,7 @@ impl Default for PexApp {
             loading_progress: 0.0,
             startup_progress_floor: 0.0,
             loading_message: String::new(),
-            last_item_msg: String::new(),
 
-            heartbeat_last: Instant::now(),
-            heartbeat_dots: 0,
             status_last_emit: Instant::now(),
 
             phase: Phase::Prefetching, // will be set properly later
@@ -244,15 +237,12 @@ impl Default for PexApp {
             } else {
                 None
             },
-            owned_guids: None,
+            owned_library: None,
             owned_hd_keys: if preload_owned {
                 Self::load_owned_hd_sidecar()
             } else {
                 None
             },
-            owned_hd_guids: None,
-            owned_guid_modified: None,
-            owned_modified: None,
             owned_match_stats: OwnedMatchStats::default(),
             owned_scan_in_progress: false,
             owned_scan_available: false,
@@ -261,6 +251,10 @@ impl Default for PexApp {
             rating_rx: None,
             rating_states: HashMap::new(),
             rating_key_editor: None,
+            has_ratings_key: cfg
+                .tmdb_api_key
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty()),
             rating_key_feedback: None,
             scheduled_index: None,
             scheduled_match_stats: ScheduledMatchStats::default(),
@@ -278,6 +272,7 @@ impl Default for PexApp {
             selected_decades: BTreeSet::new(),
             show_genre_filter_popup: false,
             show_advanced_popup: false,
+            advanced_paths: Default::default(),
             advanced_feedback: None,
             connection: setup::ConnectionSetup::from_config(cfg),
             owned_notice: None,
@@ -459,15 +454,16 @@ impl PexApp {
             return;
         }
 
-        let first_idx = groups.iter().find_map(|(_, idxs)| idxs.first()).copied();
-        if let Some(first) = first_idx {
-            self.selected_idx = Some(first);
-            if self.scroll_to_idx.is_none() {
-                self.scroll_to_idx = Some(first);
-            }
-        } else {
-            self.selected_idx = None;
-        }
+        let mut visible = groups
+            .iter()
+            .flat_map(|(_, indices)| indices.iter().copied());
+        let same_film = self.rows.get(current).and_then(|previous| {
+            visible
+                .clone()
+                .find(|&i| self.rows[i].film_key == previous.film_key)
+        });
+        self.selected_idx = same_film.or_else(|| visible.next());
+        self.scroll_to_idx = self.selected_idx;
     }
     // ----- tiny helpers ----
 
@@ -630,24 +626,13 @@ impl PexApp {
         progress.clamp(0.0, 1.0)
     }
 
-    fn ready_count(&self) -> usize {
-        self.rows.iter().filter(|r| r.tex.is_some()).count()
-    }
-
     const fn in_flight(&self) -> usize {
         self.total_targets
             .saturating_sub(self.completed + self.failed)
     }
 
     fn should_show_grid(&self) -> bool {
-        if self.rows.is_empty() {
-            return false;
-        }
-        if !SHOW_GRID_EARLY {
-            return self.prefetch_started && self.loading_progress >= 1.0;
-        }
-        self.ready_count() >= MIN_READY_BEFORE_GRID
-            || (self.prefetch_started && self.loading_progress >= 1.0)
+        !self.rows.is_empty()
     }
 
     fn record_owned_message<S: Into<String>>(&mut self, msg: S) {
@@ -678,7 +663,10 @@ impl PexApp {
         let Some(row) = self.rows.get(idx) else {
             return;
         };
-        if matches!(self.rating_states.get(&row.key), Some(RatingState::Pending)) {
+        if matches!(
+            self.rating_states.get(&row.film_key),
+            Some(RatingState::Pending)
+        ) {
             return;
         }
         let lookup = RatingLookup::from(row);
@@ -743,7 +731,6 @@ impl PexApp {
         self.failed = 0;
         self.loading_progress = 0.0;
         self.startup_progress_floor = 0.0;
-        self.last_item_msg.clear();
         self.stage4_complete_message = None;
         self.phase = Phase::Prefetching;
         self.phase_started = Instant::now();
@@ -771,7 +758,7 @@ impl PexApp {
         let path = crate::app::cache::channel_icon_path(url);
         if !path.exists() {
             if self.channel_icon_pending.insert(url.to_string()) {
-                Self::spawn_channel_icon_prefetch(vec![url.to_string()]);
+                Self::spawn_channel_icon_prefetch(vec![url.to_string()], ctx.clone());
             }
             return None;
         }
@@ -792,10 +779,12 @@ impl PexApp {
         Some(handle)
     }
 
-    fn spawn_channel_icon_prefetch(urls: Vec<String>) {
+    fn spawn_channel_icon_prefetch(urls: Vec<String>, ctx: eg::Context) {
         std::thread::spawn(move || {
             for url in urls {
-                let _ = crate::app::cache::ensure_channel_icon(&url);
+                if crate::app::cache::ensure_channel_icon(&url).is_ok() {
+                    ctx.request_repaint();
+                }
             }
         });
     }
@@ -855,7 +844,7 @@ struct RatingLookup {
 impl From<&PosterRow> for RatingLookup {
     fn from(row: &PosterRow) -> Self {
         Self {
-            key: row.key.clone(),
+            key: row.film_key.clone(),
             title: row.title.clone(),
             year: row.year,
             imdb_id: row.guid.as_deref().and_then(imdb_id_from_guid),
@@ -1020,12 +1009,25 @@ impl PexApp {
     pub(crate) fn update_ui(&mut self, ctx: &eg::Context) {
         self.update_guide_ui(ctx);
         self.ui_render_rating_key(ctx);
+        // Poll workers while they have results to deliver. Idle guides only need
+        // a periodic clock tick; egui wakes immediately for input.
+        let busy = self.connection.checking()
+            || self.prep_rx.is_some()
+            || self.owned_scan_in_progress
+            || self.in_flight() > 0
+            || self.prefs_dirty
+            || self
+                .rating_states
+                .values()
+                .any(|s| matches!(s, RatingState::Pending));
+        ctx.request_repaint_after(if busy {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(30)
+        });
     }
 
     fn update_guide_ui(&mut self, ctx: &eg::Context) {
-        // Keep frames moving so Windows never flags "Not Responding"
-        ctx.request_repaint();
-
         if !self.setup_checked {
             self.run_setup_checks();
         }
@@ -1046,8 +1048,6 @@ impl PexApp {
                 "Stage 1/4 - Setup complete with warnings (see Advanced menu).".into()
             };
             self.set_startup_progress_floor(STARTUP_STAGE1_DONE);
-            self.heartbeat_last = Instant::now();
-            self.heartbeat_dots = 0;
 
             // Kick off poster prep first (Stage 2), then owned scan (Stage 3)
             self.start_poster_prep();
@@ -1069,8 +1069,8 @@ impl PexApp {
             return;
         }
 
-        // If warm-up not finished, show calm splash and return
-        if self.boot_phase != types::BootPhase::Ready {
+        // A completed owned scan can precede guide data. Artwork is optional.
+        if self.prep_rx.is_some() && !self.should_show_grid() {
             eg::CentralPanel::default()
                 .frame(eg::Frame::default().inner_margin(eg::Margin::symmetric(4.0, 6.0)))
                 .show(ctx, |ui| {
@@ -1093,14 +1093,6 @@ impl PexApp {
             if !self.owned_scan_in_progress {
                 self.set_status(message);
             }
-        }
-
-        // Soft heartbeat ticker for subtle activity (optional)
-        if (self.rows.is_empty() || (self.prefetch_started && self.loading_progress < 1.0))
-            && self.heartbeat_last.elapsed() >= Duration::from_millis(250)
-        {
-            self.heartbeat_last = Instant::now();
-            self.heartbeat_dots = (self.heartbeat_dots + 1) % 4;
         }
 
         // --- NEW: Right-side detail panel (shown when selected) ---
@@ -1136,44 +1128,6 @@ impl PexApp {
 
             if self.prefetch_started && self.loading_progress >= 1.0 && self.rows.is_empty() {
                 ui.label("No films in the programme guide.");
-                return;
-            }
-
-            // Decide whether to show the early splash (before enough textures ready)
-            let show_splash = !self.should_show_grid();
-            if show_splash {
-                // Progress variant of splash
-                let done = self.completed + self.failed;
-                let inflight = self.in_flight();
-
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.heading("Preparing posters…");
-
-                    if !self.loading_message.is_empty() {
-                        ui.label(&self.loading_message);
-                    }
-                    if !self.last_item_msg.is_empty() {
-                        ui.monospace(&self.last_item_msg);
-                    }
-
-                    ui.add(eg::ProgressBar::new(self.startup_progress()).show_percentage());
-                    ui.separator();
-                    ui.add(eg::Spinner::new().size(14.0));
-                    ui.separator();
-
-                    ui.monospace(format!(
-                        "Posters: {done}/{total}  (OK {ok}, Fail {fail}, In-flight {inflight})",
-                        total = self.total_targets,
-                        ok = self.completed,
-                        fail = self.failed,
-                        inflight = inflight
-                    ));
-                    ui.monospace(format!(
-                        "Cache: {}",
-                        crate::app::cache::cache_dir().display()
-                    ));
-                });
                 return;
             }
 

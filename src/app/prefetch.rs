@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use eframe::egui as eg;
 
+pub(super) fn usable_poster_url(raw: &str) -> bool {
+    reqwest::Url::parse(raw)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+}
+
 struct PosterJob {
     row_indices: Vec<usize>,
     key: String,
@@ -13,147 +18,135 @@ struct PosterJob {
 }
 
 impl crate::app::PexApp {
-    /// Start prefetch: queue all rows, but avoid repeated disk lookups by reusing row.path.
-    /// Workers will download the SMALL variant (key `__s`) if missing.
+    /// Warm cached artwork first; each uncached poster has one job across all airings.
     pub(crate) fn start_prefetch(&mut self, ctx: &eg::Context, prefetch_disabled: bool) {
         if self.prefetch_started {
             return;
         }
-
         self.prefetch_started = true;
-
-        if prefetch_disabled || self.rows.is_empty() {
-            let message = if prefetch_disabled {
-                format!(
-                    "Stage 4/4 - Poster downloads disabled via PEX_DISABLE_PREFETCH. Showing cached artwork for {} listings.",
-                    self.rows.len()
-                )
-            } else {
-                "Stage 4/4 - No posters to prefetch (empty dataset).".into()
-            };
-            self.stage4_complete_message = Some(message.clone());
-            if !self.owned_scan_in_progress {
-                self.set_status(message.clone());
+        self.completed = 0;
+        self.failed = 0;
+        let today = crate::app::utils::day_bucket(std::time::SystemTime::now());
+        let jobs = self.poster_jobs(today);
+        self.total_targets = jobs.len();
+        let mut downloads = Vec::new();
+        for job in jobs {
+            if let Some(path) = job.cached_path {
+                for idx in job.row_indices {
+                    let row = &mut self.rows[idx];
+                    row.path = Some(path.clone());
+                    if row.tex.is_none() {
+                        row.state = super::PosterState::Cached;
+                    }
+                }
+                self.completed += 1;
+            } else if !prefetch_disabled {
+                downloads.push(job);
             }
-            self.last_item_msg = message;
-            self.total_targets = 0;
-            self.completed = 0;
-            self.failed = 0;
-            self.loading_progress = 1.0;
-            self.set_startup_progress_floor(1.0);
-            self.boot_phase = super::BootPhase::Ready;
-            self.prewarm_first_screen(ctx);
-            ctx.request_repaint();
+        }
+        self.prewarm_first_screen(ctx);
+        if downloads.is_empty() {
+            self.total_targets = self.completed;
+            self.finish_prefetch(if prefetch_disabled {
+                "Poster downloads are disabled. Showing available cached artwork.".into()
+            } else if self.total_targets == 0 {
+                "Guide ready. No poster artwork available.".into()
+            } else {
+                format!("Artwork ready ({} cached posters).", self.completed)
+            });
             return;
         }
 
-        self.set_startup_progress_floor(crate::app::STARTUP_STAGE4_START);
-
-        self.completed = 0;
-        self.failed = 0;
-        self.total_targets = self.rows.len();
-        self.loading_progress = if self.total_targets == 0 { 1.0 } else { 0.0 };
-        self.last_item_msg = if self.total_targets > 0 {
-            format!(
-                "Artwork cache progress: 0/{} cached (0 failed).",
-                self.total_targets
-            )
-        } else {
-            String::new()
-        };
         self.set_phase(super::Phase::Prefetching);
+        self.set_startup_progress_floor(crate::app::STARTUP_STAGE4_START);
+        self.loading_progress = self.completed as f32 / self.total_targets as f32;
         self.stage4_complete_message = None;
-
-        let (work_tx, work_rx) = mpsc::channel::<PosterJob>();
-        let (done_tx, done_rx) = mpsc::channel::<crate::app::PrefetchDone>();
-        self.done_rx = Some(done_rx);
-
-        let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
-
-        // One shared HTTP client.
         let client = match reqwest::blocking::Client::builder()
             .user_agent("pex/prefetch")
             .timeout(Duration::from_secs(20))
             .pool_max_idle_per_host(16)
             .build()
         {
-            Ok(c) => std::sync::Arc::new(c),
+            Ok(client) => client,
             Err(e) => {
-                self.set_status(format!("http client build failed: {e}"));
-                self.failed = self.total_targets;
-                self.loading_progress = 1.0;
-                self.boot_phase = super::BootPhase::Ready;
+                self.failed = downloads.len();
+                self.finish_prefetch(format!("Could not start poster downloads: {e}"));
                 return;
             }
         };
 
-        for _ in 0..self.worker_count_ui {
-            let work_rx = std::sync::Arc::clone(&work_rx);
+        let worker_count = self.worker_count_ui.clamp(1, downloads.len());
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(downloads.into_iter()));
+        let (done_tx, done_rx) = mpsc::channel();
+        self.done_rx = Some(done_rx);
+        for _ in 0..worker_count {
+            let queue = std::sync::Arc::clone(&queue);
             let done_tx = done_tx.clone();
-            let client = std::sync::Arc::clone(&client);
-
+            let client = client.clone();
+            let ctx = ctx.clone();
             std::thread::spawn(move || loop {
-                let job = {
-                    let rx = work_rx.lock().unwrap();
-                    rx.recv()
-                };
-                let PosterJob {
-                    row_indices,
-                    key,
-                    url,
-                    cached_path,
-                } = match job {
-                    Ok(t) => t,
-                    Err(_) => break,
-                };
-
-                let result: Result<PathBuf, String> = cached_path.map_or_else(
-                    || {
-                        crate::app::cache::download_and_store_resized_with_client(
-                            &client,
-                            &url,
-                            &key,
-                            super::RESIZE_MAX_W,
-                            super::RESIZE_QUALITY,
-                        )
-                        .or_else(|_e| crate::app::cache::download_and_store(&url, &key))
-                    },
-                    Ok,
+                let next = queue.lock().unwrap().next();
+                let Some(job) = next else { break };
+                let result = crate::app::cache::download_and_store_resized_with_client(
+                    &client,
+                    &job.url,
+                    &job.key,
+                    super::RESIZE_MAX_W,
+                    super::RESIZE_QUALITY,
                 );
-
-                for row_idx in row_indices {
-                    let msg = crate::app::PrefetchDone {
-                        row_idx,
-                        result: result.clone(),
-                    };
-                    if done_tx.send(msg).is_err() {
-                        return;
-                    }
+                if done_tx
+                    .send(crate::app::PrefetchDone {
+                        row_indices: job.row_indices,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
                 }
+                ctx.request_repaint();
             });
         }
+    }
 
-        let now_bucket = crate::app::utils::day_bucket(std::time::SystemTime::now());
-        for job in self.poster_jobs(now_bucket) {
-            let _ = work_tx.send(job);
+    fn finish_prefetch(&mut self, message: String) {
+        self.loading_progress = 1.0;
+        self.set_startup_progress_floor(1.0);
+        self.stage4_complete_message = Some(message.clone());
+        if !self.owned_scan_in_progress {
+            self.set_status(message);
         }
-        self.prewarm_first_screen(ctx);
-        ctx.request_repaint();
+        self.done_rx = None;
     }
 
     fn poster_jobs(&self, now_bucket: i64) -> Vec<PosterJob> {
         let soon = now_bucket..now_bucket + 2;
+        let first_cards: std::collections::HashMap<_, _> = self
+            .filtered_guide()
+            .days
+            .into_iter()
+            .flat_map(|(_, cards)| cards)
+            .take(super::PREWARM_UPLOADS)
+            .enumerate()
+            .map(|(rank, idx)| (idx, rank))
+            .collect();
         let mut indices: Vec<usize> = (0..self.rows.len()).collect();
-        indices.sort_by_key(|&idx| {
-            !self.rows[idx]
+        indices.sort_by_cached_key(|&idx| {
+            if let Some(&rank) = first_cards.get(&idx) {
+                return rank;
+            }
+            let airs_soon = self.rows[idx]
                 .airing
-                .is_some_and(|ts| soon.contains(&crate::app::utils::day_bucket(ts)))
+                .is_some_and(|ts| soon.contains(&crate::app::utils::day_bucket(ts)));
+            super::PREWARM_UPLOADS + usize::from(!airs_soon)
         });
 
         let mut jobs = Vec::<PosterJob>::new();
         let mut by_key = std::collections::HashMap::<&str, usize>::new();
         for idx in indices {
             let row = &self.rows[idx];
+            if row.key.is_empty() || (row.path.is_none() && !usable_poster_url(&row.url)) {
+                continue;
+            }
             if let Some(&job_idx) = by_key.get(row.key.as_str()) {
                 let job = &mut jobs[job_idx];
                 job.row_indices.push(idx);
@@ -187,58 +180,37 @@ impl crate::app::PexApp {
                     drained += 1;
                     match msg.result {
                         Ok(path) => {
-                            if let Some(row) = self.rows.get_mut(msg.row_idx) {
-                                row.path = Some(path);
-                                row.state = super::PosterState::Cached; // will be uploaded lazily during paint
-                                self.completed += 1;
-                                self.last_item_msg = format!("Cached: {}", row.title);
-                            } else {
-                                self.failed += 1;
+                            self.completed += 1;
+                            for idx in msg.row_indices {
+                                let row = &mut self.rows[idx];
+                                row.path = Some(path.clone());
+                                row.state = super::PosterState::Cached;
                             }
                         }
-                        Err(e) => {
-                            if let Some(row) = self.rows.get_mut(msg.row_idx) {
-                                row.state = super::PosterState::Failed;
-                                self.failed += 1;
-                                self.last_item_msg =
-                                    format!("Download failed: {} — {}", row.title, e);
-                            } else {
-                                self.failed += 1;
+                        Err(_) => {
+                            self.failed += 1;
+                            for idx in msg.row_indices {
+                                self.rows[idx].state = super::PosterState::Failed;
                             }
                         }
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-
-        if self.total_targets > 0 {
-            self.loading_progress =
-                ((self.completed + self.failed) as f32 / self.total_targets as f32).clamp(0.0, 1.0);
-
-            self.last_item_msg = format!(
-                "Artwork cache progress: {}/{} cached ({} failed).",
-                self.completed, self.total_targets, self.failed
-            );
-
-            if (self.completed + self.failed) >= self.total_targets {
-                let message = format!(
-                    "Stage 4/4 - Artwork cache ready ({} posters cached, {} failed).",
-                    self.completed, self.failed
-                );
-                self.stage4_complete_message = Some(message.clone());
-                if !self.owned_scan_in_progress {
-                    self.set_status(message.clone());
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.failed += self.in_flight();
+                    break;
                 }
-                self.last_item_msg = message;
-                self.set_startup_progress_floor(1.0);
             }
-        } else {
-            self.loading_progress = 1.0;
-            self.set_startup_progress_floor(1.0);
         }
-
+        if self.in_flight() == 0 {
+            self.finish_prefetch(format!(
+                "Artwork ready ({} posters cached, {} failed).",
+                self.completed, self.failed
+            ));
+        } else if drained > 0 {
+            self.loading_progress =
+                (self.completed + self.failed) as f32 / self.total_targets as f32;
+        }
         if drained > 0 {
             ctx.request_repaint();
         }
@@ -252,7 +224,8 @@ mod tests {
     fn listing(key: &str) -> PosterRow {
         PosterRow {
             title: "Uncached film".into(),
-            url: String::new(),
+            film_key: key.into(),
+            url: format!("https://posters.example.invalid/{key}.jpg"),
             key: key.into(),
             airing: None,
             year: None,
@@ -301,5 +274,72 @@ mod tests {
             Some(std::path::Path::new("artwork.jpg"))
         );
         assert_eq!(jobs[1].row_indices, [1]);
+    }
+
+    #[test]
+    fn missing_and_invalid_poster_urls_start_no_workers() {
+        let mut app = PexApp::default();
+        for url in ["", "/library/poster.jpg", "file:///bad", "https://"] {
+            let mut row = listing("missing");
+            row.url = url.into();
+            app.rows.push(row);
+        }
+        app.start_prefetch(&eframe::egui::Context::default(), false);
+        assert!(app.done_rx.is_none());
+        assert_eq!(app.in_flight(), 0);
+        assert_eq!(app.total_targets, 0);
+        assert!(app.should_show_grid());
+    }
+
+    #[test]
+    fn cold_guide_displays_showing_before_art_and_uploads_it_on_completion() {
+        use eframe::egui as eg;
+        use std::time::{Duration, SystemTime};
+
+        let mut row = listing("art");
+        row.channel = Some("Film Channel".into());
+        row.airing = Some(SystemTime::now() + Duration::from_secs(60));
+        let repeat = listing("art");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = PexApp {
+            rows: vec![row, repeat],
+            did_init: true,
+            setup_checked: true,
+            prefetch_started: true,
+            total_targets: 1,
+            done_rx: Some(rx),
+            ..Default::default()
+        };
+        let ctx = eg::Context::default();
+        let frame = |app: &mut PexApp| {
+            let input = eg::RawInput {
+                screen_rect: Some(eg::Rect::from_min_size(
+                    eg::Pos2::ZERO,
+                    eg::vec2(1600.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| app.update_ui(ctx))
+        };
+        let output = frame(&mut app);
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, eg::Shape::Text(t)
+            if t.galley.text().contains("Uncached film") && t.galley.text().contains("Film Channel") &&
+            t.galley.text().contains("UTC"))));
+        assert_eq!(app.in_flight(), 1);
+        assert!(app.rows[0].tex.is_none());
+
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("poster.png");
+        image::RgbaImage::new(2, 3).save(&path).unwrap();
+        tx.send(crate::app::PrefetchDone {
+            row_indices: vec![0, 1],
+            result: Ok(path.clone()),
+        })
+        .unwrap();
+        frame(&mut app);
+        assert!(app.rows[0].tex.is_some());
+        assert_eq!(app.rows[1].path.as_ref(), Some(&path));
+        assert_eq!(app.in_flight(), 0);
+        assert_eq!(app.completed, 1);
     }
 }

@@ -31,259 +31,294 @@ impl crate::app::PexApp {
                 });
                 ui.separator();
 
-                let Some(sel) = self.selected_idx else {
-                    ui.label("Select a film from the grid to see details.");
-                    return;
-                };
-                let Some(row) = self.rows.get(sel) else {
-                    ui.label("Selection is out of range.");
-                    return;
-                };
+                eg::ScrollArea::vertical()
+                    .id_source("detail_content")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        let Some(sel) = self.selected_idx else {
+                            ui.label("Select a film from the grid to see details.");
+                            return;
+                        };
+                        let Some(row) = self.rows.get(sel) else {
+                            ui.label("Selection is out of range.");
+                            return;
+                        };
 
-                let broadcast_hd = Self::row_broadcast_hd(row);
-                let owned_is_hd = row.owned_hd;
+                        let broadcast_hd = Self::row_broadcast_hd(row);
+                        let owned_is_hd = row.owned_hd;
 
-                // Snapshot values so we can release the immutable borrow on self.rows
-                let poster_tex = row.tex.clone();
-                let title_text = row.title.clone();
-                let year = row.year;
-                let channel_display = row.channel.clone();
-                let channel_raw = row.channel_raw.clone();
-                let channel_thumb = row.channel_thumb.clone();
-                let airing = row.airing;
-                let critic_rating = row.critic_rating;
-                let audience_rating = row.audience_rating;
-                let owned = row.owned;
-                let owned_modified = row.owned_modified;
-                let genres = row.genres.clone();
-                let summary = row.summary.clone();
-                let poster_key = row.key.clone();
-                let scheduled = row.scheduled;
+                        // Snapshot values so we can release the immutable borrow on self.rows
+                        let poster_tex = row.tex.clone();
+                        let title_text = row.title.clone();
+                        let year = row.year;
+                        let channel_display = channel_name(row);
+                        let channel_thumb = row.channel_thumb.clone();
+                        let airing = row.airing;
+                        let critic_rating = row.critic_rating;
+                        let audience_rating = row.audience_rating;
+                        let owned = row.owned;
+                        let owned_modified = row.owned_modified;
+                        let genres = row.genres.clone();
+                        let summary = row.summary.clone();
+                        let film_key = row.film_key.clone();
+                        let scheduled = row.scheduled;
 
-                // Poster preview (uses small texture if available)
-                ui.add_space(4.0);
-                let avail_w = ui.available_width().clamp(120.0, 520.0);
-                let poster_size = eg::vec2(avail_w, avail_w * 1.5);
+                        // Poster preview (uses small texture if available)
+                        ui.add_space(4.0);
+                        let avail_w = ui.available_width().clamp(120.0, 520.0);
+                        let poster_size = eg::vec2(avail_w, avail_w * 1.5);
 
-                if let Some(tex) = poster_tex {
-                    ui.image((tex.id(), poster_size));
-                } else {
-                    // Placeholder if texture not ready
-                    let (rect, _resp) = ui.allocate_exact_size(poster_size, eg::Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, 8.0, eg::Color32::from_gray(40));
-                    ui.painter().text(
-                        rect.center(),
-                        eg::Align2::CENTER_CENTER,
-                        "Poster loading…",
-                        eg::FontId::proportional(14.0),
-                        eg::Color32::WHITE,
-                    );
-                }
+                        if let Some(tex) = poster_tex {
+                            ui.image((tex.id(), poster_size));
+                        } else {
+                            // Placeholder if texture not ready
+                            let (rect, _resp) =
+                                ui.allocate_exact_size(poster_size, eg::Sense::hover());
+                            ui.painter()
+                                .rect_filled(rect, 8.0, eg::Color32::from_gray(40));
+                            ui.painter().text(
+                                rect.center(),
+                                eg::Align2::CENTER_CENTER,
+                                if row.state == super::PosterState::Cached
+                                    || (row.state == super::PosterState::Pending
+                                        && !row.url.is_empty()
+                                        && self.in_flight() > 0)
+                                {
+                                    "Poster loading…"
+                                } else {
+                                    "No poster available"
+                                },
+                                eg::FontId::proportional(14.0),
+                                eg::Color32::WHITE,
+                            );
+                        }
 
-                ui.add_space(8.0);
-
-                // Title (YYYY)
-                let title_display =
-                    year.map_or_else(|| title_text.clone(), |y| format!("{} ({})", title_text, y));
-                let channel_icon = channel_thumb
-                    .as_deref()
-                    .and_then(|thumb| self.channel_icon_texture(ctx, thumb));
-                ui.horizontal(|ui| {
-                    if let Some(tex) = channel_icon {
-                        let tex_size = tex.size();
-                        let native_w = tex_size[0].max(1) as f32;
-                        let native_h = tex_size[1].max(1) as f32;
-                        let target_h = 64.0;
-                        let target_w = (native_w / native_h * target_h).clamp(48.0, 120.0);
-                        ui.image((tex.id(), eg::vec2(target_w, target_h)));
                         ui.add_space(8.0);
-                    }
 
-                    let scroll_width = (ui.available_width() - 40.0).max(100.0);
-                    eg::ScrollArea::horizontal()
-                        .id_source(("detail_title_scroll", poster_key.clone()))
-                        .max_width(scroll_width)
-                        .show(ui, |ui| {
-                            ui.heading(&title_display);
+                        // Title (YYYY)
+                        let title_display = year.map_or_else(
+                            || title_text.clone(),
+                            |y| format!("{} ({})", title_text, y),
+                        );
+                        let channel_icon = channel_thumb
+                            .as_deref()
+                            .and_then(|thumb| self.channel_icon_texture(ctx, thumb));
+                        ui.horizontal(|ui| {
+                            if let Some(tex) = channel_icon {
+                                let tex_size = tex.size();
+                                let native_w = tex_size[0].max(1) as f32;
+                                let native_h = tex_size[1].max(1) as f32;
+                                let target_h = 64.0;
+                                let target_w = (native_w / native_h * target_h).clamp(48.0, 120.0);
+                                ui.image((tex.id(), eg::vec2(target_w, target_h)));
+                                ui.add_space(8.0);
+                            }
+
+                            let scroll_width = (ui.available_width() - 40.0).max(100.0);
+                            eg::ScrollArea::horizontal()
+                                .id_source(("detail_title_scroll", &film_key))
+                                .max_width(scroll_width)
+                                .show(ui, |ui| {
+                                    ui.heading(&title_display);
+                                });
+
+                            if ui
+                                .small_button("📋")
+                                .on_hover_text("Copy title to clipboard")
+                                .clicked()
+                            {
+                                ctx.output_mut(|o| o.copied_text = title_text.clone());
+                            }
                         });
 
-                    if ui
-                        .small_button("📋")
-                        .on_hover_text("Copy title to clipboard")
-                        .clicked()
-                    {
-                        ctx.output_mut(|o| o.copied_text = title_text.clone());
-                    }
-                });
+                        // Channel + time line (humanized)
+                        if let Some(airing) = airing {
+                            ui.weak(format!("{channel_display}  •  {}", format_airtime(airing)));
+                        }
 
-                // Channel + time line (humanized)
-                if channel_display.is_some() || airing.is_some() {
-                    let ch = channel_display
-                        .as_ref()
-                        .cloned()
-                        .or_else(|| {
-                            channel_raw
-                                .as_ref()
-                                .map(|raw| crate::app::utils::humanize_channel(raw))
-                        })
-                        .unwrap_or_else(|| "—".into());
-                    let schedule = airing
-                        .map(|ts| {
-                            let bucket = crate::app::utils::day_bucket(ts);
-                            let (_, _, day) = crate::app::utils::civil_from_days(bucket);
-                            let weekday = crate::app::utils::weekday_full_from_bucket(bucket);
-                            let suffix = crate::app::utils::ordinal_suffix(day);
-                            let hhmm = crate::app::utils::hhmm_utc(ts);
-                            format!("{weekday} {day}{suffix} {hhmm} UTC")
-                        })
-                        .unwrap_or_else(|| "— UTC".into());
-                    ui.label(eg::RichText::new(format!("{ch}  •  {schedule}")).weak());
-                }
-
-                if scheduled {
-                    ui.label(
-                        eg::RichText::new("Scheduled to record")
-                            .color(eg::Color32::from_rgb(220, 80, 80))
-                            .strong(),
-                    );
-                }
-
-                if critic_rating.is_some() || audience_rating.is_some() {
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if let Some(r) = critic_rating {
+                        if scheduled {
                             ui.label(
-                                eg::RichText::new(format!("Critics: {r:.1}/10"))
-                                    .color(eg::Color32::from_rgb(255, 208, 121)),
+                                eg::RichText::new("Scheduled to record")
+                                    .color(eg::Color32::from_rgb(220, 80, 80))
+                                    .strong(),
                             );
                         }
-                        if let Some(r) = audience_rating {
-                            ui.label(
-                                eg::RichText::new(format!("Audience: {r:.1}/10"))
-                                    .color(eg::Color32::from_rgb(160, 220, 160)),
-                            );
-                        }
-                    });
-                }
 
-                ui.add_space(6.0);
-                let rating_state = self.rating_state_for_key(&poster_key);
-                ui.horizontal_wrapped(|ui| {
-                    let fetch_enabled = !matches!(rating_state, RatingState::Pending);
-                    if ui
-                        .add_enabled(fetch_enabled, eg::Button::new("⭐ Rating"))
-                        .on_hover_text("Fetch TMDb rating on demand")
-                        .clicked()
-                    {
-                        trigger_rating_request = Some(sel);
-                    }
-                    ui.add_space(6.0);
-                    match rating_state {
-                        RatingState::Pending => {
-                            ui.add(eg::Spinner::new().size(14.0));
-                            ui.label("Fetching TMDb rating…");
+                        let showings = self.filtered_showings_for(sel);
+                        if showings.len() > 1 {
+                            eg::CollapsingHeader::new(format!(
+                                "Other showings ({})",
+                                showings.len() - 1
+                            ))
+                            .id_source(("other_showings", &film_key))
+                            .show(ui, |ui| {
+                                for idx in showings.into_iter().filter(|&idx| idx != sel) {
+                                    let other = &self.rows[idx];
+                                    if let Some(time) = other.airing {
+                                        ui.label(format!(
+                                            "{}  •  {}",
+                                            format_airtime(time),
+                                            channel_name(other)
+                                        ));
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.weak(if Self::row_broadcast_hd(other) {
+                                                "Airing HD"
+                                            } else {
+                                                "Airing SD"
+                                            });
+                                            if other.scheduled {
+                                                ui.strong("Scheduled to record");
+                                            }
+                                        });
+                                    }
+                                }
+                            });
                         }
-                        RatingState::Success(ref txt) => {
-                            ui.label(eg::RichText::new(txt).strong());
-                        }
-                        RatingState::NotFound => {
-                            ui.label(eg::RichText::new("TMDb rating not found.").weak());
-                        }
-                        RatingState::KeyRejected => {
-                            ui.label("TMDb rejected this API key.");
-                            if ui.button("Change ratings key…").clicked() {
-                                replace_key_for = self.rows.get(sel).map(super::RatingLookup::from);
-                            }
-                        }
-                        RatingState::Error(ref err) => {
-                            ui.label(
-                                eg::RichText::new(format!("Rating error: {err}"))
-                                    .color(eg::Color32::LIGHT_RED),
-                            );
-                        }
-                        RatingState::Idle => {
-                            ui.label(eg::RichText::new("No rating fetched yet.").weak());
-                        }
-                    }
-                });
 
-                // --- Owned tags (explicit SD/HD) + optional Airing status ---
-                {
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        // Airing chip (HD/SD)
-                        ui.add(
-                            eg::Label::new(
-                                eg::RichText::new(if broadcast_hd {
-                                    "Airing HD"
-                                } else {
-                                    "Airing SD"
-                                })
-                                .color(if broadcast_hd {
-                                    eg::Color32::from_rgb(120, 180, 255)
-                                } else {
-                                    eg::Color32::GRAY
-                                }),
-                            )
-                            .wrap(),
-                        );
-
-                        // Owned chip (Owned HD / Owned SD)
-                        if owned {
-                            let (txt, col) = if owned_is_hd {
-                                ("Owned HD", eg::Color32::from_rgb(130, 200, 130))
-                            } else {
-                                ("Owned SD", eg::Color32::from_gray(200))
-                            };
-                            ui.add(eg::Label::new(eg::RichText::new(txt).color(col)));
-
-                            if let Some(ts) = owned_modified {
-                                if let Some(date_str) =
-                                    crate::app::utils::format_owned_timestamp(ts)
-                                {
-                                    ui.add_space(6.0);
+                        if critic_rating.is_some() || audience_rating.is_some() {
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                if let Some(r) = critic_rating {
                                     ui.label(
-                                        eg::RichText::new(format!(
-                                            "Owned file recorded: {}",
-                                            date_str
-                                        ))
-                                        .weak(),
+                                        eg::RichText::new(format!("Critics: {r:.1}/10"))
+                                            .color(eg::Color32::from_rgb(255, 208, 121)),
                                     );
                                 }
+                                if let Some(r) = audience_rating {
+                                    ui.label(
+                                        eg::RichText::new(format!("Audience: {r:.1}/10"))
+                                            .color(eg::Color32::from_rgb(160, 220, 160)),
+                                    );
+                                }
+                            });
+                        }
+
+                        ui.add_space(6.0);
+                        let rating_state = self.rating_state_for_key(&film_key);
+                        ui.horizontal_wrapped(|ui| {
+                            let fetch_enabled = !matches!(rating_state, RatingState::Pending);
+                            if ui
+                                .add_enabled(fetch_enabled, eg::Button::new("⭐ Rating"))
+                                .on_hover_text("Fetch TMDb rating on demand")
+                                .clicked()
+                            {
+                                trigger_rating_request = Some(sel);
+                            }
+                            ui.add_space(6.0);
+                            match rating_state {
+                                RatingState::Pending => {
+                                    ui.add(eg::Spinner::new().size(14.0));
+                                    ui.label("Fetching TMDb rating…");
+                                }
+                                RatingState::Success(ref txt) => {
+                                    ui.label(eg::RichText::new(txt).strong());
+                                }
+                                RatingState::NotFound => {
+                                    ui.label(eg::RichText::new("TMDb rating not found.").weak());
+                                }
+                                RatingState::KeyRejected => {
+                                    ui.label("TMDb rejected this API key.");
+                                    if ui.button("Change ratings key…").clicked() {
+                                        replace_key_for =
+                                            self.rows.get(sel).map(super::RatingLookup::from);
+                                    }
+                                }
+                                RatingState::Error(ref err) => {
+                                    ui.label(
+                                        eg::RichText::new(format!("Rating error: {err}"))
+                                            .color(eg::Color32::LIGHT_RED),
+                                    );
+                                }
+                                RatingState::Idle => {
+                                    ui.label(eg::RichText::new("No rating fetched yet.").weak());
+                                }
+                            }
+                        });
+
+                        // --- Owned tags (explicit SD/HD) + optional Airing status ---
+                        {
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                // Airing chip (HD/SD)
+                                ui.add(
+                                    eg::Label::new(
+                                        eg::RichText::new(if broadcast_hd {
+                                            "Airing HD"
+                                        } else {
+                                            "Airing SD"
+                                        })
+                                        .color(
+                                            if broadcast_hd {
+                                                eg::Color32::from_rgb(120, 180, 255)
+                                            } else {
+                                                eg::Color32::GRAY
+                                            },
+                                        ),
+                                    )
+                                    .wrap(),
+                                );
+
+                                // Owned chip (Owned HD / Owned SD)
+                                if owned {
+                                    let (txt, col) = if owned_is_hd {
+                                        ("Owned HD", eg::Color32::from_rgb(130, 200, 130))
+                                    } else {
+                                        ("Owned SD", eg::Color32::from_gray(200))
+                                    };
+                                    ui.add(eg::Label::new(eg::RichText::new(txt).color(col)));
+
+                                    if let Some(ts) = owned_modified {
+                                        if let Some(date_str) =
+                                            crate::app::utils::format_owned_timestamp(ts)
+                                        {
+                                            ui.add_space(6.0);
+                                            ui.label(
+                                                eg::RichText::new(format!(
+                                                    "Owned file recorded: {}",
+                                                    date_str
+                                                ))
+                                                .weak(),
+                                            );
+                                        }
+                                    }
+                                }
+                            });
+                            if owned {
+                                ui.collapsing("Owned Details", |ui| {
+                                    self.ui_owned_details(ui, &self.rows[sel]);
+                                });
                             }
                         }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // Description
+                        ui.label(eg::RichText::new("Description").strong());
+                        if let Some(summary) = summary.as_deref() {
+                            ui.add(eg::Label::new(eg::RichText::new(summary)).wrap());
+                        } else {
+                            ui.label(
+                                eg::RichText::new("No description available.")
+                                    .italics()
+                                    .weak(),
+                            );
+                        }
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // Genres
+                        if !genres.is_empty() {
+                            ui.label(eg::RichText::new("Genres").strong());
+                            ui.add(eg::Label::new(genres.join(", ")).wrap());
+                        } else {
+                            ui.label(eg::RichText::new("Genres").weak());
+                            ui.label("—");
+                        }
                     });
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // Description
-                ui.label(eg::RichText::new("Description").strong());
-                if let Some(summary) = summary.as_deref() {
-                    ui.add(eg::Label::new(eg::RichText::new(summary)).wrap());
-                } else {
-                    ui.label(
-                        eg::RichText::new("No description available.")
-                            .italics()
-                            .weak(),
-                    );
-                }
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // Genres
-                if !genres.is_empty() {
-                    ui.label(eg::RichText::new("Genres").strong());
-                    ui.add(eg::Label::new(genres.join(", ")).wrap());
-                } else {
-                    ui.label(eg::RichText::new("Genres").weak());
-                    ui.label("—");
-                }
             });
 
         // Persist the width so it sticks between runs
@@ -300,4 +335,24 @@ impl crate::app::PexApp {
             self.open_rating_key_editor(Some(film));
         }
     }
+}
+
+fn channel_name(row: &super::PosterRow) -> String {
+    row.channel
+        .clone()
+        .or_else(|| {
+            row.channel_raw
+                .as_deref()
+                .map(super::utils::humanize_channel)
+        })
+        .unwrap_or_else(|| "Unknown channel".into())
+}
+
+fn format_airtime(time: std::time::SystemTime) -> String {
+    let bucket = super::utils::day_bucket(time);
+    let (_, _, day) = super::utils::civil_from_days(bucket);
+    let weekday = super::utils::weekday_full_from_bucket(bucket);
+    let suffix = super::utils::ordinal_suffix(day);
+    let hhmm = super::utils::hhmm_utc(time);
+    format!("{weekday} {day}{suffix} {hhmm} UTC")
 }

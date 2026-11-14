@@ -1,83 +1,9 @@
-use super::PexApp;
+use super::test_fixtures::TestUi;
 use crate::config;
 use eframe::egui as eg;
-use std::{
-    env, fs,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{env, fs, process::Command};
 
-// Locate controls in the frame that egui actually painted, so this exercises
-// the setup gate and its modal without tying clicks to a font or DPI setting.
-#[derive(Default)]
-struct SetupUi {
-    app: PexApp,
-    ctx: eg::Context,
-}
-
-impl SetupUi {
-    fn frames_until(&mut self, goal: &str, condition: impl Fn(&PexApp) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !condition(&self.app) {
-            self.frame(Vec::new());
-            assert!(Instant::now() < deadline, "Timed out waiting for {goal}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn frame(&mut self, events: Vec<eg::Event>) -> eg::FullOutput {
-        let input = eg::RawInput {
-            screen_rect: Some(eg::Rect::from_min_size(
-                eg::Pos2::ZERO,
-                eg::vec2(1100.0, 850.0),
-            )),
-            events,
-            ..Default::default()
-        };
-        self.ctx.run(input, |ctx| self.app.update_ui(ctx))
-    }
-
-    fn label(&mut self, label: &str) -> eg::Pos2 {
-        let mut visible = Vec::new();
-        // A new egui Window gets a sizing frame before its contents are painted.
-        for _ in 0..3 {
-            let frame = self.frame(Vec::new());
-            visible.clear();
-            for clipped in frame.shapes {
-                if let eg::Shape::Text(text) = clipped.shape {
-                    visible.push(text.galley.text().to_owned());
-                    if text.galley.text() == label {
-                        let center = text.visual_bounding_rect().center();
-                        if clipped.clip_rect.contains(center) {
-                            return center;
-                        }
-                    }
-                }
-            }
-        }
-        panic!(
-            "Control was not visible: {label}. Editor open: {}. Labels: {visible:?}",
-            self.app.rating_key_editor.is_some()
-        );
-    }
-
-    fn click(&mut self, pos: eg::Pos2) {
-        self.frame(vec![eg::Event::PointerMoved(pos)]);
-        for pressed in [true, false] {
-            self.frame(vec![eg::Event::PointerButton {
-                pos,
-                button: eg::PointerButton::Primary,
-                pressed,
-                modifiers: eg::Modifiers::NONE,
-            }]);
-        }
-    }
-
-    fn press(&mut self, label: &str) {
-        let pos = self.label(label);
-        self.click(pos);
-    }
-
+impl TestUi {
     fn open_editor(&mut self) {
         self.press("Set up ratings…");
         self.label("TMDb ratings key");
@@ -143,7 +69,7 @@ fn isolated_setup_editor() {
     // Require the fixture marker before the app or config loader is constructed.
     let phase = env::var("PEX_RATINGS_UI_FIXTURE").unwrap();
     assert_eq!(env::current_dir().unwrap(), config::base_dir());
-    let mut ui = SetupUi::default();
+    let mut ui = TestUi::default();
     // Wait for the real asynchronous connection check before observing button
     // positions: the welcome message changes the layout when the check finishes.
     ui.frames_until("connection check", |app| app.setup_checked);
@@ -184,7 +110,7 @@ fn isolated_setup_editor() {
             let guide = config::local_db_path();
             fs::create_dir_all(guide.parent().unwrap()).unwrap();
             super::test_fixtures::database(&guide);
-            let mut guide_ui = SetupUi::default();
+            let mut guide_ui = TestUi::default();
             guide_ui.frames_until("fixture guide", |app| {
                 app.boot_phase == super::types::BootPhase::Ready && app.rows.len() == 1
             });
@@ -197,7 +123,7 @@ fn isolated_setup_editor() {
             guide_ui.press("Save key");
             guide_ui.frames_until("resumed film rating", |app| {
                 matches!(
-                    app.rating_states.get(&app.rows[0].key),
+                    app.rating_states.get(&app.rows[0].film_key),
                     Some(super::types::RatingState::NotFound)
                 )
             });

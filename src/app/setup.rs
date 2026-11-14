@@ -22,6 +22,10 @@ pub(super) struct ConnectionSetup {
 }
 
 impl ConnectionSetup {
+    pub(super) fn checking(&self) -> bool {
+        self.checks.is_some() || self.discovery.is_some() || self.snapshot_picker.is_some()
+    }
+
     pub(super) fn from_config(cfg: config::AppConfig) -> Self {
         let guides: Vec<_> = cfg.plex_epg_db_source.into_iter().collect();
         let folder = guides
@@ -249,6 +253,7 @@ impl PexApp {
             self.connection.guide_only,
         ) {
             Ok(path) => {
+                self.advanced_paths = Default::default();
                 self.connection.message = format!("Saved {}", path.display());
                 self.connection.open = false;
                 self.setup_errors.clear();
@@ -265,7 +270,7 @@ impl PexApp {
                     // A different server must not inherit the old server's owned flags.
                     self.owned_keys = None;
                     self.owned_hd_keys = None;
-                    self.owned_guids = None;
+                    self.owned_library = None;
                     self.scheduled_index = None;
                     self.apply_owned_flags();
                     self.apply_scheduled_flags();
@@ -319,6 +324,7 @@ mod tests {
             "busy_no_backup",
             "snapshots_only",
             "recording_schedule",
+            "grouped_airings",
             "legacy",
             "local_only",
         ] {
@@ -367,6 +373,22 @@ mod tests {
             );
         } else {
             super::super::test_fixtures::database(&library);
+        }
+        if scenario == "grouped_airings" {
+            let db = rusqlite::Connection::open(&guide).unwrap();
+            db.execute_batch(r#"
+                UPDATE metadata_items SET user_thumb_url='plex://unusable', thumb_url='https://fixture.invalid/shared.jpg';
+                UPDATE media_items SET begins_at=unixepoch('now')-172800;
+                INSERT INTO media_items (id,metadata_item_id,begins_at,extra_data) VALUES
+                    (2,1,unixepoch('now')+3600,'{"at:channelCallSign":"A"}'),
+                    (3,1,unixepoch('now')+7200,'{"at:channelCallSign":"B"}');
+                INSERT INTO metadata_items (id,metadata_type,title,year,guid,user_thumb_url) VALUES
+                    (2,1,'Fixture Movie',1980,'imdb://tt7654321','https://fixture.invalid/shared.jpg'),
+                    (3,1,'Film without art',2000,NULL,NULL);
+                INSERT INTO media_items (id,metadata_item_id,begins_at,extra_data) VALUES
+                    (4,2,unixepoch('now')+10800,'{"at:channelCallSign":"A"}'),
+                    (5,3,unixepoch('now')+14400,'{"at:channelCallSign":"B"}');
+            "#).unwrap();
         }
         if scenario == "recording_schedule" {
             let guide_db = rusqlite::Connection::open(&guide).unwrap();
@@ -446,15 +468,48 @@ mod tests {
             }
             app.save_selected_connection(&ctx);
         }
+        let expected = if scenario == "grouped_airings" { 5 } else { 1 };
         frames_until(&mut app, &ctx, |app| {
             app.did_init
-                && app.rows.len() == 1
+                && app.rows.len() == expected
                 && !app.owned_scan_in_progress
                 && app.prefetch_started
         });
         assert_eq!(app.rows[0].title, "Fixture Movie");
         assert!(app.should_show_grid());
         match scenario.as_str() {
+            "grouped_airings" => {
+                // The first showing is in the past. The next two are distinct
+                // showings of the same film, the fourth a remake sharing art.
+                app.rows[2].scheduled = true;
+                assert_eq!(app.rows[1].url, "https://fixture.invalid/shared.jpg");
+                assert_eq!(app.rows[1].key, app.rows[3].key);
+                assert_ne!(app.rows[1].film_key, app.rows[3].film_key);
+                assert!(app.rows[4].url.is_empty() && app.rows[4].key.is_empty());
+                let guide = app.filtered_guide();
+                assert_eq!(
+                    guide
+                        .days
+                        .into_iter()
+                        .flat_map(|(_, v)| v)
+                        .collect::<Vec<_>>(),
+                    vec![1, 3, 4]
+                );
+                assert!(guide.scheduled_elsewhere.contains(&1));
+                assert_eq!(app.filtered_showings_for(1), vec![1, 2]);
+                app.selected_channels.insert("B".into());
+                let guide = app.filtered_guide();
+                assert_eq!(
+                    guide
+                        .days
+                        .into_iter()
+                        .flat_map(|(_, v)| v)
+                        .collect::<Vec<_>>(),
+                    vec![2, 4]
+                );
+                assert!(guide.scheduled_elsewhere.is_empty());
+                assert_eq!(app.filtered_showings_for(2), vec![2]);
+            }
             "recording_schedule" => {
                 assert!(app.rows[0].scheduled);
                 rusqlite::Connection::open(&library)

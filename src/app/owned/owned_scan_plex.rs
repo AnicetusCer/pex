@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -9,7 +9,9 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::app::cache;
-use crate::app::types::{OwnedDone, OwnedMsg};
+use crate::app::types::{
+    OwnedCandidate, OwnedCandidates, OwnedDone, OwnedField, OwnedMovie, OwnedMsg,
+};
 use crate::app::PexApp;
 use crate::config::local_library_db_path;
 
@@ -27,17 +29,18 @@ impl OwnedScanPlex {
             let db_path = local_library_db_path();
             // Refresh and read the same mirror on one worker. The UI remains
             // usable during a slow NAS copy, including an explicit refresh.
-            match crate::app::prep::sync_library_db_from_source(force_copy, |s| {
+            let snapshot = match crate::app::prep::sync_library_db_from_source(force_copy, |s| {
                 let _ = tx.send(Info(s));
             }) {
                 Ok(message) => {
-                    let _ = tx.send(OwnedMsg::Snapshot(message));
+                    let _ = tx.send(OwnedMsg::Snapshot(message.clone()));
+                    message
                 }
                 Err(err) => {
                     let _ = tx.send(Error(err));
                     return;
                 }
-            }
+            };
             let _ = tx.send(OwnedMsg::Scheduled(
                 crate::app::scheduled::load_scheduled_index(),
             ));
@@ -65,7 +68,8 @@ impl OwnedScanPlex {
 
             match collect_plex_owned_entries(&conn) {
                 Ok(entries) => {
-                    let index = index_owned_entries(entries);
+                    let mut index = index_owned_entries(entries);
+                    index.library.snapshot = Some(snapshot);
                     let cache_dir = cache::cache_dir();
                     if let Err(err) =
                         persist_owned_sidecar(&cache_dir.join(super::ALL_SIDECAR), &index.keys)
@@ -78,10 +82,6 @@ impl OwnedScanPlex {
                         warn!("Failed to persist owned HD sidecar: {err}");
                     }
 
-                    let count = index.keys.len();
-                    let _ = tx.send(Info(format!(
-                        "Stage 3/4 - Plex library owned scan complete ({count} keys)."
-                    )));
                     let _ = tx.send(Done(Box::new(index)));
                 }
                 Err(err) => {
@@ -134,7 +134,8 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
             m.id ASC,
             COALESCE(mi.width, 0) DESC,
             COALESCE(mi.height, 0) DESC,
-            COALESCE(mp.size, 0) DESC
+            COALESCE(mp.size, 0) DESC,
+            mp.id ASC
     "#;
 
     let mut stmt = conn
@@ -228,8 +229,9 @@ fn collect_plex_owned_entries(conn: &Connection) -> Result<Vec<PlexOwnedEntry>, 
 
 fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
     let mut index = OwnedDone::default();
+    index.library.movies.reserve(entries.len());
     let mut ambiguous = HashSet::new();
-    for entry in entries {
+    for (movie, entry) in entries.into_iter().enumerate() {
         let hd = is_hd(entry.width, entry.height);
         let path = Path::new(&entry.file_path);
         let stem = path.file_stem().and_then(|s| s.to_str());
@@ -241,47 +243,58 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
                 .chain(stem)
                 .find_map(|s| PexApp::trailing_title_year(s).map(|(_, year)| year))
         });
-        let mut keys = HashSet::new();
-        for title in titles
-            .into_iter()
-            .flatten()
-            .chain(stem)
-            .chain(path.file_name().and_then(|s| s.to_str()))
-        {
-            keys.extend(PexApp::library_title_keys(title, year));
+        // Prefer metadata titles when a filename or alias also supplies the same key.
+        let mut keys = HashMap::new();
+        for (title, field) in [
+            (Some(entry.title.as_str()), OwnedField::Title),
+            (entry.original_title.as_deref(), OwnedField::OriginalTitle),
+            (stem, OwnedField::Filename),
+            (
+                path.file_name().and_then(|s| s.to_str()),
+                OwnedField::Filename,
+            ),
+        ] {
+            if let Some(title) = title {
+                for key in PexApp::library_title_keys(title, year) {
+                    keys.entry(key).or_insert(field);
+                }
+            }
         }
         // Only metadata titles may stand in for an omitted subtitle. If different
         // films claim the same abbreviation, do not use it to establish ownership.
         if let Some(year) = year {
-            let mut abbreviations = HashSet::new();
-            for title in titles
+            for (title, field) in titles
                 .into_iter()
-                .flatten()
-                .filter(|t| !t.trim().is_empty())
+                .zip([OwnedField::Title, OwnedField::OriginalTitle])
             {
+                let Some(title) = title.filter(|t| !t.trim().is_empty()) else {
+                    continue;
+                };
                 let (kind, name) = match title.split_once(':') {
                     Some((head, _)) => ("prefix", head),
                     None => ("bare", title),
                 };
-                if !crate::app::utils::normalize_title(name).is_empty() {
-                    abbreviations.insert(PexApp::short_title_key(kind, name, year));
+                let short = (!crate::app::utils::normalize_title(name).is_empty())
+                    .then(|| PexApp::short_title_key(kind, name, year));
+                let credit = PexApp::credited_title_remainder(title)
+                    .map(|name| PexApp::short_title_key("credited", name, year));
+                for key in short.into_iter().chain(credit) {
+                    if index.keys.contains(&key) {
+                        ambiguous.insert(key.clone());
+                    }
+                    keys.entry(key).or_insert(field);
                 }
-                if let Some(remainder) = PexApp::credited_title_remainder(title) {
-                    abbreviations.insert(PexApp::short_title_key("credited", remainder, year));
-                }
-            }
-            for key in abbreviations {
-                if index.keys.contains(&key) {
-                    ambiguous.insert(key.clone());
-                }
-                keys.insert(key);
             }
         }
-        for key in keys {
+        for (key, field) in keys {
             if hd {
                 index.hd_keys.insert(key.clone());
             }
-            index.modified.insert(key.clone(), entry.updated_at);
+            OwnedCandidates::add(
+                &mut index.library.by_title,
+                key.clone(),
+                OwnedCandidate { movie, field },
+            );
             index.keys.insert(key);
         }
         if let Some(guid) = entry
@@ -289,17 +302,27 @@ fn index_owned_entries(entries: Vec<PlexOwnedEntry>) -> OwnedDone {
             .as_deref()
             .and_then(crate::app::utils::canonicalize_guid)
         {
-            index.guid_modified.insert(guid.clone(), entry.updated_at);
-            index.guids.insert(guid.clone());
-            if hd {
-                index.hd_guids.insert(guid);
-            }
+            OwnedCandidates::add(
+                &mut index.library.by_guid,
+                guid,
+                OwnedCandidate {
+                    movie,
+                    field: OwnedField::Guid,
+                },
+            );
         }
+        index.library.movies.push(OwnedMovie {
+            title: entry.title,
+            year: entry.year,
+            path: entry.file_path,
+            hd,
+            updated_at: entry.updated_at,
+        });
     }
     for key in ambiguous {
         index.keys.remove(&key);
         index.hd_keys.remove(&key);
-        index.modified.remove(&key);
+        index.library.by_title.remove(&key);
     }
     index
 }
@@ -345,6 +368,58 @@ mod tests {
 
     fn matches(index: &OwnedDone, title: &str, year: Option<i32>) -> bool {
         PexApp::match_owned_title(title, year, &index.keys).is_some()
+    }
+
+    #[test]
+    fn scan_counts_distinct_movies_and_keeps_the_file_and_field_behind_each_match() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../test_fixtures.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "
+            UPDATE media_parts SET file='/media/Evening Film.mkv';
+            UPDATE metadata_items SET original_title='Film du soir';
+            INSERT INTO media_items(id,metadata_item_id,width,height) VALUES(2,1,720,576);
+            INSERT INTO media_parts(id,media_item_id,file) VALUES(2,2,'/media/SD copy.mkv');
+            INSERT INTO metadata_items(id,title,year,metadata_type,guid)
+              VALUES(2,'Fixture Movie',1999,1,'imdb://tt9999999');
+            INSERT INTO media_items(id,metadata_item_id,width,height) VALUES(3,2,1920,1080);
+            INSERT INTO media_parts(id,media_item_id,file) VALUES(3,3,'/archive/older film.mkv');
+        ",
+        )
+        .unwrap();
+        let scan = index_owned_entries(collect_plex_owned_entries(&conn).unwrap());
+        assert_eq!(scan.library.movies.len(), 2);
+        assert!(scan.keys.len() > 2);
+        let find = |title, year, guid| {
+            super::super::lookup(title, year, guid, &scan.keys, Some(&scan.library)).unwrap()
+        };
+        // GUID wins over the conflicting title/year. The chosen part is the HD copy.
+        let by_id = find("Fixture Movie", Some(1999), Some("IMDB://tt1234567"));
+        assert!(by_id.title_key.is_none());
+        for (found, field) in [
+            (by_id, OwnedField::Guid),
+            (
+                find("Film du soir", Some(2020), None),
+                OwnedField::OriginalTitle,
+            ),
+            (find("Evening Film", Some(2021), None), OwnedField::Filename),
+            (find("Fixture Movie", Some(2020), None), OwnedField::Title),
+        ] {
+            let [candidate] = found.candidates else {
+                panic!("expected one movie")
+            };
+            assert_eq!(candidate.field, field);
+            let movie = &scan.library.movies[candidate.movie];
+            assert_eq!(movie.title, "Fixture Movie");
+            assert_eq!(movie.year, Some(2020));
+            assert_eq!(movie.path, "/media/Evening Film.mkv");
+        }
+        let ambiguous = find("Fixture Movie", None, None);
+        assert_eq!(ambiguous.candidates.len(), 2);
+        assert_ne!(ambiguous.candidates[0].movie, ambiguous.candidates[1].movie);
+        let cached = super::super::lookup("Fixture Movie", None, None, &scan.keys, None).unwrap();
+        assert!(cached.candidates.is_empty());
     }
 
     #[test]

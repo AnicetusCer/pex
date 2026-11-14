@@ -1,31 +1,7 @@
 // src/app/ui/topbar.rs
 use super::super::{DayRange, SortKey};
-use crate::config::AppConfig;
-
 use eframe::egui as eg;
-use std::borrow::Cow;
-use std::path::Path;
 
-struct DbSummary<'a> {
-    config_path: Cow<'a, str>,
-    config_exists: bool,
-    epg_source: Cow<'a, str>,
-    epg_source_exists: bool,
-    epg_local: &'a Path,
-    epg_local_exists: bool,
-    library_source: Cow<'a, str>,
-    library_source_exists: bool,
-    library_local: &'a Path,
-    library_local_exists: bool,
-    cache_dir: &'a Path,
-    cache_exists: bool,
-    owned_by_guid: usize,
-    owned_by_key: usize,
-    owned_misses: usize,
-    scheduled_by_guid: usize,
-    scheduled_by_title_slot: usize,
-    scheduled_misses: usize,
-}
 impl crate::app::PexApp {
     // ---------- TOP BAR ----------
     pub(crate) fn ui_render_topbar(&mut self, ui: &mut eg::Ui) {
@@ -205,6 +181,7 @@ impl crate::app::PexApp {
             ui.separator();
 
             if ui.button("Advanced.").clicked() {
+                self.advanced_paths.start(ui.ctx());
                 self.show_advanced_popup = true;
             }
             if ui.button("Connect to Plex").clicked() {
@@ -377,81 +354,27 @@ impl crate::app::PexApp {
         }
 
         let mut open = self.show_advanced_popup;
-        let cfg = crate::config::load_config();
-        let active_config = crate::config::discover_config_path();
-        let db_path = crate::config::local_db_path();
-        let db_exists = db_path.exists();
-        let library_db_path = crate::config::local_library_db_path();
-        let library_db_exists = library_db_path.exists();
-        let cache_dir = crate::app::cache::cache_dir();
-        let cache_exists = cache_dir.exists();
-        let tmdb_key_present = cfg
-            .tmdb_api_key
-            .as_ref()
-            .is_some_and(|k| !k.trim().is_empty());
-
         eg::Window::new("Advanced controls")
             .collapsible(false)
             .resizable(false)
             .default_width(360.0)
+            .vscroll(true)
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
-                    self.advanced_db_summary(
-                        ui,
-                        &cfg,
-                        DbSummary {
-                            config_path: active_config
-                                .as_ref()
-                                .map(|p| Cow::Owned(p.display().to_string()))
-                                .unwrap_or_else(|| Cow::Borrowed("<not found>")),
-                            config_exists: active_config.is_some(),
-                            epg_source: cfg
-                                .plex_epg_db_source
-                                .as_ref()
-                                .map(|p| Cow::Owned(p.display().to_string()))
-                                .unwrap_or_else(|| Cow::Borrowed("<not set>")),
-                            epg_source_exists: cfg
-                                .plex_epg_db_source
-                                .as_ref()
-                                .map(|p| p.exists())
-                                .unwrap_or(false),
-                            epg_local: &db_path,
-                            epg_local_exists: db_exists,
-                            library_source: cfg
-                                .library_snapshot_dir
-                                .as_ref()
-                                .or(cfg.plex_library_db_source.as_ref())
-                                .map(|p| Cow::Owned(p.display().to_string()))
-                                .unwrap_or_else(|| Cow::Borrowed("<not set>")),
-                            library_source_exists: cfg
-                                .library_snapshot_dir
-                                .as_ref()
-                                .or(cfg.plex_library_db_source.as_ref())
-                                .map(|p| p.exists())
-                                .unwrap_or(false),
-                            library_local: &library_db_path,
-                            library_local_exists: library_db_exists,
-                            cache_dir: &cache_dir,
-                            cache_exists,
-                            owned_by_guid: self.owned_match_stats.by_guid,
-                            owned_by_key: self.owned_match_stats.by_key,
-                            owned_misses: self.owned_match_stats.misses,
-                            scheduled_by_guid: self.scheduled_match_stats.by_guid,
-                            scheduled_by_title_slot: self.scheduled_match_stats.by_title_slot,
-                            scheduled_misses: self.scheduled_match_stats.misses,
-                        },
-                    );
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Ratings key…").clicked() {
                             self.open_rating_key_editor(None);
                         }
-                        ui.label(self.rating_key_feedback.unwrap_or(if tmdb_key_present {
+                        ui.label(self.rating_key_feedback.unwrap_or(if self.has_ratings_key {
                             "TMDb key saved"
                         } else {
                             "Optional TMDb film ratings"
                         }));
                     });
+                    ui.separator();
+                    ui.strong("Path status");
+                    self.advanced_paths.show(ui);
                     ui.separator();
                     self.advanced_prefetch_controls(ui);
                     ui.separator();
@@ -461,82 +384,23 @@ impl crate::app::PexApp {
                     ui.separator();
                     self.advanced_prefs_controls(ui);
                     self.advanced_feedback_section(ui);
+                    ui.separator();
+                    ui.label(format!(
+                        "Owned matches: guid={} key={} miss={}",
+                        self.owned_match_stats.by_guid,
+                        self.owned_match_stats.by_key,
+                        self.owned_match_stats.misses
+                    ));
+                    ui.label(format!(
+                        "Scheduled matches: guid={} title/time={} miss={}",
+                        self.scheduled_match_stats.by_guid,
+                        self.scheduled_match_stats.by_title_slot,
+                        self.scheduled_match_stats.misses
+                    ));
                 });
             });
 
         self.show_advanced_popup = open;
-    }
-
-    fn advanced_db_summary(&self, ui: &mut eg::Ui, cfg: &AppConfig, summary: DbSummary<'_>) {
-        let good = eg::Color32::LIGHT_GREEN;
-        let warn = eg::Color32::LIGHT_RED;
-
-        ui.label(
-            eg::RichText::new(format!("Config file: {}", summary.config_path.as_ref()))
-                .color(if summary.config_exists { good } else { warn }),
-        );
-        ui.label(
-            eg::RichText::new(format!("EPG source: {}", summary.epg_source.as_ref())).color(
-                if summary.epg_source_exists {
-                    good
-                } else {
-                    warn
-                },
-            ),
-        );
-        ui.label(
-            eg::RichText::new(format!("EPG mirror: {}", summary.epg_local.display()))
-                .color(if summary.epg_local_exists { good } else { warn }),
-        );
-
-        ui.label(
-            eg::RichText::new(format!(
-                "{}: {}",
-                if cfg.library_snapshot_dir.is_some() {
-                    "Snapshot folder"
-                } else {
-                    "Library source"
-                },
-                summary.library_source.as_ref()
-            ))
-            .color(if summary.library_source_exists {
-                good
-            } else {
-                warn
-            }),
-        );
-        ui.label(
-            eg::RichText::new(format!(
-                "Library mirror: {}",
-                summary.library_local.display()
-            ))
-            .color(if summary.library_local_exists {
-                good
-            } else {
-                warn
-            }),
-        );
-
-        ui.label(
-            eg::RichText::new(format!("Cache root: {}", summary.cache_dir.display()))
-                .color(if summary.cache_exists { good } else { warn }),
-        );
-        ui.label(
-            eg::RichText::new(format!(
-                "Owned matches: guid={} key={} miss={}",
-                summary.owned_by_guid, summary.owned_by_key, summary.owned_misses
-            ))
-            .color(good),
-        );
-        ui.label(
-            eg::RichText::new(format!(
-                "Scheduled matches: guid={} title/time={} miss={}",
-                summary.scheduled_by_guid,
-                summary.scheduled_by_title_slot,
-                summary.scheduled_misses
-            ))
-            .color(good),
-        );
     }
 
     fn advanced_prefetch_controls(&mut self, ui: &mut eg::Ui) {

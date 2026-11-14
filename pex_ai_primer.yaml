@@ -21,12 +21,12 @@ project:
     Posters are cached & resized locally, owned status is derived from library scans, and the UX stays snappy through
     aggressive background prep/prefetch stages.
   feature_highlights:
-    - "Splash -> poster prep -> grid transition designed to keep first paint under ~1s on warm cache."
+    - "The grid opens when guide rows are ready. Posters and library badges can finish in the background."
     - "Multi-stage caching: poster resize/store, channel icon prefetch, owned sidecars mirrored from Plex."
     - "Detail panel shows channel badge, day+time stamp (`Sunday 12th 05:00 UTC`), synopsis, ratings, owned metadata."
     - "Top bar controls: day-range windows, substring search, channel/genre include filters, HD-only toggle, owned dim/hide."
     - "Advanced menu: clear/prune poster cache, refresh owned scan, backup/restore UI prefs."
-    - "DVR awareness: scheduled recordings highlighted with a REC badge sourced from Plex's library database."
+    - "DVR badges use the library snapshot. REC means this airing, Other REC means a different matching airing."
   binaries:
     - pex (GUI)
     - db_explorer (CLI helper in epg_explorer_tool/)
@@ -108,12 +108,13 @@ runtime_model:
         - Info(String)
         - Done { keys: HashSet<String>, modified: HashMap<String, Option<u64>> }
         - Error(String)
-    - WorkItem: "(row_idx, key, url, cached_path_opt)"
-    - PrefetchDone: "{ row_idx, result: Result<PathBuf, String> }"
+    - PosterJob: "One per unique artwork key, shared across the matching row indices"
+    - PrefetchDone: "{ row_indices: Vec<usize>, result: Result<PathBuf, String> }"
   prep_item_schema:
     - title: String
     - thumb_url: String
-    - key: String (md5 of URL)
+    - key: String (md5 of URL, empty if no usable poster)
+    - film_key: "GUID, or title/year, or local metadata ID for an undated film"
     - begins_at_unix: Option<i64>
     - year: Option<i32>
     - tags_genre: Option<String>
@@ -140,13 +141,12 @@ flow:
     - Kick channel icon prefetch for unseen URLs
     - apply scheduled flags when the library worker supplies its index
     - apply_owned_flags() if owned data ready (GUID-first owned matching, then title/year key fallback; sets owned flags + recorded dates)
-    - start_prefetch(ctx)
-    - prewarm_first_screen(ctx)
+    - Open the guide and start background poster prefetch
   prefetch:
-    - Queue “near-term” shows first (next 2 days), then the rest
+    - Prioritize visible guide cards, then near-term showings. Skip missing artwork and reuse shared poster keys.
     - Workers:
         - download_and_store_resized_with_client(width=320, quality=75) → "<key>.jpg"
-        - Fallback to download_and_store (original size)
+        - A failed download leaves the listing available with a placeholder.
     - UI lazily uploads textures (bounded per-frame by MAX_UPLOADS_PER_FRAME)
 
 config:
@@ -194,7 +194,7 @@ database:
     - plex_epg.db-shm / -wal: "SQLite WAL files; safe to leave in place during read-only access"
     - plex_library.db: "Mirrored Plex library database used for owned detection + DVR schedule (media_grabs, media_subscriptions, metadata_subscription_desired_items)"
   schema_entry_points:
-    - "app::prep::SQL_POSTERS_USER_THUMB (metadata_items + media_items join) for poster rows"
+    - "app::prep::read_guide_airings joins metadata_items and media_items, keeps repeat airings, and tries the available artwork columns per row"
     - "app::prep::parse_channel_meta(extra_data) extracts `at:channelCallSign/title/thumb` from JSON-ish blob"
     - "app::scheduled::load_scheduled_index() reads media_grabs/media_subscriptions/metadata_subscription_desired_items for DVR awareness"
     - "`epg_explorer_tool/db_explorer.rs` has helper queries for debugging tables/columns"
@@ -217,7 +217,7 @@ ui:
     - day_range: [2, 4, 5, 7, 14]
     - search: "substring on title"
   badges:
-    - "REC: row.scheduled flag set by app::scheduled::load_scheduled_index()"
+    - "REC: displayed airing is scheduled. Other REC: another qualifying airing of the same film is scheduled."
     - channel filter:
         state: "selected_channels: BTreeSet<String> (raw call signs)"
         behavior:
@@ -248,9 +248,10 @@ ui:
           - title(year)
           - channel display label • HD
           - HH:MM UTC
-        badges: "HD / HD ↑"
+        badges: "HD / HD ↑, REC / Other REC"
       behavior:
         - "Columns = floor((available + H_SPACING) / (card_w + H_SPACING)), min 1"
+        - "Apply filters first, then display one representative airing per film. Group on film_key independently from artwork."
         - "Center grid by adding left pad"
         - "Bounded lazy texture uploads per frame"
     details_panel:
@@ -260,7 +261,8 @@ ui:
         - poster preview (cached or placeholder)
         - channel icon (64px), long-title scroller, copy button
         - airing line and optional TMDb rating button
-        - owned chips with recorded date
+        - "Other showings (N) lists additional qualifying airings with time, channel, HD/SD and scheduled state."
+        - "Owned Details shows the match reason, Plex titles, years and server paths with a copy action. Multiple matching movies are counted."
         - description and genres
 
 hd_logic:
@@ -283,13 +285,13 @@ ratings:
   - "The guide works without a TMDb key. 'Set up ratings…' in Connect to Plex and 'Ratings key…' under Advanced open the 'TMDb ratings key' window."
   - "'⭐ Rating' in film details fetches a rating or opens key setup. Saving a key there resumes that film’s lookup."
   - "Masked entry accepts a personal TMDb v3 API key. Save key and Remove key update the active config. Saving from legacy config.json creates pex-config.json, which survives portable ZIP upgrades. Cancel closes without saving."
-  - Results cached in-memory per poster key for the session
+  - Results cached in memory per film key for the session
 
 advanced_controls:
   - Poster cache: clear, prune to limit, or light refresh for stale files
   - Owned cache: manual refresh checks the live library and WAL for changes before copying them and rebuilding the owned index
   - UI prefs: backup / restore latest snapshot
-  - Status readouts: active config path, Plex DB path existence, TMDb key state
+  - "Refresh path status checks config, sources, mirrors and cache on a worker. Advanced shows the results and the TMDb key state."
 
 release_workflow:
   - "release_windows.ps1 and release_linux.ps1 generate `checksums-<platform>-<tag>.txt` (SHA-256) for each portable zip."

@@ -18,14 +18,67 @@ pub enum OwnedMsg {
 pub struct OwnedDone {
     pub hd_keys: HashSet<String>,
     pub keys: HashSet<String>,
-    pub guids: HashSet<String>,
-    pub hd_guids: HashSet<String>,
-    pub guid_modified: HashMap<String, Option<u64>>,
-    pub modified: HashMap<String, Option<u64>>,
+    pub(super) library: OwnedLibrary,
+}
+
+#[derive(Default)]
+pub(super) struct OwnedLibrary {
+    pub snapshot: Option<String>,
+    pub movies: Vec<OwnedMovie>,
+    pub by_guid: HashMap<String, OwnedCandidates>,
+    pub by_title: HashMap<String, OwnedCandidates>,
+}
+
+pub(super) struct OwnedMovie {
+    pub title: String,
+    pub year: Option<i32>,
+    pub path: String,
+    pub hd: bool,
+    pub updated_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OwnedField {
+    Guid,
+    Title,
+    OriginalTitle,
+    Filename,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct OwnedCandidate {
+    pub movie: usize,
+    pub field: OwnedField,
+}
+
+// Most lookup keys identify exactly one movie. Allocate a list only for collisions.
+pub(super) enum OwnedCandidates {
+    One(OwnedCandidate),
+    Several(Vec<OwnedCandidate>),
+}
+
+impl OwnedCandidates {
+    pub fn add(index: &mut HashMap<String, Self>, key: String, candidate: OwnedCandidate) {
+        index
+            .entry(key)
+            .and_modify(|entry| match entry {
+                Self::One(first) => *entry = Self::Several(vec![*first, candidate]),
+                Self::Several(all) => all.push(candidate),
+            })
+            .or_insert(Self::One(candidate));
+    }
+
+    pub fn as_slice(&self) -> &[OwnedCandidate] {
+        match self {
+            Self::One(movie) => std::slice::from_ref(movie),
+            Self::Several(movies) => movies,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct PrepItem {
+    pub film_key: String,
     pub title: String,
     pub thumb_url: String,
     pub key: String,
@@ -48,7 +101,7 @@ pub enum PrepMsg {
 }
 
 pub struct PrefetchDone {
-    pub row_idx: usize,
+    pub row_indices: Vec<usize>,
     pub result: Result<PathBuf, String>,
 }
 
@@ -157,6 +210,7 @@ impl FromStr for SortKey {
 
 // ---- core row backing each grid card ----
 pub struct PosterRow {
+    pub film_key: String,
     pub title: String,
     pub url: String,
     pub key: String,

@@ -1,6 +1,6 @@
 // src/app/filters.rs
 use chrono::{NaiveDate, TimeZone, Utc};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
 use super::SortKey;
@@ -14,133 +14,125 @@ pub(crate) fn parse_owned_cutoff(input: &str) -> Option<u64> {
     Some(Utc.from_utc_datetime(&dt).timestamp().max(0) as u64)
 }
 
+pub(super) struct FilteredGuide {
+    pub(super) days: Vec<(i64, Vec<usize>)>,
+    pub(super) scheduled_elsewhere: HashSet<usize>,
+}
+
 impl crate::app::PexApp {
-    /// Build grouped indices for the grid: per-day buckets with intra-day sorting applied.
-    /// Returns Vec of (day_bucket, indices_for_that_day)
-    pub(crate) fn build_grouped_indices(&self) -> Vec<(i64, Vec<usize>)> {
-        use std::time::SystemTime;
-
-        let now_bucket = crate::app::utils::day_bucket(SystemTime::now());
-        // The helper is in this module — call it directly.
-        let max_bucket_opt = self.current_range.max_bucket(now_bucket);
-
-        // Precompute filters
-        let query = self.search_query.to_ascii_lowercase();
-        let use_query = !query.is_empty();
-        let have_channel_filter = !self.selected_channels.is_empty(); // EMPTY = no filter (show all)
-        let have_genre_filter = !self.selected_genres.is_empty();
-        let have_decade_filter = !self.selected_decades.is_empty();
-        let owned_cutoff_active = self.filter_owned_before_cutoff;
-        let owned_cutoff_ts = self.owned_before_cutoff_ts;
-
-        // 1) Filter + attach day bucket
-        let mut filtered: Vec<(usize, i64)> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, row)| {
-                // time window
-                let ts = row.airing?;
-                let b = crate::app::utils::day_bucket(ts);
-                if b < now_bucket {
-                    return None;
-                }
-                if let Some(max_b) = max_bucket_opt {
-                    if b >= max_b {
-                        return None;
-                    }
-                }
-
-                // title search
-                if use_query && !row.title.to_ascii_lowercase().contains(&query) {
-                    return None;
-                }
-
-                // include-only channel filter
-                if have_channel_filter {
-                    let raw = row.channel_raw.as_deref().unwrap_or("");
-                    if !self.selected_channels.contains(raw) {
-                        return None;
-                    }
-                }
-
-                if have_genre_filter {
-                    let mut match_genre = false;
-                    for g in &row.genres {
-                        if self.selected_genres.contains(g) {
-                            match_genre = true;
-                            break;
-                        }
-                    }
-                    if !match_genre {
-                        return None;
-                    }
-                }
-                let broadcast_hd = Self::row_broadcast_hd(row);
-
-                if self.filter_hd_only && !broadcast_hd {
-                    return None;
-                }
-
-                // hide-owned, but KEEP rows that are HD upgrades (airing HD while owned is SD)
-                if self.hide_owned && row.owned {
-                    let owned_is_hd = row.owned_hd;
-
-                    let is_upgrade = broadcast_hd && !owned_is_hd;
-                    if !is_upgrade {
-                        return None;
-                    }
-                }
-
-                if have_decade_filter {
-                    let decade = row.year.map(|y| (y / 10) * 10);
-                    match decade {
-                        Some(d) if self.selected_decades.contains(&d) => {}
-                        _ => return None,
-                    }
-                }
-
-                if owned_cutoff_active {
-                    match (row.owned, row.owned_modified) {
-                        (true, Some(ts)) if ts < owned_cutoff_ts => {}
-                        _ => return None,
-                    }
-                }
-
-                Some((idx, b))
-            })
-            .collect();
-
-        // 2) Sort by (day bucket, then title) for stable grouping
-        filtered.sort_by(|a, b| {
-            let (ai, ab) = a;
-            let (bi, bb) = b;
-            ab.cmp(bb)
-                .then_with(|| self.rows[*ai].title.cmp(&self.rows[*bi].title))
-        });
-
-        // 3) Group contiguous buckets
-        let mut groups: Vec<(i64, Vec<usize>)> = Vec::new();
-        let mut cur_key: Option<i64> = None;
-        for (idx, bucket) in filtered {
-            if cur_key != Some(bucket) {
-                groups.push((bucket, Vec::new()));
-                cur_key = Some(bucket);
-            }
-            if let Some((_, v)) = groups.last_mut() {
-                v.push(idx);
-            }
+    /// Group only showings that pass the current filters. Pick the next one
+    /// still to air, or the most recent one if all its showings have started.
+    pub(super) fn filtered_guide(&self) -> FilteredGuide {
+        let now = SystemTime::now();
+        let mut films = HashMap::new();
+        for (idx, starts) in self.matching_airings(now, None) {
+            let row = &self.rows[idx];
+            let distance = starts
+                .duration_since(now)
+                .unwrap_or_else(|past| past.duration());
+            let rank = (starts < now, distance, idx, starts);
+            let (best, scheduled) = films.entry(row.film_key.as_str()).or_insert((rank, false));
+            *best = (*best).min(rank);
+            *scheduled |= row.scheduled;
         }
 
-        // 4) Intra-day sorting based on current SortKey (+ optional desc)
-        for (_bucket, idxs) in groups.iter_mut() {
+        let mut days = BTreeMap::<i64, Vec<usize>>::new();
+        let mut scheduled_elsewhere = HashSet::new();
+        for ((_, _, idx, starts), scheduled) in films.into_values() {
+            let row = &self.rows[idx];
+            let day = crate::app::utils::day_bucket(starts);
+            days.entry(day).or_default().push(idx);
+            if scheduled && !row.scheduled {
+                scheduled_elsewhere.insert(idx);
+            }
+        }
+        for idxs in days.values_mut() {
+            // Deterministic tie order even when several films share a slot.
+            idxs.sort_unstable_by(|&a, &b| {
+                self.rows[a].title.cmp(&self.rows[b].title).then(a.cmp(&b))
+            });
             self.sort_intra_day(idxs);
             if self.sort_desc {
                 idxs.reverse();
             }
         }
+        FilteredGuide {
+            days: days.into_iter().collect(),
+            scheduled_elsewhere,
+        }
+    }
 
-        groups
+    pub(super) fn filtered_showings_for(&self, idx: usize) -> Vec<usize> {
+        let Some(row) = self.rows.get(idx) else {
+            return Vec::new();
+        };
+        let mut airings: Vec<_> = self
+            .matching_airings(SystemTime::now(), Some(&row.film_key))
+            .collect();
+        airings.sort_unstable_by_key(|&(idx, starts)| (starts, idx));
+        airings.into_iter().map(|(idx, _)| idx).collect()
+    }
+
+    fn matching_airings<'a>(
+        &'a self,
+        now: SystemTime,
+        film: Option<&'a str>,
+    ) -> impl Iterator<Item = (usize, SystemTime)> + 'a {
+        let today = crate::app::utils::day_bucket(now);
+        let end = self.current_range.max_bucket(today);
+        let query = self.search_query.trim().to_lowercase();
+        self.rows.iter().enumerate().filter_map(move |(idx, row)| {
+            if film.is_some_and(|key| key != row.film_key) {
+                return None;
+            }
+            let starts = row.airing?;
+            let day = crate::app::utils::day_bucket(starts);
+            if day < today || end.is_some_and(|end| day >= end) {
+                return None;
+            }
+            if !query.is_empty() && !row.title.to_lowercase().contains(&query) {
+                return None;
+            }
+            if !self.selected_channels.is_empty()
+                && !row
+                    .channel_raw
+                    .as_ref()
+                    .is_some_and(|channel| self.selected_channels.contains(channel))
+            {
+                return None;
+            }
+            if !self.selected_genres.is_empty()
+                && !row
+                    .genres
+                    .iter()
+                    .any(|genre| self.selected_genres.contains(genre))
+            {
+                return None;
+            }
+            if !self.selected_decades.is_empty()
+                && !row
+                    .year
+                    .is_some_and(|year| self.selected_decades.contains(&(year / 10 * 10)))
+            {
+                return None;
+            }
+            let hd = Self::row_broadcast_hd(row);
+            if self.filter_hd_only && !hd {
+                return None;
+            }
+            if self.hide_owned && row.owned && (!hd || row.owned_hd) {
+                return None;
+            }
+            if self.filter_owned_before_cutoff
+                && !(row.owned
+                    && row
+                        .owned_modified
+                        .is_some_and(|ts| ts < self.owned_before_cutoff_ts))
+            {
+                return None;
+            }
+            Some((idx, starts))
+        })
     }
 
     pub(crate) fn available_decades(&self) -> Vec<i32> {
