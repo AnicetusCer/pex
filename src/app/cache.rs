@@ -553,6 +553,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn required_artwork_codecs_decode_posters_and_window_icon() {
+        let temp = tempfile::tempdir().unwrap();
+        let rgb = image::RgbImage::from_pixel(2, 3, image::Rgb([30, 60, 90]));
+        for format in [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP] {
+            let path = temp
+                .path()
+                .join(format!("art.{}", format.extensions_str()[0]));
+            rgb.save_with_format(&path, format).unwrap();
+            let (width, height, rgba) = load_rgba_raw_or_image(path.to_str().unwrap()).unwrap();
+            assert_eq!((width, height, rgba.len()), (2, 3, 24), "{format:?}");
+        }
+        let ico = image::load_from_memory(include_bytes!("../assets/PEX.ico")).unwrap();
+        assert!(ico.width() > 0 && ico.height() > 0);
+    }
+
+    #[test]
     fn indexed_poster_lookup_preserves_format_preference_and_legacy_names() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();

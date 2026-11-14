@@ -7,7 +7,25 @@ permissions:
   contents: read
 
 jobs:
+  audit:
+    name: Audit locked dependencies
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Cargo.lock against RustSec
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool=cargo-audit-x86_64-unknown-linux-musl-v0.23.0
+          archive="$RUNNER_TEMP/$tool.tgz"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/RustSec/rustsec/releases/download/cargo-audit/v0.23.0/$tool.tgz" -o "$archive"
+          echo "4f01c74ed84b2dffd0b1d37012a62cdf2a92c96e25bdf8eec7fcc0d4d3eb7811  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" "$tool/cargo-audit"
+          "$RUNNER_TEMP/$tool/cargo-audit" audit --file Cargo.lock --deny unsound --deny yanked
+
   portable:
+    needs: audit
     name: ${{ matrix.platform }}
     strategy:
       fail-fast: false

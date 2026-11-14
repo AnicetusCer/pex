@@ -76,7 +76,7 @@ For manual JSON edits, escape Windows backslashes or use forward slashes. `confi
 - **Guide cannot load:** PEX returns to **Connect to Plex**, showing the error and a next action. Choose another guide when several are listed, or correct the saved file and use **Retry saved configuration**.
 - **No owned badges:** check the persistent snapshot/error message above the guide, then **Retry owned scan** or reconnect. A backup may predate recent additions.
 - **No films:** try a wider day range and clear filters. Your Plex guide may need refreshing on the server.
-- **No posters:** check internet access. Use **Advanced → Clear & rebuild poster cache** after downloads finish.
+- **No posters:** check internet access. PEX requests JPEG, PNG and WebP artwork. A provider serving an unsupported format leaves the poster as a placeholder. Use **Advanced → Clear & rebuild poster cache** after downloads finish.
 
 The portable bundle contains the executable, empty starter config, README, sample configs, LICENSE and NOTICE.
 

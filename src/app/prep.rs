@@ -460,7 +460,11 @@ fn copy_snapshot_with_hooks(
     }
     // SQLite serializes installation with readers and writers, including WAL readers.
     // Only a confirmed corrupt standalone destination needs filesystem replacement.
-    match db.backup(rusqlite::DatabaseName::Main, dst, None) {
+    match db.backup(
+        rusqlite::MAIN_DB,
+        dst,
+        None::<fn(rusqlite::backup::Progress)>,
+    ) {
         Ok(()) => Ok(()),
         Err(e) if is_corruption(&e) && !has_sidecars(dst)? => {
             let probe = Connection::open_with_flags(dst, OpenFlags::SQLITE_OPEN_READ_ONLY)

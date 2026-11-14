@@ -31,11 +31,7 @@ fn main() -> Result<()> {
     let mut stmt = conn.prepare(&format!("SELECT * FROM {} LIMIT {}", table, limit))?;
 
     // Grab column names now so stmt borrow is released
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
+    let column_names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
     let rows = stmt.query_map([], |row| {
         let mut values: Vec<String> = Vec::with_capacity(column_names.len());

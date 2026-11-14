@@ -1,5 +1,6 @@
 # Unreleased
 
+- The portable app bundles SQLite 3.54.1 with a fix for reading a database alongside its write-ahead log. Artwork requests use JPEG, PNG and WebP. The portable build checks the locked Rust dependencies before packaging.
 - The guide keeps repeat airings, remakes and films without artwork. Each card reflects the current filters. Expand **Other showings (N)** for additional times and channels. **REC** identifies the displayed showing and **Other REC** identifies a scheduled alternative.
 - Film listings appear while posters load in the background. Showings with the same artwork share a poster download and display texture. Selecting a film loads its poster in Details even when its card is offscreen.
 - The guide looks up cached posters on its background worker and reuses the layout of offscreen cards. Owned scans avoid repeated title normalization and stream the saved title cache directly from the index.
