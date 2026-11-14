@@ -4,7 +4,7 @@
 - Film listings appear while posters load in the background. Repeated airings share poster downloads.
 - Recording badges distinguish channels airing the same film at the same time. **REC?** identifies a scheduled time with an unconfirmed channel. **Film REC** identifies a recording request without a confirmed showing.
 - PEX now recognises Plex recording subscriptions that store the station ID and display name together. A unique station match at the booked time gets **REC**, including when one subscription lists several channels and airtimes.
-- The guide checks whether Plex analysed the media before using its dimensions to identify HD or SD. Otherwise PEX uses explicit resolution and station labels. Unverified guide dimensions alone leave the quality unknown, preventing false **HD ↑** badges on listings such as Freeview Sky Mix.
+- The guide labels confirmed HD and SD showings and leaves the quality label off when the guide supplies insufficient evidence. PEX checks whether Plex analysed the media before using its dimensions, preventing false **HD ↑** badges on listings such as Freeview Sky Mix.
 - Owned badges follow the configured library across restarts. **Owned Details** includes both neighbouring years when they tie for the best match.
 - **Owned Details** explains the match and shows the Plex title, year and server file path. It lists all candidates when a match is ambiguous. The scan total counts each Plex movie once, including movies with multiple files or title variants.
 - **Advanced → Refresh path status** checks configured sources and local paths in the background, so an unreachable share leaves the guide available.

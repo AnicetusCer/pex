@@ -160,12 +160,18 @@ impl crate::app::PexApp {
                                             format_airtime(time),
                                             channel_name(other)
                                         ));
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.weak(other.airing_quality.label());
-                                            if let Some(label) = other.scheduled.detail() {
-                                                ui.strong(label);
-                                            }
-                                        });
+                                        let quality = other.airing_quality.label();
+                                        let recording = other.scheduled.detail();
+                                        if quality.is_some() || recording.is_some() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                if let Some(label) = quality {
+                                                    ui.weak(label);
+                                                }
+                                                if let Some(label) = recording {
+                                                    ui.strong(label);
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                             });
@@ -231,23 +237,21 @@ impl crate::app::PexApp {
                             }
                         });
 
-                        // --- Owned tags (explicit SD/HD) + optional Airing status ---
-                        {
+                        let quality = airing_quality.label();
+                        if quality.is_some() || owned {
                             ui.add_space(6.0);
                             ui.horizontal_wrapped(|ui| {
-                                // Airing chip (HD/SD)
-                                ui.add(
-                                    eg::Label::new(
-                                        eg::RichText::new(airing_quality.label()).color(
-                                            if airing_quality == AiringQuality::Hd {
-                                                eg::Color32::from_rgb(120, 180, 255)
-                                            } else {
-                                                eg::Color32::GRAY
-                                            },
-                                        ),
-                                    )
-                                    .wrap(),
-                                );
+                                if let Some(label) = quality {
+                                    let color = if airing_quality == AiringQuality::Hd {
+                                        eg::Color32::from_rgb(120, 180, 255)
+                                    } else {
+                                        eg::Color32::GRAY
+                                    };
+                                    ui.add(
+                                        eg::Label::new(eg::RichText::new(label).color(color))
+                                            .wrap(),
+                                    );
+                                }
 
                                 // Owned chip (Owned HD / Owned SD)
                                 if owned {

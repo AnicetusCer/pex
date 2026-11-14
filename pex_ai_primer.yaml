@@ -260,7 +260,7 @@ ui:
         - poster preview (cached or placeholder)
         - channel icon (64px), long-title scroller, copy button
         - airing line and optional TMDb rating button
-        - "Other showings (N) lists additional qualifying airings with time, channel, HD/SD/unknown quality and recording status."
+        - "Other showings (N) lists additional qualifying airings with time, channel, confirmed HD/SD when available, and recording status."
         - "Owned Details shows the match reason, Plex titles, years and server paths with a copy action. Both adjacent years are considered together after identifier and exact title/year matches."
         - description and genres
 

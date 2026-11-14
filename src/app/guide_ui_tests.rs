@@ -39,6 +39,19 @@ fn run_portable_test(test: &str) {
     );
 }
 
+fn painted_airing_labels(ui: &mut TestUi) -> Vec<String> {
+    ui.frame(Vec::new())
+        .shapes
+        .into_iter()
+        .filter_map(|s| match s.shape {
+            eframe::egui::Shape::Text(t) if t.galley.text().starts_with("Airing ") => {
+                Some(t.galley.text().to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "parent creates an isolated portable install"]
 fn portable_sky_mix_quality() {
@@ -50,6 +63,7 @@ fn portable_sky_mix_quality() {
     let guide = source.join("guide.db");
     let library = source.join("library.db");
     let start = chrono::Utc::now().timestamp() + 1800;
+    let repeat = start + 1800;
     for path in [&guide, &library] {
         database(path);
         Connection::open(path).unwrap().execute_batch(
@@ -66,6 +80,7 @@ fn portable_sky_mix_quality() {
         .unwrap();
         for (time, call_sign, label, number) in [
             (start, "SKYMIX", "011 SKYMIX (Sky Mix)", "011"),
+            (repeat, "SKYMIX", "011 SKYMIX (Sky Mix)", "011"),
             (start + 3600, "SKYMIXHD", "141 SKYMIXHD (Sky Mix HD)", "141"),
         ] {
             let channel = serde_json::json!({
@@ -85,12 +100,22 @@ fn portable_sky_mix_quality() {
              CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);",
         )
         .unwrap();
+        db.execute(
+            "INSERT INTO media_grabs VALUES(0,?1)",
+            [serde_json::json!({"mt:guid":"imdb://tt1234567","me:beginsAt":repeat}).to_string()],
+        )
+        .unwrap();
     }
 
     config::save_connection(&guide, Some(&library), false).unwrap();
     let mut ui = TestUi::default();
-    ui.frames_until("owned SD film with both Sky Mix showings", |app| {
-        app.rows.len() == 2 && app.rows.iter().all(|r| r.owned && !r.owned_hd)
+    ui.frames_until("owned SD film and booked Sky Mix repeat", |app| {
+        app.rows.len() == 3
+            && app.rows.iter().all(|r| r.owned && !r.owned_hd)
+            && app
+                .rows
+                .iter()
+                .any(|r| r.scheduled == super::scheduled::RecordingStatus::Exact)
     });
     let plain = ui
         .app
@@ -106,7 +131,14 @@ fn portable_sky_mix_quality() {
         .unwrap();
     assert_eq!(ui.app.rows[plain].airing_quality, AiringQuality::Unknown);
     assert_eq!(ui.app.rows[hd].airing_quality, AiringQuality::Hd);
-    assert_eq!(ui.app.filtered_showings_for(plain), [plain, hd]);
+    let showings = ui.app.filtered_showings_for(plain);
+    assert_eq!(showings.len(), 3);
+    assert_eq!(showings[0], plain);
+    assert_eq!(showings[2], hd);
+    assert_eq!(
+        ui.app.rows[showings[1]].airing_quality,
+        AiringQuality::Unknown
+    );
     let upgrade_visible = |ui: &mut TestUi| {
         ui.frame(Vec::new())
             .shapes
@@ -122,7 +154,12 @@ fn portable_sky_mix_quality() {
         .read_response(eframe::egui::Id::new(("card_sel", plain)))
         .unwrap();
     ui.click(card.rect.center());
-    ui.label("Airing quality unknown");
+    ui.label("Owned SD");
+    assert!(painted_airing_labels(&mut ui).is_empty());
+    ui.press("Other showings (2)");
+    ui.label("Scheduled to record");
+    ui.label("Airing HD");
+    assert_eq!(painted_airing_labels(&mut ui), ["Airing HD"]);
     ui.press("Filters");
     ui.press("HD only");
     assert_eq!(ui.app.filtered_showings_for(hd), [hd]);
@@ -396,8 +433,8 @@ fn portable_guide_details() {
         .read_response(eframe::egui::Id::new(("card_sel", idx)))
         .unwrap();
     ui.click(card.rect.center());
-    ui.label("Airing quality unknown");
     ui.label("2 Plex movies match this airing.");
+    assert!(painted_airing_labels(&mut ui).is_empty());
     ui.label("/fixture/Neighbour (2024).mkv");
     ui.label("/fixture/Neighbour (2026).mkv");
 

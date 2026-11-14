@@ -246,11 +246,11 @@ pub enum AiringQuality {
 }
 
 impl AiringQuality {
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> Option<&'static str> {
         match self {
-            Self::Hd => "Airing HD",
-            Self::Sd => "Airing SD",
-            Self::Unknown => "Airing quality unknown",
+            Self::Hd => Some("Airing HD"),
+            Self::Sd => Some("Airing SD"),
+            Self::Unknown => None,
         }
     }
 }
