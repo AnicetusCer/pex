@@ -228,7 +228,13 @@ impl PexApp {
                 if self.did_init { self.restart_poster_pipeline(ctx); self.start_owned_scan(true); }
             }
             if self.did_init && ui.button("Back to guide").clicked() { self.connection.open = false; }
-            ui.label("No TMDb key is required. Choose a writable portable folder; your settings and local copies stay beside PEX.");
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Set up ratings…").clicked() {
+                    self.open_rating_key_editor(None);
+                }
+                ui.label(self.rating_key_feedback.unwrap_or("Optional TMDb film ratings"));
+            });
         }); });
     }
     fn save_selected_connection(&mut self, ctx: &eg::Context) {

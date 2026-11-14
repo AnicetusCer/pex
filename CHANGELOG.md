@@ -1,5 +1,6 @@
 # Unreleased
 
+- Manage an optional TMDb v3 API key from **Set up ratings…** on **Connect to Plex** or **Advanced → Ratings key…**. Choosing **⭐ Rating** in film details opens the same masked key entry when needed and resumes the lookup after saving. The key is saved with your portable settings.
 - A live owned refresh checks the library and its WAL twice before transferring either file. PEX skips the live copy if the files are changing and bounds each transfer by its starting size. When the live source is busy, PEX keeps its previous usable mirror or tries an existing completed library backup.
 - **Completed snapshots** lets PEX read backups from an existing folder. The guide shows the backup date for owned and scheduled recording badges. All scanning and SQLite validation take place on the PEX computer.
 

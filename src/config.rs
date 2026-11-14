@@ -293,6 +293,39 @@ pub fn save_connection_with_snapshots(
     snapshot_dir: Option<&Path>,
     guide_only: bool,
 ) -> Result<PathBuf, String> {
+    update_config(|object| {
+        object.remove("plex_db_source");
+        object.insert("plex_epg_db_source".into(), serde_json::json!(epg));
+        object.insert("plex_library_db_source".into(), serde_json::json!(library));
+        if let Some(folder) = snapshot_dir {
+            object.insert("library_snapshot_dir".into(), serde_json::json!(folder));
+        } else {
+            object.remove("library_snapshot_dir");
+        }
+        object.insert("guide_only".into(), serde_json::json!(guide_only));
+    })
+}
+
+/// Save a personal TMDb key. Passing None explicitly removes a previously saved key.
+pub fn save_tmdb_api_key(key: Option<&str>) -> Result<PathBuf, String> {
+    let key = key.map(str::trim);
+    if key == Some("") {
+        return Err("Enter a TMDb API key to save.".into());
+    }
+    update_config(|object| {
+        object.remove("omdb_api_key");
+        object.remove("the_movie_db_api_key");
+        if let Some(key) = key {
+            object.insert("tmdb_api_key".into(), serde_json::json!(key));
+        } else {
+            object.remove("tmdb_api_key");
+        }
+    })
+}
+
+fn update_config(
+    update: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<PathBuf, String> {
     let source = discover_config_path();
     let path = env::var_os("PEX_CONFIG")
         .map(|p| resolve_relative_path(PathBuf::from(p)))
@@ -303,8 +336,8 @@ pub fn save_connection_with_snapshots(
             Some(p) => p.to_path_buf(),
             None => base_dir().join(CONFIG_FILENAME),
         });
-    let mut value = if let Some(source) = source {
-        let raw = fs::read_to_string(&source).map_err(|e| e.to_string())?;
+    let mut value = if let Some(source) = &source {
+        let raw = fs::read_to_string(source).map_err(|e| e.to_string())?;
         serde_json::from_str::<serde_json::Value>(&raw)
             .map_err(|e| format!("Repair {} before saving: {e}", source.display()))?
     } else {
@@ -313,15 +346,14 @@ pub fn save_connection_with_snapshots(
     let object = value
         .as_object_mut()
         .ok_or("Config must contain a JSON object")?;
-    object.remove("plex_db_source");
-    object.insert("plex_epg_db_source".into(), serde_json::json!(epg));
-    object.insert("plex_library_db_source".into(), serde_json::json!(library));
-    if let Some(folder) = snapshot_dir {
-        object.insert("library_snapshot_dir".into(), serde_json::json!(folder));
-    } else {
-        object.remove("library_snapshot_dir");
-    }
-    object.insert("guide_only".into(), serde_json::json!(guide_only));
+    update(object);
+    // Serde type errors can quote input values, including a misplaced API key.
+    RawConfig::deserialize(&value).map_err(|_| {
+        format!(
+            "Repair {} before saving. Use true or false for guide_only, strings or null for paths and API keys, and only one name for each setting.",
+            source.as_deref().unwrap_or(&path).display()
+        )
+    })?;
     let parent = path.parent().ok_or("Config has no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
@@ -339,6 +371,98 @@ pub fn save_connection_with_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmdb_key_persistence() {
+        let portable = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "config::tests::tmdb_config_fixture", "--ignored"])
+            .current_dir(portable.path())
+            .env("PEX_TMDB_FIXTURE_DIR", portable.path())
+            .env("PEX_BASE_DIR", portable.path())
+            .env("HOME", portable.path())
+            .env("USERPROFILE", portable.path())
+            .env_remove("PEX_CONFIG")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+    }
+
+    #[test]
+    #[ignore = "tmdb_key_persistence supplies an isolated config and home directory"]
+    fn tmdb_config_fixture() {
+        let portable =
+            PathBuf::from(env::var_os("PEX_TMDB_FIXTURE_DIR").expect("run tmdb_key_persistence"));
+        assert_eq!(
+            env::current_dir().unwrap().canonicalize().unwrap(),
+            portable.canonicalize().unwrap()
+        );
+        assert_eq!(base_dir(), portable);
+        assert_eq!(home_dir().as_ref(), Some(&portable));
+        assert!(env::var_os("PEX_CONFIG").is_none());
+        let legacy = portable.join(LEGACY_CONFIG_FILENAME);
+        let saved = portable.join(CONFIG_FILENAME);
+        let other_settings = serde_json::json!({
+            "plex_db_source": "relative/guide.db",
+            "library_snapshot_dir": "relative/backups",
+            "guide_only": true,
+            "custom_setting": {"enabled": true}
+        });
+        let mut original = other_settings.clone();
+        original["omdb_api_key"] = serde_json::json!("legacy-fixture-key");
+        fs::write(&legacy, original.to_string()).unwrap();
+        assert_eq!(
+            load_config().tmdb_api_key.as_deref(),
+            Some("legacy-fixture-key")
+        );
+
+        assert_eq!(save_tmdb_api_key(Some("  fixture-key  ")).unwrap(), saved);
+        let read =
+            |path| serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(read(&legacy), original);
+        let mut expected = other_settings.clone();
+        expected["tmdb_api_key"] = serde_json::json!("fixture-key");
+        assert_eq!(read(&saved), expected);
+        assert!(save_tmdb_api_key(Some("   ")).is_err());
+        assert_eq!(read(&saved), expected);
+
+        let explicit = portable.join("override.json");
+        env::set_var("PEX_CONFIG", &explicit);
+        assert_eq!(save_tmdb_api_key(Some("replacement")).unwrap(), explicit);
+        assert_eq!(load_config().tmdb_api_key.as_deref(), Some("replacement"));
+        assert_eq!(read(&saved), expected);
+        // A legacy alias or duplicate field must not resurrect a removed key.
+        expected["the_movie_db_api_key"] = serde_json::json!("old-alias");
+        expected["omdb_api_key"] = serde_json::json!("another-old-alias");
+        fs::write(&explicit, expected.to_string()).unwrap();
+        assert_eq!(save_tmdb_api_key(None).unwrap(), explicit);
+        assert_eq!(read(&explicit), other_settings);
+        assert!(load_config().tmdb_api_key.is_none());
+
+        for invalid in ["{invalid", "[]"] {
+            fs::write(&explicit, invalid).unwrap();
+            assert!(save_tmdb_api_key(Some("fixture-key")).is_err());
+            assert_eq!(fs::read_to_string(&explicit).unwrap(), invalid);
+        }
+        let incompatible =
+            r#"{"guide_only":"private-fixture-value","tmdb_api_key":"old-fixture-key"}"#;
+        fs::write(&explicit, incompatible).unwrap();
+        let error = save_tmdb_api_key(Some("new-fixture-key")).unwrap_err();
+        assert!(error.contains("guide_only"));
+        assert!(error.contains(&explicit.display().to_string()));
+        for value in [
+            "private-fixture-value",
+            "old-fixture-key",
+            "new-fixture-key",
+        ] {
+            assert!(!error.contains(value));
+        }
+        assert_eq!(fs::read_to_string(&explicit).unwrap(), incompatible);
+    }
 
     #[test]
     fn discovery_returns_all_guide_choices_and_only_the_live_library() {

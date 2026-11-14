@@ -280,8 +280,9 @@ icons:
   - Prefetched in background after prep so first selection doesn't block UI
 
 ratings:
-  - TMDb fetch triggered by detail panel button
-  - Rating button hidden unless `tmdb_api_key` is set in config
+  - "The guide works without a TMDb key. 'Set up ratings…' in Connect to Plex and 'Ratings key…' under Advanced open the 'TMDb ratings key' window."
+  - "'⭐ Rating' in film details fetches a rating or opens key setup. Saving a key there resumes that film’s lookup."
+  - "Masked entry accepts a personal TMDb v3 API key. Save key and Remove key update the active config. Saving from legacy config.json creates pex-config.json, which survives portable ZIP upgrades. Cancel closes without saving."
   - Results cached in-memory per poster key for the session
 
 advanced_controls:

@@ -187,8 +187,8 @@ pub enum RatingState {
     Pending,
     Success(String),
     NotFound,
+    KeyRejected,
     Error(String),
-    MissingApiKey,
 }
 
 #[derive(Clone, Debug)]

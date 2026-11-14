@@ -19,7 +19,6 @@ struct DbSummary<'a> {
     library_local_exists: bool,
     cache_dir: &'a Path,
     cache_exists: bool,
-    tmdb_key_present: bool,
     owned_by_guid: usize,
     owned_by_key: usize,
     owned_misses: usize,
@@ -435,7 +434,6 @@ impl crate::app::PexApp {
                             library_local_exists: library_db_exists,
                             cache_dir: &cache_dir,
                             cache_exists,
-                            tmdb_key_present,
                             owned_by_guid: self.owned_match_stats.by_guid,
                             owned_by_key: self.owned_match_stats.by_key,
                             owned_misses: self.owned_match_stats.misses,
@@ -444,6 +442,16 @@ impl crate::app::PexApp {
                             scheduled_misses: self.scheduled_match_stats.misses,
                         },
                     );
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Ratings key…").clicked() {
+                            self.open_rating_key_editor(None);
+                        }
+                        ui.label(self.rating_key_feedback.unwrap_or(if tmdb_key_present {
+                            "TMDb key saved"
+                        } else {
+                            "Optional TMDb film ratings"
+                        }));
+                    });
                     ui.separator();
                     self.advanced_prefetch_controls(ui);
                     ui.separator();
@@ -529,12 +537,6 @@ impl crate::app::PexApp {
             ))
             .color(good),
         );
-
-        if !summary.tmdb_key_present {
-            ui.label(
-                eg::RichText::new("TMDb ratings disabled (config tmdb_api_key not set).").weak(),
-            );
-        }
     }
 
     fn advanced_prefetch_controls(&mut self, ui: &mut eg::Ui) {

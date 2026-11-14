@@ -12,6 +12,7 @@ impl crate::app::PexApp {
         let default_width = self.detail_panel_width.clamp(min_w, max_w);
 
         let mut trigger_rating_request: Option<usize> = None;
+        let mut replace_key_for = None;
 
         let panel = eg::SidePanel::right("detail_panel")
             .resizable(true)
@@ -168,7 +169,7 @@ impl crate::app::PexApp {
 
                 ui.add_space(6.0);
                 let rating_state = self.rating_state_for_key(&poster_key);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let fetch_enabled = !matches!(rating_state, RatingState::Pending);
                     if ui
                         .add_enabled(fetch_enabled, eg::Button::new("⭐ Rating"))
@@ -189,19 +190,16 @@ impl crate::app::PexApp {
                         RatingState::NotFound => {
                             ui.label(eg::RichText::new("TMDb rating not found.").weak());
                         }
+                        RatingState::KeyRejected => {
+                            ui.label("TMDb rejected this API key.");
+                            if ui.button("Change ratings key…").clicked() {
+                                replace_key_for = self.rows.get(sel).map(super::RatingLookup::from);
+                            }
+                        }
                         RatingState::Error(ref err) => {
                             ui.label(
                                 eg::RichText::new(format!("Rating error: {err}"))
                                     .color(eg::Color32::LIGHT_RED),
-                            );
-                        }
-                        RatingState::MissingApiKey => {
-                            ui.label(
-                                eg::RichText::new(format!(
-                                    "Set tmdb_api_key in {} to enable ratings.",
-                                    crate::config::CONFIG_FILENAME
-                                ))
-                                .weak(),
                             );
                         }
                         RatingState::Idle => {
@@ -297,6 +295,9 @@ impl crate::app::PexApp {
 
         if let Some(idx) = trigger_rating_request {
             self.request_rating_for(idx);
+        }
+        if let Some(film) = replace_key_for {
+            self.open_rating_key_editor(Some(film));
         }
     }
 }

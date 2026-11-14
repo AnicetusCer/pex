@@ -43,6 +43,9 @@ pub mod gfx;
 pub mod owned;
 pub mod prefetch;
 pub mod prefs;
+mod rating_key;
+#[cfg(test)]
+mod rating_key_tests;
 mod setup;
 #[cfg(test)]
 mod test_fixtures;
@@ -141,6 +144,8 @@ pub struct PexApp {
     rating_tx: Option<Sender<RatingMsg>>,
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
+    rating_key_editor: Option<rating_key::RatingKeyEditor>,
+    rating_key_feedback: Option<&'static str>,
 
     scheduled_index: Option<ScheduledIndex>,
     scheduled_match_stats: ScheduledMatchStats,
@@ -255,6 +260,8 @@ impl Default for PexApp {
             rating_tx: None,
             rating_rx: None,
             rating_states: HashMap::new(),
+            rating_key_editor: None,
+            rating_key_feedback: None,
             scheduled_index: None,
             scheduled_match_stats: ScheduledMatchStats::default(),
 
@@ -671,24 +678,29 @@ impl PexApp {
         let Some(row) = self.rows.get(idx) else {
             return;
         };
-        let key = row.key.clone();
-        if matches!(self.rating_states.get(&key), Some(RatingState::Pending)) {
+        if matches!(self.rating_states.get(&row.key), Some(RatingState::Pending)) {
             return;
         }
-
+        let lookup = RatingLookup::from(row);
         let cfg = load_config();
         let Some(api_key) = cfg
             .tmdb_api_key
             .filter(|k| !k.trim().is_empty())
             .map(|k| k.trim().to_string())
         else {
-            self.rating_states.insert(key, RatingState::MissingApiKey);
+            self.open_rating_key_editor(Some(lookup));
             return;
         };
+        self.start_rating_lookup(lookup, api_key);
+    }
 
-        let imdb_id = row.guid.as_deref().and_then(imdb_id_from_guid);
-        let title = row.title.clone();
-        let year = row.year;
+    fn start_rating_lookup(&mut self, lookup: RatingLookup, api_key: String) {
+        let RatingLookup {
+            key,
+            title,
+            year,
+            imdb_id,
+        } = lookup;
         let sender = self.ensure_rating_channel();
 
         self.rating_states.insert(key.clone(), RatingState::Pending);
@@ -833,6 +845,24 @@ struct TmdbMovie {
     release_date: Option<String>,
 }
 
+struct RatingLookup {
+    key: String,
+    title: String,
+    year: Option<i32>,
+    imdb_id: Option<String>,
+}
+
+impl From<&PosterRow> for RatingLookup {
+    fn from(row: &PosterRow) -> Self {
+        Self {
+            key: row.key.clone(),
+            title: row.title.clone(),
+            year: row.year,
+            imdb_id: row.guid.as_deref().and_then(imdb_id_from_guid),
+        }
+    }
+}
+
 fn fetch_rating_from_tmdb(
     api_key: String,
     imdb_id: Option<String>,
@@ -849,7 +879,7 @@ fn fetch_rating_from_tmdb(
         .build()
     {
         Ok(c) => c,
-        Err(err) => return RatingState::Error(format!("client: {err}")),
+        Err(_) => return RatingState::Error("Could not start the TMDb network client.".into()),
     };
 
     if let Some(id) = imdb_id {
@@ -879,7 +909,8 @@ fn tmdb_find_by_imdb(
     year: Option<i32>,
 ) -> Result<Option<RatingState>, RatingState> {
     let url = format!(
-        "https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&language=en-US&external_source=imdb_id"
+        "https://api.themoviedb.org/3/find/{imdb_id}?api_key={}&language=en-US&external_source=imdb_id",
+        encode(api_key)
     );
     let body = tmdb_get(client, &url)?;
     let parsed: TmdbFindResponse = parse_tmdb_body(&body)?;
@@ -893,7 +924,8 @@ fn tmdb_search_by_title(
     year: Option<i32>,
 ) -> Result<Option<RatingState>, RatingState> {
     let mut url = format!(
-        "https://api.themoviedb.org/3/search/movie?api_key={api_key}&language=en-US&include_adult=false&query={}",
+        "https://api.themoviedb.org/3/search/movie?api_key={}&language=en-US&include_adult=false&query={}",
+        encode(api_key),
         encode(title)
     );
     if let Some(y) = year {
@@ -905,29 +937,37 @@ fn tmdb_search_by_title(
 }
 
 fn tmdb_get(client: &reqwest::blocking::Client, url: &str) -> Result<String, RatingState> {
-    let resp = client
-        .get(url)
-        .send()
-        .map_err(|err| RatingState::Error(format!("network: {}", err.without_url())))?;
+    let resp = client.get(url).send().map_err(|err| {
+        let message = if err.is_timeout() {
+            "TMDb timed out. Try again."
+        } else {
+            "Could not reach TMDb. Check your connection and try again."
+        };
+        RatingState::Error(message.into())
+    })?;
+    if matches!(resp.status().as_u16(), 401 | 403) {
+        return Err(RatingState::KeyRejected);
+    }
     if !resp.status().is_success() {
-        return Err(RatingState::Error(format!("HTTP {}", resp.status())));
+        return Err(RatingState::Error(format!(
+            "TMDb returned HTTP {}.",
+            resp.status().as_u16()
+        )));
     }
     resp.text()
-        .map_err(|err| RatingState::Error(format!("read: {}", err.without_url())))
+        .map_err(|_| RatingState::Error("Could not read the TMDb response. Try again.".into()))
 }
 
 fn parse_tmdb_body<T: DeserializeOwned>(body: &str) -> Result<T, RatingState> {
-    let value: serde_json::Value =
-        serde_json::from_str(body).map_err(|err| RatingState::Error(format!("parse: {err}")))?;
-    if let Some(status) = value.get("status_code") {
-        let code = status.as_i64().unwrap_or_default();
-        let message = value
-            .get("status_message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("TMDb request failed");
-        return Err(RatingState::Error(format!("TMDb error {code}: {message}")));
+    // Responses and serde type errors can quote arbitrary input, including request data.
+    let invalid_response = |_| RatingState::Error("TMDb returned an unreadable response.".into());
+    let value: serde_json::Value = serde_json::from_str(body).map_err(invalid_response)?;
+    if value.get("status_code").is_some() {
+        return Err(RatingState::Error(
+            "TMDb could not complete the rating request.".into(),
+        ));
     }
-    serde_json::from_value(value).map_err(|err| RatingState::Error(format!("parse: {err}")))
+    serde_json::from_value(value).map_err(invalid_response)
 }
 
 fn extract_tmdb_rating(movies: Vec<TmdbMovie>, target_year: Option<i32>) -> Option<RatingState> {
@@ -978,6 +1018,11 @@ impl eframe::App for PexApp {
 
 impl PexApp {
     pub(crate) fn update_ui(&mut self, ctx: &eg::Context) {
+        self.update_guide_ui(ctx);
+        self.ui_render_rating_key(ctx);
+    }
+
+    fn update_guide_ui(&mut self, ctx: &eg::Context) {
         // Keep frames moving so Windows never flags "Not Responding"
         ctx.request_repaint();
 
@@ -1144,5 +1189,78 @@ impl PexApp {
         if let Err(err) = self.save_prefs() {
             warn!("Failed to persist UI preferences on exit: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tmdb_http_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    const FIXTURE_KEY: &str = "example&key=abcdef";
+
+    fn error_message(error: RatingState) -> String {
+        match error {
+            RatingState::Error(message) => message,
+            other => panic!("Expected a rating error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_http_errors_without_showing_the_request_url_or_server_text() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = server.local_addr().unwrap();
+        let reply = std::thread::spawn(move || {
+            for status in [401, 403, 500] {
+                let (mut stream, _) = server.accept().unwrap();
+                let mut request = BufReader::new(&stream);
+                let mut line = String::new();
+                request.read_line(&mut line).unwrap();
+                assert!(line.contains("api_key=example%26key%3Dabcdef"));
+                loop {
+                    line.clear();
+                    if request.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(stream, "HTTP/1.1 {status} {FIXTURE_KEY}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{FIXTURE_KEY}", FIXTURE_KEY.len()).unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let url = format!("http://{local}/find/tt123?api_key={}", encode(FIXTURE_KEY));
+        for _ in 0..2 {
+            assert!(matches!(
+                tmdb_get(&client, &url),
+                Err(RatingState::KeyRejected)
+            ));
+        }
+        let message = error_message(tmdb_get(&client, &url).unwrap_err());
+        assert!(message.contains("HTTP 500"));
+        assert!(!message.contains("abcdef") && !message.contains("127.0.0.1"));
+        reply.join().unwrap();
+        let message = error_message(tmdb_get(&client, &url).unwrap_err());
+        assert!(!message.contains("abcdef") && !message.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn response_parsing_never_displays_untrusted_values() {
+        for body in [
+            format!(r#"{{"status_code":7,"status_message":"{FIXTURE_KEY}"}}"#),
+            format!(r#"{{"results":[{{"vote_average":"{FIXTURE_KEY}"}}]}}"#),
+            format!("malformed: {FIXTURE_KEY}"),
+        ] {
+            let error = parse_tmdb_body::<TmdbSearchResponse>(&body).err().unwrap();
+            assert!(!error_message(error).contains("abcdef"));
+        }
+        let result: TmdbFindResponse =
+            parse_tmdb_body(r#"{"movie_results":[{"vote_average":7.2,"vote_count":4}]}"#).unwrap();
+        assert!(
+            matches!(extract_tmdb_rating(result.movie_results, None), Some(RatingState::Success(text)) if text == "TMDb 7.2/10 (4 votes)")
+        );
     }
 }

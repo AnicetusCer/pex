@@ -12,6 +12,12 @@ Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed
 
 Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the executable. Keep this portable folder writable. Use **Connect to Plex** in the guide to change the connection later; saving is available after active scans and downloads finish.
 
+## Optional film ratings
+
+You can browse the guide without a ratings key. To fetch TMDb ratings, choose **Set up ratings…** on **Connect to Plex**. You can also choose **⭐ Rating** in a film’s details. If you have no saved key, PEX opens **TMDb ratings key**. Enter your personal TMDb v3 API key in the masked field and choose **Save key**. When opened from film details, saving resumes that film’s lookup.
+
+Use **Advanced → Ratings key…** at any time to replace or remove the key. If TMDb rejects a key, choose **Change ratings key…** in the film’s details to correct it and retry. **Cancel** discards your edits. PEX saves the key in the active config alongside your connection settings.
+
 ## Refresh the owned library
 
 In **Live library** mode, **Refresh owned scan** checks the database and its SQLite write-ahead log (WAL) twice before starting a transfer. If the files are changing, PEX skips the live copy. If they look stable, PEX copies them once, checks again for changes and validates the copy on your computer. You can keep using Plex and browsing the guide during the refresh.
@@ -32,7 +38,7 @@ Close PEX and extract the new ZIP over your existing portable folder. Your saved
 
 PEX searches for `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
 
-When you save a connection, PEX preserves other keys, including your cache directory and TMDb key. It saves to `pex-config.json` when starting from the bundled or a legacy `config.json`, leaving that legacy file intact. This protects the saved connection when a later ZIP replaces its bundled starter config. Existing preferred/home configs are updated in place, and an explicit `PEX_CONFIG` destination is always honored. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
+Saving a connection or ratings key preserves other settings. PEX saves to `pex-config.json` when starting from the bundled or a legacy `config.json`. Your saved connection and key survive the next portable ZIP upgrade. Existing preferred/home configs are updated in place, and an explicit `PEX_CONFIG` destination is always honored. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
 
 ## Optional configuration
 

@@ -146,13 +146,15 @@ the accompanying WAL/SHM files) exist on disk.
 - Git (to clone the repository)
 
 ### External services
-- **TMDb API key** (optional, but recommended). Add your personal TMDb V3 key if you want to fetch TMDb vote-average ratings from the detail pane.
+- **TMDb ratings** are optional. The guide works without a key. To use online film ratings, enter your personal TMDb v3 API key in PEX.
 
 ---
 
 ## Getting Started
 
 For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip owned and scheduled-recording badges, then **Save and load guide**. Settings are saved automatically; a TMDb key is optional.
+
+Choose **Set up ratings…** on **Connect to Plex**, or click **⭐ Rating** in a film’s details. If you need a key, the **TMDb ratings key** window accepts it in a masked field. **Save key** stores the key in your active config and resumes a lookup started from film details. Use **Advanced → Ratings key…** at any time to replace the key or select **Remove key**. **Cancel** closes the window without saving. The portable ZIP preserves your saved `pex-config.json` on upgrade.
 
 A live owned refresh checks the library and its write-ahead log (WAL) twice before transferring them. If they look stable, PEX copies them once, checks for changes and validates them locally. If Plex is busy, PEX keeps its usable local mirror. When there is no usable mirror, it can use an existing completed dated backup alongside the library. The guide shows the source and date used for owned and recording badges, and offers **Retry owned scan**.
 
@@ -180,7 +182,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | `library_snapshot_dir` | string or `null` | `null` | Use existing completed library backups from this directory for owned/recording badges. The live library path can stay configured. |
 | `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
-| `tmdb_api_key` | string or `null` | `null` | TMDb V3 API key for vote-average ratings. Leave unset to disable the rating button. |
+| `tmdb_api_key` | string or `null` | `null` | Optional personal TMDb v3 API key for on-demand film ratings. Manage it in **Advanced → Ratings key…**. |
 | `log_level` | string | `info` | Sets the default tracing level when `RUST_LOG` is unset. Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
 
 Example configuration:
@@ -222,7 +224,6 @@ Map the server path to a readable client path when PEX runs on another machine. 
 ### Other useful keys
 
 - `cache_dir` – move the poster/owned/UI cache elsewhere; relative paths are resolved from the executable directory (or `PEX_BASE_DIR` when set).
-- `tmdb_api_key` – add your TMDb V3 API key to enable the on-demand rating button.
 - `log_level` – override the default tracing verbosity (`trace` → most verbose).
 
 ### Environment variables
