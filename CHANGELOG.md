@@ -3,6 +3,7 @@
 - The guide keeps repeat airings, remakes and films without artwork. Each card reflects the current filters. Expand **Other showings (N)** for additional times and channels. **REC** identifies the displayed showing and **Other REC** identifies a scheduled alternative.
 - Film listings appear while posters load in the background. Repeated airings share poster downloads.
 - Recording badges distinguish channels airing the same film at the same time. **REC?** identifies a scheduled time with an unconfirmed channel. **Film REC** identifies a recording request without a confirmed showing.
+- PEX now recognises Plex recording subscriptions that store the station ID and display name together. A unique station match at the booked time gets **REC**, including when one subscription lists several channels and airtimes.
 - The guide uses per-airing dimensions and resolution for HD and SD. Airings with unknown quality have their own label. Only confirmed HD qualifies for the HD filter and upgrade badge.
 - Owned badges follow the configured library across restarts. **Owned Details** includes both neighbouring years when they tie for the best match.
 - **Owned Details** explains the match and shows the Plex title, year and server file path. It lists all candidates when a match is ambiguous. The scan total counts each Plex movie once, including movies with multiple files or title variants.

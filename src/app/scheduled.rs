@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
@@ -37,13 +38,30 @@ pub(crate) enum ScheduledMatchKind {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Channel {
+pub struct GuideChannel {
     id: Option<String>,
     number: Option<String>,
     call_sign: Option<String>,
     title: Option<String>,
-    // pv:airingChannels is untyped: it can name a number, identifier, or station.
-    subscription_value: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum BookingChannel {
+    #[default]
+    Unspecified,
+    Unconfirmed,
+    Station(GuideChannel),
+    Token(String),
+    Catalog(Arc<[GuideChannel]>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StationMatch {
+    Different,
+    Unknown,
+    Name,
+    Number,
+    Id,
 }
 
 fn field(value: &Value, key: &str) -> Option<String> {
@@ -54,65 +72,117 @@ fn field(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-impl Channel {
+fn same_number(a: &str, b: &str) -> bool {
+    a == b
+        || (a.bytes().all(|c| c.is_ascii_digit())
+            && b.bytes().all(|c| c.is_ascii_digit())
+            && a.trim_start_matches('0') == b.trim_start_matches('0'))
+}
+
+impl GuideChannel {
+    pub(super) fn read(metadata: &Value) -> Self {
+        Self::from_metadata(metadata, "at")
+    }
+
     fn from_metadata(value: &Value, prefix: &str) -> Self {
         let get = |suffix: &str| field(value, &format!("{prefix}:{suffix}"));
         Self {
             id: get("channelIdentifier")
                 .or_else(|| get("channelID"))
                 .or_else(|| get("channelId")),
-            number: get("channelNumber"),
+            number: get("channelNumber").or_else(|| get("channelVcn")),
             call_sign: get("channelCallSign"),
             title: get("channelTitle"),
-            subscription_value: None,
         }
     }
 
-    fn compare(&self, guide: &Self) -> Option<bool> {
-        let pairs = [
-            (&self.id, &guide.id),
-            (&self.number, &guide.number),
-            (&self.call_sign, &guide.call_sign),
-            (&self.title, &guide.title),
-        ];
-        for (left, right) in pairs {
-            if let (Some(a), Some(b)) = (left, right) {
-                return Some(a == b);
-            }
+    fn compare(&self, guide: &Self, display_name: Option<&str>) -> StationMatch {
+        use StationMatch::*;
+        if let (Some(a), Some(b)) = (&self.id, &guide.id) {
+            return if a == b { Id } else { Different };
         }
-        // Some guides supply only the call sign, even when the DVR calls it a title.
-        if self.title.is_some() && self.title == guide.call_sign
-            || self.call_sign.is_some() && self.call_sign == guide.title
+        if let (Some(a), Some(b)) = (&self.number, &guide.number) {
+            return if same_number(a, b) { Number } else { Different };
+        }
+        // The DVR can store a call sign in its title, even if the guide has both fields.
+        let names = [guide.title.as_deref(), guide.call_sign.as_deref()];
+        if [
+            self.title.as_deref(),
+            self.call_sign.as_deref(),
+            display_name,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|name| names.into_iter().flatten().any(|other| name == other))
         {
-            return Some(true);
+            return Name;
         }
-        if let Some(token) = &self.subscription_value {
-            if [&guide.id, &guide.number, &guide.call_sign, &guide.title]
-                .into_iter()
-                .flatten()
-                .any(|v| v == token)
-            {
-                return Some(true);
+        if self.title.is_some() && guide.title.is_some()
+            || self.call_sign.is_some() && guide.call_sign.is_some()
+        {
+            Different
+        } else {
+            Unknown
+        }
+    }
+
+    fn compare_token(&self, token: &str) -> StationMatch {
+        use StationMatch::*;
+        for (field, strength) in [
+            (&self.id, Id),
+            (&self.number, Number),
+            (&self.call_sign, Name),
+            (&self.title, Name),
+        ] {
+            if field.as_deref() == Some(token) {
+                return strength;
             }
         }
-        None
+        Unknown
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct GuideChannel(Channel);
-
-impl GuideChannel {
-    pub(super) fn read(metadata: &Value) -> Self {
-        Self(Channel::from_metadata(metadata, "at"))
+impl BookingChannel {
+    fn matches(&self, stations: &[&GuideChannel]) -> Vec<StationMatch> {
+        use StationMatch::*;
+        let catalog = match self {
+            Self::Unspecified | Self::Unconfirmed => return vec![Unknown; stations.len()],
+            Self::Token(token) => return stations.iter().map(|s| s.compare_token(token)).collect(),
+            Self::Station(station) => std::slice::from_ref(station),
+            Self::Catalog(catalog) => catalog.as_ref(),
+        };
+        let mut matches = vec![Different; stations.len()];
+        for station in catalog {
+            let display_name = station.title.as_deref().and_then(|title| {
+                if !matches!(self, Self::Catalog(_)) || station.number.is_none() {
+                    return None;
+                }
+                title.split_once(" (")?.1.strip_suffix(')')
+            });
+            let evidence: Vec<_> = stations
+                .iter()
+                .map(|s| station.compare(s, display_name))
+                .collect();
+            let best = evidence.iter().copied().max().unwrap_or(Different);
+            for (result, hit) in matches.iter_mut().zip(evidence) {
+                // For this catalog entry an identified station outranks a shared display name.
+                if best <= Unknown
+                    || hit == best
+                    || best == Name && hit == Unknown && catalog.len() > 1
+                {
+                    *result = (*result).max(hit);
+                }
+            }
+        }
+        matches
     }
 }
 
 #[derive(Default)]
-struct Slots(HashMap<(String, i64), Vec<Channel>>);
+struct Slots(HashMap<(String, i64), Vec<BookingChannel>>);
 
 impl Slots {
-    fn add(&mut self, identity: &str, time: i64, channel: &Channel) {
+    fn add(&mut self, identity: &str, time: i64, channel: &BookingChannel) {
         let channels = self.0.entry((identity.to_owned(), time)).or_default();
         if !channels.contains(channel) {
             channels.push(channel.clone());
@@ -124,7 +194,7 @@ impl Slots {
         guid: Option<&str>,
         title: Option<&str>,
         time: i64,
-    ) -> Option<(ScheduledMatchKind, &'a [Channel])> {
+    ) -> Option<(ScheduledMatchKind, &'a [BookingChannel])> {
         if let Some(channels) = guid.and_then(|id| self.0.get(&(id.to_string(), time))) {
             return Some((ScheduledMatchKind::Guid, channels));
         }
@@ -196,21 +266,43 @@ impl ScheduledIndex {
             let selected = bookings
                 .iter()
                 .flatten()
-                .find(|(_, channels)| channels.iter().any(|c| c != &Channel::default()))
+                .find(|(_, channels)| {
+                    channels.iter().any(|c| {
+                        matches!(
+                            c,
+                            BookingChannel::Station(_)
+                                | BookingChannel::Token(_)
+                                | BookingChannel::Catalog(_)
+                        )
+                    })
+                })
                 .or_else(|| bookings.iter().flatten().next());
             if let Some((kind, channels)) = selected {
                 let mut flags = vec![RecordingStatus::None; stations.len()];
                 for record in *channels {
-                    let matches: Vec<_> = stations.iter().map(|s| record.compare(&s.0)).collect();
-                    let positives = matches.iter().filter(|m| **m == Some(true)).count();
+                    let matches = record.matches(stations);
+                    let positives = matches
+                        .iter()
+                        .filter(|m| **m > StationMatch::Unknown)
+                        .count();
+                    let unresolved_alternative = matches!(record, BookingChannel::Catalog(_))
+                        && matches.contains(&StationMatch::Unknown);
                     for (flag, hit) in flags.iter_mut().zip(matches) {
                         let status = match (positives, hit) {
-                            (1, Some(true)) => RecordingStatus::Exact,
-                            (_, Some(true)) => RecordingStatus::Slot,
-                            (0, None) if stations.len() == 1 && *record == Channel::default() => {
+                            (1, hit) if hit > StationMatch::Unknown && !unresolved_alternative => {
                                 RecordingStatus::Exact
                             }
-                            (0, None) => RecordingStatus::Slot,
+                            (_, hit) if hit > StationMatch::Unknown => RecordingStatus::Slot,
+                            (0, StationMatch::Unknown)
+                                if stations.len() == 1
+                                    && *record == BookingChannel::Unspecified =>
+                            {
+                                RecordingStatus::Exact
+                            }
+                            (0, StationMatch::Unknown) => RecordingStatus::Slot,
+                            (_, StationMatch::Unknown) if unresolved_alternative => {
+                                RecordingStatus::Slot
+                            }
                             _ => RecordingStatus::None,
                         };
                         *flag = (*flag).max(status);
@@ -294,12 +386,17 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
         if time < now.saturating_sub(86_400) {
             continue;
         }
-        let mut channel = Channel::from_metadata(&data, "me");
-        let at = Channel::from_metadata(&data, "at");
+        let mut channel = GuideChannel::from_metadata(&data, "me");
+        let at = GuideChannel::read(&data);
         channel.id = channel.id.or(at.id);
         channel.number = channel.number.or(at.number);
         channel.call_sign = channel.call_sign.or(at.call_sign);
         channel.title = channel.title.or(at.title);
+        let channel = if channel == GuideChannel::default() {
+            BookingChannel::Unspecified
+        } else {
+            BookingChannel::Station(channel)
+        };
         let guid = data
             .get("mt:guid")
             .and_then(Value::as_str)
@@ -359,6 +456,74 @@ fn subscription_list(value: Option<&Value>) -> Vec<String> {
     }
 }
 
+fn catalog_station(entry: &str) -> Option<GuideChannel> {
+    let (id, label) = entry.split_once('=')?;
+    let id = decode(id).ok()?.trim().to_ascii_lowercase();
+    let title = decode(label).ok()?.trim().to_ascii_lowercase();
+    if id.is_empty() || title.is_empty() {
+        return None;
+    }
+    // Plex's display label can include a VCN and call sign, e.g. "106 MOV4HD (Movie Four HD)".
+    // Keep the complete label too: some guides store it verbatim as the station title.
+    let numbered = title.split_once(char::is_whitespace).filter(|(number, _)| {
+        number.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && number
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    });
+    let number = numbered.map(|(n, _)| n.to_owned());
+    let call_sign = numbered.and_then(|(_, tail)| {
+        let name = tail.split_once(" (").map_or(tail, |(name, _)| name).trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    });
+    Some(GuideChannel {
+        id: Some(id),
+        title: Some(title),
+        number,
+        call_sign,
+    })
+}
+
+fn subscription_channels(value: Option<&Value>, count: usize) -> Vec<BookingChannel> {
+    let Some(value) = value else {
+        return vec![BookingChannel::Unspecified; count];
+    };
+    if let Some(raw) = value.as_str() {
+        // The stored value encodes the whole map. Split its entries BEFORE decoding the
+        // component strings, otherwise an encoded ampersand in a label becomes a separator.
+        let entries = if raw.contains('=') {
+            raw.into()
+        } else {
+            decode(raw).unwrap_or(raw.into())
+        };
+        if entries.contains('=') {
+            let channel = entries
+                .split('&')
+                .map(catalog_station)
+                .collect::<Option<Vec<_>>>()
+                .map_or(BookingChannel::Unconfirmed, |stations| {
+                    BookingChannel::Catalog(stations.into())
+                });
+            return vec![channel; count];
+        }
+    }
+    // Legacy subscriptions use a positional list of bare station tokens.
+    let tokens = subscription_list(Some(value));
+    if tokens.len() != count {
+        return vec![BookingChannel::Unconfirmed; count];
+    }
+    tokens
+        .into_iter()
+        .map(|token| {
+            if token.is_empty() {
+                BookingChannel::Unconfirmed
+            } else {
+                BookingChannel::Token(token)
+            }
+        })
+        .collect()
+}
+
 fn load_from_media_subscriptions(
     conn: &Connection,
     index: &mut ScheduledIndex,
@@ -393,26 +558,16 @@ fn load_from_media_subscriptions(
         };
 
         let times = subscription_list(parsed.get("pv:airingTimes"));
-        let channels = subscription_list(parsed.get("pv:airingChannels"));
+        let channels = subscription_channels(parsed.get("pv:airingChannels"), times.len());
         let slots: Vec<_> = times
             .iter()
-            .enumerate()
-            .filter_map(|(i, raw)| {
+            .zip(channels)
+            .filter_map(|(raw, channel)| {
                 let time: i64 = raw.parse().ok()?;
                 if time < now.saturating_sub(86_400) {
                     return None;
                 }
-                let token = (times.len() == channels.len())
-                    .then(|| &channels[i])
-                    .filter(|s| !s.is_empty())
-                    .cloned();
-                Some((
-                    time,
-                    Channel {
-                        subscription_value: token,
-                        ..Default::default()
-                    },
-                ))
+                Some((time, channel))
             })
             .collect();
 
@@ -577,5 +732,90 @@ mod tests {
                 .0,
             [RecordingStatus::Film]
         );
+    }
+
+    #[test]
+    fn plex_station_catalogs_select_guide_stations_at_each_airtime() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"
+            CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+            CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+            CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);
+            INSERT INTO media_subscriptions VALUES
+              (1,'{"hi:guid":"plex://single","pv:airingTimes":"10","pv:airingChannels":"station-hd%3D106%2520MOV4HD%2520%2528Movie%2520Four%2520HD%2529"}'),
+              (2,'{"hi:guid":"plex://catalog","pr:oneShot":1,"pv:airingTimes":"30%2C20","pv:airingChannels":"sta-a%3D104%2520AX%26sta-b%3D049%2520BY"}'),
+              (3,'{"hi:guid":"plex://special","pv:airingTimes":"40","pv:airingChannels":"lineup%252Fstation%253Da%3DFilms%252C%2520Arts%2520%2526%2520Music"}'),
+              (4,'{"hi:guid":"plex://malformed","pv:airingTimes":"50","pv:airingChannels":"sta-a%3D104%2520AX%26"}'),
+              (5,'{"hi:guid":"plex://empty","pv:airingTimes":"50","pv:airingChannels":""}'),
+              (6,'{"hi:guid":"plex://mismatched","pv:airingTimes":"50","pv:airingChannels":"100,200"}'),
+              (7,'{"hi:guid":"plex://regional","pv:airingTimes":"70","pv:airingChannels":"sta-a%3D101%2520MOV%26sta-b%3D102%2520MOV"}');
+            INSERT INTO media_grabs VALUES
+              (0,'{"mt:guid":"plex://grab","me:beginsAt":60,"me:channelTitle":"MOV4HD"}');
+        "#).unwrap();
+        let index = read_scheduled_index(&db, 1).unwrap();
+        let flags = |guid: &str, time: i64, guide: &[&GuideChannel]| {
+            index.match_slot(Some(guid), None, Some(time), guide).0
+        };
+        let channel = |id, title, call_sign, vcn| {
+            GuideChannel::read(&serde_json::json!({
+                "at:channelIdentifier":id, "at:channelTitle":title, "at:channelCallSign":call_sign,
+                "at:channelVcn":vcn,
+            }))
+        };
+        use RecordingStatus::{Exact, None as Absent, Slot};
+        let hd = channel("station-hd", "Movie Four HD", "MOV4HD", "106");
+        let shared_title = channel("", "106 MOV4HD (Movie Four HD)", "", "");
+        let other = channel("other", "106 MOV4HD (Movie Four HD)", "MOV4HD", "106");
+        assert_eq!(
+            flags("plex://single", 10, &[&shared_title, &hd, &other]),
+            [Absent, Exact, Absent]
+        );
+        assert_eq!(
+            flags("plex://single", 10, &[&shared_title, &other]),
+            [Exact, Absent]
+        );
+        let by_vcn = channel("", "", "", "106");
+        let wrong_vcn = channel("", "106 MOV4HD (Movie Four HD)", "", "206");
+        assert_eq!(
+            flags("plex://single", 10, &[&by_vcn, &wrong_vcn]),
+            [Exact, Absent]
+        );
+        let call_sign = channel("", "Movie Four HD", "MOV4HD", "");
+        assert_eq!(flags("plex://single", 10, &[&call_sign]), [Exact]);
+        assert_eq!(flags("plex://grab", 60, &[&call_sign]), [Exact]);
+        let title_only = channel("", "Movie Four HD", "", "");
+        assert_eq!(flags("plex://single", 10, &[&title_only]), [Exact]);
+
+        let a = channel("sta-a", "", "", "");
+        let b = channel("sta-b", "", "", "");
+        let by_name_only = channel("", "049 BY", "", "");
+        let numbered = GuideChannel::read(&serde_json::json!({"at:channelVcn":49}));
+        assert_eq!(flags("plex://catalog", 30, &[&numbered]), [Exact]);
+        assert_eq!(flags("plex://catalog", 30, &[&b, &other]), [Exact, Absent]);
+        assert_eq!(flags("plex://catalog", 20, &[&other, &a]), [Absent, Exact]);
+        assert_eq!(
+            flags("plex://catalog", 30, &[&b, &a, &other]),
+            [Slot, Slot, Absent]
+        );
+        assert_eq!(
+            flags("plex://catalog", 30, &[&by_name_only, &a]),
+            [Slot, Slot]
+        );
+        assert_eq!(flags("plex://catalog", 20, &[&other]), [Absent]);
+        assert_eq!(flags("plex://catalog", 25, &[&a]), [Absent]);
+        let unknown = GuideChannel::default();
+        let shared_call_sign = channel("", "", "MOV", "");
+        assert_eq!(
+            flags("plex://regional", 70, &[&shared_call_sign, &unknown]),
+            [Slot, Slot]
+        );
+
+        let special_id = channel("lineup/station=a", "", "", "");
+        let special_label = channel("", "Films, Arts & Music", "", "");
+        assert_eq!(flags("plex://special", 40, &[&special_id]), [Exact]);
+        assert_eq!(flags("plex://special", 40, &[&special_label]), [Exact]);
+        for guid in ["plex://malformed", "plex://empty", "plex://mismatched"] {
+            assert_eq!(flags(guid, 50, &[&a]), [Slot]);
+        }
     }
 }

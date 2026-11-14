@@ -67,6 +67,7 @@ focus_tables:
       - `extra_data` (JSON payload with `hi:*` metadata, `pv:airingChannels`, `pv:airingTimes`)
     usage:
       - One-shot movie timers and long-running subscriptions live here before they produce `media_grabs` rows. Decode the comma-separated `pv:airingTimes` to line up with EPG entries.
+      - "`pv:airingChannels` can be a URL-encoded list of station ID=label pairs separated by ampersands. Decode the outer string before splitting pairs, then decode the individual labels. Compare the listed IDs with guide stations at each booked time. The pair order does not identify which time belongs to which station."
   metadata_subscription_desired_items:
     columns:
       - `remote_id` (percent-encoded Plex GUID, e.g., `plex%3A%2F%2Fmovie%2F...`)

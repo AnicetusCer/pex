@@ -18,7 +18,7 @@ The guide opens when listings are ready. Posters load in the background, and fil
 
 Select a film and expand **Other showings (N)** for the channel, UTC time and picture quality of each additional airing. PEX checks the airing’s dimensions or resolution and can also recognise HD and SD in station names. **Airing quality unknown** means the guide lacks enough information. **HD only** shows confirmed HD airings.
 
-**REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. If Plex supplies a recording time but leaves the channel unclear, **REC?** marks the time slot. **Film REC** means Plex has a recording request for the film without a confirmed showing.
+**REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 
 For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. A matching Plex identifier takes priority, followed by a matching title and year. If the only title matches are a year earlier and a year later, PEX lists both. **Copy file path** copies the path as Plex sees it on the server.
 

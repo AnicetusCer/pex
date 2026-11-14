@@ -5,14 +5,18 @@ use std::{env, fs, process::Command};
 
 #[test]
 fn browse_repeats_and_owned_details() {
+    run_portable_test("app::guide_ui_tests::portable_guide_details");
+}
+
+#[test]
+fn distinguish_booked_and_unresolved_simulcasts() {
+    run_portable_test("app::guide_ui_tests::portable_simulcasts");
+}
+
+fn run_portable_test(test: &str) {
     let dir = tempfile::tempdir().unwrap();
     let result = Command::new(env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "app::guide_ui_tests::portable_guide_details",
-            "--ignored",
-            "--nocapture",
-        ])
+        .args(["--exact", test, "--ignored", "--nocapture"])
         .current_dir(dir.path())
         .env("PEX_GUIDE_DETAILS_FIXTURE", dir.path())
         .env("PEX_BASE_DIR", dir.path())
@@ -28,6 +32,127 @@ fn browse_repeats_and_owned_details() {
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
+}
+
+#[test]
+#[ignore = "parent creates an isolated portable install"]
+fn portable_simulcasts() {
+    use super::scheduled::RecordingStatus;
+    use super::types::AiringQuality;
+
+    let portable = std::path::PathBuf::from(env::var_os("PEX_GUIDE_DETAILS_FIXTURE").unwrap());
+    assert_eq!(config::base_dir(), portable);
+    let source = portable.join("source");
+    fs::create_dir(&source).unwrap();
+    let guide = source.join("guide.db");
+    let library = source.join("library.db");
+    database(&guide);
+    database(&library);
+
+    let start = chrono::Utc::now().timestamp() + 1800;
+    let repeat = start + 7200;
+    let unresolved = start + 3600;
+    {
+        let db = Connection::open(&guide).unwrap();
+        db.execute_batch(
+            "UPDATE metadata_items SET user_thumb_url=NULL;
+             DELETE FROM media_items;
+             INSERT INTO metadata_items(id,title,year,metadata_type,guid)
+             VALUES(2,'Unresolved Fixture',2025,1,'imdb://tt2345678');",
+        )
+        .unwrap();
+        for (movie, time) in [(1, start), (1, repeat), (2, unresolved)] {
+            for (station, number, call_sign, label, width, height) in [
+                (
+                    "lineup-station-sd",
+                    "6",
+                    "MOV4",
+                    "6 MOV4 (Movie Four)",
+                    720,
+                    576,
+                ),
+                (
+                    "lineup-station-hd",
+                    "106",
+                    "MOV4HD",
+                    "106 MOV4HD (Movie Four HD)",
+                    1920,
+                    1080,
+                ),
+            ] {
+                let channel = serde_json::json!({
+                    "at:channelIdentifier": station, "at:channelVcn": number,
+                    "at:channelCallSign": call_sign, "at:channelTitle": label,
+                });
+                db.execute(
+                    "INSERT INTO media_items(metadata_item_id,begins_at,width,height,extra_data)
+                     VALUES(?1,?2,?3,?4,?5)",
+                    params![movie, time, width, height, channel.to_string()],
+                )
+                .unwrap();
+            }
+        }
+        let db = Connection::open(&library).unwrap();
+        db.execute_batch(
+            "CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+             CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+             CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);",
+        )
+        .unwrap();
+        // A single station serves both times. Plex encodes the label inside
+        // the ID=label pair, then encodes the entire pair in the subscription.
+        let known = serde_json::json!({
+            "hi:guid": "imdb://tt1234567", "pr:oneShot": 1,
+            "pv:airingTimes": format!("{start}%2C{repeat}"),
+            "pv:airingChannels": "lineup-station-hd%3D106%2520MOV4HD%2520%2528Movie%2520Four%2520HD%2529",
+        });
+        let time_only = serde_json::json!({
+            "hi:guid": "imdb://tt2345678", "pr:oneShot": 1,
+            "pv:airingTimes": unresolved.to_string(),
+        });
+        db.execute(
+            "INSERT INTO media_subscriptions VALUES(1,?1),(2,?2)",
+            params![known.to_string(), time_only.to_string()],
+        )
+        .unwrap();
+    }
+    config::save_connection(&guide, Some(&library), false).unwrap();
+    let mut ui = TestUi {
+        screen: Some(eframe::egui::vec2(1360.0, 1400.0)),
+        ..Default::default()
+    };
+    ui.frames_until("simulcast bookings", |app| {
+        app.rows.len() == 6
+            && app
+                .rows
+                .iter()
+                .any(|r| r.scheduled != RecordingStatus::None)
+    });
+    for row in &ui.app.rows {
+        let expected = match (row.title.as_str(), row.airing_quality) {
+            ("Fixture Movie", AiringQuality::Hd) => RecordingStatus::Exact,
+            ("Fixture Movie", AiringQuality::Sd) => RecordingStatus::None,
+            ("Unresolved Fixture", AiringQuality::Hd | AiringQuality::Sd) => RecordingStatus::Slot,
+            _ => panic!("Unexpected simulcast fixture row"),
+        };
+        assert_eq!(
+            row.scheduled, expected,
+            "{} {:?}",
+            row.title, row.channel_raw
+        );
+    }
+    ui.press("REC?");
+    ui.label("Recording scheduled; channel unconfirmed");
+    ui.press("Other REC");
+    ui.press("Other showings (3)");
+    ui.label("Scheduled to record");
+    ui.label("Airing SD");
+    ui.label("Airing HD");
+    ui.press("Filters");
+    ui.press("HD only");
+    ui.label("REC");
+    // Hiding the SD sibling cannot confirm the station Plex left unspecified.
+    ui.label("REC?");
 }
 
 #[test]
