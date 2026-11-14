@@ -121,11 +121,16 @@ try {
     else {
         Write-Host "Release $tag does not exist yet." -ForegroundColor Yellow
         if (Ask-YesNo "Create GitHub release $tag now?" "Y") {
-            $notesFile = "CHANGELOG.md"
             Assert-PublishedTag $tag
-            $notesArgs = if (Test-Path -LiteralPath $notesFile) { @('--notes-file', $notesFile) } else { @('--notes', "Release $tag") }
-            gh release create $tag $zipPath $checksumsPath --verify-tag @notesArgs
-            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            $notes = Get-ReleaseNotes $tag
+            $notesFile = New-TemporaryFile
+            try {
+                Set-Content -LiteralPath $notesFile.FullName -Value $notes -Encoding utf8NoBOM
+                gh release create $tag $zipPath $checksumsPath --verify-tag --notes-file $notesFile.FullName
+                if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+            } finally {
+                Remove-Item -LiteralPath $notesFile.FullName
+            }
             Write-Host "Release $tag created." -ForegroundColor Green
         }
         else {

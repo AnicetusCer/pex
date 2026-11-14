@@ -333,6 +333,14 @@ fn portable_simulcasts() {
                 .unwrap();
             }
         }
+        // This film also airs earlier on SD, outside its booked simulcast slot.
+        db.execute(
+            "INSERT INTO media_items(metadata_item_id,begins_at,width,height,extra_data,media_analysis_version)
+             SELECT metadata_item_id,?1,width,height,extra_data,media_analysis_version
+             FROM media_items WHERE metadata_item_id=2 AND width=720",
+            [start],
+        )
+        .unwrap();
         let db = Connection::open(&library).unwrap();
         db.execute_batch(
             "CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
@@ -363,16 +371,18 @@ fn portable_simulcasts() {
         ..Default::default()
     };
     ui.frames_until("simulcast bookings", |app| {
-        app.rows.len() == 6
+        app.rows.len() == 7
             && app
                 .rows
                 .iter()
                 .any(|r| r.scheduled != RecordingStatus::None)
     });
+    let first_airing = std::time::UNIX_EPOCH + std::time::Duration::from_secs(start as u64);
     for row in &ui.app.rows {
         let expected = match (row.title.as_str(), row.airing_quality) {
             ("Fixture Movie", AiringQuality::Hd) => RecordingStatus::Exact,
             ("Fixture Movie", AiringQuality::Sd) => RecordingStatus::None,
+            ("Unresolved Fixture", _) if row.airing == Some(first_airing) => RecordingStatus::None,
             ("Unresolved Fixture", AiringQuality::Hd | AiringQuality::Sd) => RecordingStatus::Slot,
             _ => panic!("Unexpected simulcast fixture row"),
         };
@@ -382,13 +392,17 @@ fn portable_simulcasts() {
             row.title, row.channel_raw
         );
     }
-    ui.press("REC?");
+    ui.app.search_query = "Unresolved Fixture".into();
+    ui.press("Other REC");
+    ui.press("Other showings (2)");
     ui.label("Recording scheduled; channel unconfirmed");
+    ui.app.search_query = "Fixture Movie".into();
     ui.press("Other REC");
     ui.press("Other showings (3)");
     ui.label("Scheduled to record");
     ui.label("Airing SD");
     ui.label("Airing HD");
+    ui.app.search_query.clear();
     ui.press("Filters");
     ui.press("HD only");
     ui.label("REC");

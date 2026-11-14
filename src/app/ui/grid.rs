@@ -153,7 +153,8 @@ impl crate::app::PexApp {
                                             let badge = match row.scheduled.max(other) {
                                                 RecordingStatus::Exact if row.scheduled == RecordingStatus::Exact => Some(("REC", "Scheduled to record this showing")),
                                                 RecordingStatus::Exact => Some(("Other REC", "A different showing of this film is scheduled to record")),
-                                                RecordingStatus::Slot => Some(("REC?", "Recording scheduled; channel unconfirmed")),
+                                                RecordingStatus::Slot if row.scheduled == RecordingStatus::Slot => Some(("REC?", "Recording scheduled; channel unconfirmed")),
+                                                RecordingStatus::Slot => Some(("Other REC", "Another showing is booked, but its channel is unconfirmed")),
                                                 RecordingStatus::Film => Some(("Film REC", "Recording requested for this film")),
                                                 RecordingStatus::None => None,
                                             };

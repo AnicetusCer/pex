@@ -1,10 +1,12 @@
-# Unreleased
+# Pex 1.2.6
 
-- The portable app bundles SQLite 3.54.1 with a fix for reading a database alongside its write-ahead log. Artwork requests use JPEG, PNG and WebP. The portable build checks the locked Rust dependencies before packaging.
+- PEX records the selected source inside each new local database copy. When switching lineups or libraries, a busy source or interrupted refresh can no longer attach the previous source’s guide or badges to the new selection.
+
+- The portable app bundles SQLite 3.54.1 with a fix for reading a database alongside its write-ahead log. Artwork requests use JPEG, PNG and WebP. The CI workflow checks the locked Rust dependencies before packaging.
 - The guide keeps repeat airings, remakes and films without artwork. Each card reflects the current filters. Expand **Other showings (N)** for additional times and channels. **REC** identifies the displayed showing and **Other REC** identifies a scheduled alternative.
 - Film listings appear while posters load in the background. Showings with the same artwork share a poster download and display texture. Selecting a film loads its poster in Details even when its card is offscreen.
 - The guide looks up cached posters on its background worker and reuses the layout of offscreen cards. Owned scans avoid repeated title normalization and stream the saved title cache directly from the index.
-- Recording badges distinguish channels airing the same film at the same time. **REC?** identifies a scheduled time with an unconfirmed channel. **Film REC** identifies a recording request without a confirmed showing.
+- Recording badges use the guide and local library snapshot. **REC?** identifies a booked time with an unconfirmed channel. **Film REC** identifies a recording request for the film when the databases cannot confirm a specific showing. If you used the direct-connection preview, PEX removes the saved Plex server address and token from the active, writable config on launch.
 - PEX now recognises Plex recording subscriptions that store the station ID and display name together. A unique station match at the booked time gets **REC**, including when one subscription lists several channels and airtimes.
 - Recording badges recognise zero-padded channel numbers, and an unreadable recording entry no longer hides other bookings.
 - Programmes inherit the channel’s quality when the guide has no reliable resolution. A named station defaults to SD and an HD station shows HD. PEX ignores nominal pixel dimensions on unanalysed guide entries, including the Freeview Sky Mix fixture.

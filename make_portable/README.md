@@ -20,7 +20,7 @@ Select a film and expand **Other showings (N)** for the channel and UTC time of 
 
 **HD ↑** means an HD airing could replace an SD copy you own. PEX checks the file’s resolution first. If that is missing, it uses the source channel saved with that recording. If any matching copy is HD or has too little information to classify, the upgrade badge stays off.
 
-**REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
+**REC** marks a scheduled showing. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the displayed time is booked and the channel is still unclear. **Other REC** points to a booking on another showing in the filtered guide. Expand **Other showings** to see its time and channel status. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 
 Plex can keep the original airtime in its database after moving a one-off recording. If the guide and library still identify the same film and request, PEX shows **Film REC**. Open **Live TV & DVR → DVR Schedule** in Plex to see which repeat it currently plans to record.
 
@@ -51,6 +51,8 @@ If you already have completed Plex backups, you can use them directly. In **Conn
 ## Existing portable installations
 
 Close PEX and extract the new ZIP over your existing portable folder. Your saved `pex-config.json`, local databases and caches stay in place. If you are upgrading an older install with settings only in `config.json`, copy that file to `pex-config.json` before extracting. The ZIP replaces the starter `config.json`.
+
+On the first launch after upgrading, connect to your Plex share so PEX can identify the sources of older guide and live-library copies. If the library is busy, PEX can use a completed dated backup. Otherwise, choose **Retry owned scan** when Plex is idle. After a successful copy, PEX can reuse it when the same source is offline.
 
 If you tried the preview that connected directly to Plex, PEX removes its saved server address and token from the active, writable config on launch. Recording badges use your guide and library databases. Choose **Advanced → Refresh owned scan** to update them.
 

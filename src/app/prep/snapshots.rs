@@ -1,6 +1,6 @@
 use super::{
-    copy_validated_snapshot, last_sync_marker_path, provenance_path, source_state, usable_library,
-    FileState,
+    copy_with_origin, last_sync_marker_path, provenance_path, read_mirror_origin, source_state,
+    usable_library, FileState, MirrorOrigin,
 };
 use chrono::{NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,15 @@ impl Receipt {
     }
 
     fn matches_local(&self, dst: &Path) -> bool {
-        source_state(dst).ok().as_ref() == Some(&self.mirror_state)
+        if source_state(dst).ok().as_ref() != Some(&self.mirror_state) {
+            return false;
+        }
+        match read_mirror_origin(dst) {
+            Ok(Some(MirrorOrigin::LibrarySnapshot(source))) => source == self.source,
+            // Earlier completed-snapshot receipts already fingerprinted the mirror.
+            Ok(None) => true,
+            _ => false,
+        }
     }
 
     fn save(&self, dst: &Path) -> io::Result<()> {
@@ -142,7 +150,12 @@ pub(super) fn refresh(
             report(format!("Copying {}...", path.display()));
             // A completed snapshot must never satisfy the live source's daily freshness check.
             clear_live_marker(dst)?;
-            let copied = copy_validated_snapshot(path, dst, true, true)?;
+            let copied = copy_with_origin(
+                path,
+                dst,
+                true,
+                &MirrorOrigin::LibrarySnapshot(path.clone()),
+            )?;
             let saved = source_state(dst).and_then(|mirror_state| {
                 Receipt {
                     source: path.clone(),
@@ -334,5 +347,31 @@ mod tests {
         let result = refresh(root.path(), &dst, |_| {}).unwrap();
         assert!(result.contains("could not save") && result.contains(EXPORT));
         assert_eq!(title(&dst), "Newest");
+        assert!(recover_library(&root.path().join("offline.db"), &dst, false, |_| {}).is_err());
+    }
+
+    #[test]
+    fn interrupted_switch_does_not_use_new_snapshot_as_the_previous_live_server() {
+        let root = tempfile::tempdir().unwrap();
+        let live = fixture(root.path(), "server-a.db", "A");
+        let folder = root.path().join("server-b");
+        fs::create_dir(&folder).unwrap();
+        let backup = fixture(&folder, BACKUP, "B");
+        let dst = root.path().join("local.db");
+        let old = recover_library(&live, &dst, true, |_| {}).unwrap();
+        // Simulate an old build's sidecars surviving a crash immediately after
+        // installing B, before B's external receipt or the age marker was updated.
+        fs::write(provenance_path(&dst), serde_json::to_vec(&old).unwrap()).unwrap();
+        copy_with_origin(
+            &backup,
+            &dst,
+            true,
+            &MirrorOrigin::LibrarySnapshot(backup.clone()),
+        )
+        .unwrap();
+        fs::write(super::super::sqlite_sidecar_path(&live, "journal"), b"busy").unwrap();
+        assert!(recover_library(&live, &dst, false, |_| {}).is_err());
+        assert_eq!(title(&dst), "B");
+        assert!(super::super::manual_library_snapshot(&dst).is_err());
     }
 }

@@ -30,8 +30,8 @@ Because the app is written in Rust, it runs on Windows, Linux, and macOS, and it
 
 - Releases live on the [GitHub Releases page](https://github.com/AnicetusCer/pex/releases); each tagged version includes portable bundles.
 - Use the scripts in `make_portable/` to produce fresh zips before a release; the outputs land in `make_portable/dist/` ready for upload.
-- On Windows run `pwsh ./release_windows.ps1 -Version 1.2.5` to build, tag, push, package, and publish/update the GitHub release with the Windows bundle.
-- On Linux (including WSL) run `pwsh ./release_linux.ps1 -Version 1.2.5` to do the same for the Linux bundle. Each script can safely rerun and will add or replace only its platform’s asset.
+- From the release commit on `main`, run `pwsh ./release_windows.ps1 -Version 1.2.6` on Windows to build, package, tag and publish the Windows bundle.
+- On Linux (including WSL), run `pwsh ./release_linux.ps1 -Version 1.2.6` from the same release commit to publish the Linux bundle. Each script can safely rerun and will add or replace only its platform’s assets.
 - Release helpers also upload `checksums-<platform>-<tag>.txt` so each zip can be verified after download.
 - Generated binaries are not checked into git; attach them to the corresponding GitHub release instead.
 
@@ -48,8 +48,8 @@ Verify the zip against the published checksum file before running.
 ### Windows (PowerShell)
 
 ```powershell
-$zip = "pex-portable-windows-x86_64-v1.2.5.zip"
-$checksums = "checksums-windows-x86_64-v1.2.5.txt"
+$zip = "pex-portable-windows-x86_64-v1.2.6.zip"
+$checksums = "checksums-windows-x86_64-v1.2.6.txt"
 
 $line = Get-Content $checksums | Where-Object { $_ -like "*`*$zip" } | Select-Object -First 1
 if (-not $line) { throw "No checksum entry found for $zip" }
@@ -62,7 +62,7 @@ if ($expected -eq $actual) { "OK: checksum matches." } else { "ERROR: checksum m
 ### Linux
 
 ```bash
-sha256sum -c checksums-linux-x86_64-v1.2.5.txt
+sha256sum -c checksums-linux-x86_64-v1.2.6.txt
 ```
 
 Expected output: `...zip: OK`
@@ -92,7 +92,7 @@ Highlights:
 - 🗂️ **Powerful filtering** – search, day-range slicing, HD-only toggle, channel
 and genre selectors, plus multiple sort orders.
 - **Owned library awareness** – expand **Owned Details** on an owned film to see the matching Plex title, year, file path and reason for the match. If several Plex movies match, PEX gives the count and lists them.
-- 🎯 **DVR awareness** – **REC** marks the scheduled showing and **Other REC** points to a scheduled alternative in the filtered guide. **REC?** marks a time slot whose channel Plex leaves unclear. **Film REC** means there is a recording request for the film without a confirmed showing.
+- 🎯 **DVR awareness** – **REC** marks the scheduled showing. **REC?** marks a booked time slot whose channel Plex leaves unclear. **Other REC** points to a booking on another showing in the filtered guide. Expand **Other showings** to see its time and channel status. **Film REC** means there is a recording request for the film without a confirmed showing.
 - 🎨 **Detail-rich panels** – long-title scroller with copy button, channel
 badges, optional TMDb ratings, and formatted descriptions.
 - 🧰 **Operator controls** – quick refresh/clear actions for poster and owned caches as well as worker tuning knobs.
@@ -141,7 +141,7 @@ the accompanying WAL/SHM files) exist on disk.
 - Pex expects a working copy in `db/plex_epg.db`. You can supply it manually or point `plex_epg_db_source` at the live Plex database so Pex pulls in a fresh copy once per day.
 
 ### Toolchain
-- Rust toolchain with Cargo (the 1.2.5 builds use Rust 1.94)
+- Rust toolchain with Cargo (CI uses Rust 1.94.0)
 - Git (to clone the repository)
 
 ### External services

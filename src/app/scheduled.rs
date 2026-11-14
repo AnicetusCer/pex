@@ -39,7 +39,8 @@ pub(crate) enum ScheduledMatchKind {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GuideChannel {
-    id: Option<String>,
+    identifier: Option<String>,
+    channel_id: Option<String>,
     number: Option<String>,
     call_sign: Option<String>,
     title: Option<String>,
@@ -87,9 +88,8 @@ impl GuideChannel {
     fn from_metadata(value: &Value, prefix: &str) -> Self {
         let get = |suffix: &str| field(value, &format!("{prefix}:{suffix}"));
         Self {
-            id: get("channelIdentifier")
-                .or_else(|| get("channelID"))
-                .or_else(|| get("channelId")),
+            identifier: get("channelIdentifier"),
+            channel_id: get("channelID").or_else(|| get("channelId")),
             number: get("channelNumber").or_else(|| get("channelVcn")),
             call_sign: get("channelCallSign"),
             title: get("channelTitle"),
@@ -98,7 +98,10 @@ impl GuideChannel {
 
     fn compare(&self, guide: &Self, display_name: Option<&str>) -> StationMatch {
         use StationMatch::*;
-        if let (Some(a), Some(b)) = (&self.id, &guide.id) {
+        if let (Some(a), Some(b)) = (&self.identifier, &guide.identifier) {
+            return if a == b { Id } else { Different };
+        }
+        if let (Some(a), Some(b)) = (&self.channel_id, &guide.channel_id) {
             return if a == b { Id } else { Different };
         }
         if let (Some(a), Some(b)) = (&self.number, &guide.number) {
@@ -128,7 +131,7 @@ impl GuideChannel {
 
     fn compare_token(&self, token: &str) -> StationMatch {
         use StationMatch::*;
-        if self.id.as_deref() == Some(token) {
+        if self.identifier.as_deref() == Some(token) || self.channel_id.as_deref() == Some(token) {
             Id
         } else if self
             .number
@@ -430,7 +433,8 @@ fn read_scheduled_index(conn: &Connection, now: i64) -> Result<ScheduledIndex, S
         }
         let mut channel = GuideChannel::from_metadata(&data, "me");
         let at = GuideChannel::read(&data);
-        channel.id = channel.id.or(at.id);
+        channel.identifier = channel.identifier.or(at.identifier);
+        channel.channel_id = channel.channel_id.or(at.channel_id);
         channel.number = channel.number.or(at.number);
         channel.call_sign = channel.call_sign.or(at.call_sign);
         channel.title = channel.title.or(at.title);
@@ -539,7 +543,8 @@ fn catalog_station(entry: &str) -> Option<GuideChannel> {
         (!name.is_empty()).then(|| name.to_owned())
     });
     Some(GuideChannel {
-        id: Some(id),
+        identifier: Some(id),
+        channel_id: None,
         title: Some(title),
         number,
         call_sign,
@@ -843,7 +848,9 @@ mod tests {
               (0,'{"mt:guid":"plex://one","me:beginsAt":20,"me:channelTitle":"Movie HD"}'),
               (0,'{"mt:guid":"plex://one","me:beginsAt":30}'),
               (0,'{"mt:guid":"plex://one","me:beginsAt":40,"at:channelIdentifier":"hd","at:channelCallSign":"HD"}'),
-              (0,'{"mt:guid":"plex://one","me:beginsAt":50,"at:channelCallSign":"HD"}');
+              (0,'{"mt:guid":"plex://one","me:beginsAt":50,"at:channelCallSign":"HD"}'),
+              (0,'{"mt:guid":"plex://one","me:beginsAt":120,"me:channelID":68,"at:channelIdentifier":"hd","me:channelVcn":200}'),
+              (0,'{"mt:guid":"plex://one","me:beginsAt":130,"me:channelId":68,"me:channelVcn":200}');
             INSERT INTO media_subscriptions VALUES
               (1,'{"hi:guid":"plex://one","pr:oneShot":1,"pv:airingTimes":"20"}'),
               (2,'{"hi:guid":"plex://one","pr:oneShot":"1","pv:airingTimes":"60%2Cbad%2C70","pv:airingChannels":"200%2Cunused%2C100"}'),
@@ -864,9 +871,12 @@ mod tests {
                 .0
         };
         use RecordingStatus::{Exact, None as Absent, Slot};
-        for t in [20, 40, 50, 60] {
+        for t in [20, 40, 50, 60, 120, 130] {
             assert_eq!(pair(t, &sd, &hd), [Absent, Exact]);
         }
+        let by_local_id = GuideChannel::read(&serde_json::json!({"at:channelID":68}));
+        let identifier_only = GuideChannel::read(&serde_json::json!({"at:channelIdentifier":"68"}));
+        assert_eq!(pair(130, &identifier_only, &by_local_id), [Absent, Exact]);
         assert_eq!(pair(70, &sd, &hd), [Exact, Absent]);
         assert_eq!(pair(30, &sd, &hd), [Slot, Slot]);
         assert_eq!(pair(80, &sd, &hd), [Slot, Slot]);

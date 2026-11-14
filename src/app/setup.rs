@@ -104,10 +104,13 @@ impl PexApp {
                 if let Some(problem) = config::config_problem() {
                     errors.push(problem);
                 }
-                let local_ok = config::readable_database(&config::local_db_path()).is_ok();
+                let local = config::local_db_path();
+                let local_ok = config::readable_database(&local).is_ok();
                 match cfg.plex_epg_db_source.as_deref() {
                     Some(path) => if let Err(e) = config::readable_database(path) {
-                        if local_ok { warnings.push(format!("{e} Using the local guide.")); }
+                        if local_ok && super::prep::guide_mirror_matches(path, &local) {
+                            warnings.push(format!("{e} Using the local guide."));
+                        }
                         else { errors.push(e); }
                     },
                     None if !local_ok => errors.push("Welcome to PEX. Choose your Plex Databases folder to load the programme guide. No config or SQLite installation is needed.".into()),

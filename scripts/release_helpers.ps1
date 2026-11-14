@@ -98,6 +98,28 @@ function Get-ReleaseTag {
     return $tag
 }
 
+function Get-ReleaseNotes {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    if (-not (Test-Path -LiteralPath 'CHANGELOG.md' -PathType Leaf)) {
+        return "Release $Tag"
+    }
+
+    $heading = "# Pex $($Tag.TrimStart('v'))"
+    $inSection = $false
+    $lines = foreach ($line in Get-Content -LiteralPath 'CHANGELOG.md') {
+        if ($line.StartsWith('# ')) {
+            if ($inSection) { break }
+            $inSection = $line.TrimEnd() -eq $heading
+        } elseif ($inSection) {
+            $line
+        }
+    }
+    $notes = ($lines -join [Environment]::NewLine).Trim()
+    if (-not $notes) { throw "No release notes under '$heading' in CHANGELOG.md." }
+    return $notes
+}
+
 function Assert-PublishedTag {
     param([Parameter(Mandatory)][string]$Tag)
     $ref = "refs/tags/$Tag"

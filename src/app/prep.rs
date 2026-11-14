@@ -310,8 +310,38 @@ fn copy_contents(
     Ok(())
 }
 
-fn copy_sqlite_snapshot(src: &Path, dst: &Path) -> io::Result<()> {
-    copy_validated_snapshot(src, dst, false, false).map(|_| ())
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+enum MirrorOrigin {
+    Guide(PathBuf),
+    LiveLibrary { source: PathBuf, message: String },
+    LiveLibraryBackup { source: PathBuf, message: String },
+    LibrarySnapshot(PathBuf),
+}
+
+fn read_mirror_origin(dst: &Path) -> io::Result<Option<MirrorOrigin>> {
+    if !dst.try_exists()? {
+        return Ok(None);
+    }
+    let db = Connection::open_with_flags(dst, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(io::Error::other)?;
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='pex_mirror_origin')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(io::Error::other)?;
+    if !present {
+        return Ok(None);
+    }
+    let json: String = db
+        .query_row(
+            "SELECT origin FROM main.pex_mirror_origin WHERE rowid=1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(io::Error::other)?;
+    Ok(Some(serde_json::from_str(&json)?))
 }
 
 // Stock SQLite cannot open Plex's ICU/naturalsort indexes or its FTS4 tokenizer.
@@ -393,16 +423,16 @@ fn usable_library(path: &Path) -> bool {
         .is_some_and(|db| validate_snapshot(&db, true).is_ok())
 }
 
-fn copy_validated_snapshot(
+fn copy_with_origin(
     src: &Path,
     dst: &Path,
-    library: bool,
     completed_backup: bool,
+    origin: &MirrorOrigin,
 ) -> io::Result<FileState> {
     copy_snapshot_with_hooks(
         src,
         dst,
-        library,
+        origin,
         completed_backup,
         || std::thread::sleep(Duration::from_millis(250)),
         || {},
@@ -412,11 +442,12 @@ fn copy_validated_snapshot(
 fn copy_snapshot_with_hooks(
     src: &Path,
     dst: &Path,
-    library: bool,
+    origin: &MirrorOrigin,
     completed_backup: bool,
     wait_for_quiet: impl FnOnce(),
     after_copy: impl FnOnce(),
 ) -> io::Result<FileState> {
+    let library = !matches!(origin, MirrorOrigin::Guide(_));
     source_guard::check(dst, [src])?;
     let before = source_state(src)?;
     let live_library = library && !completed_backup;
@@ -481,6 +512,18 @@ fn copy_snapshot_with_hooks(
     .map_err(io::Error::other)?;
     db.pragma_update(None, "journal_mode", "DELETE")
         .map_err(io::Error::other)?;
+    // Stamp only the staged local copy. The source identity and the Plex tables are
+    // then installed together, even if the app exits or cannot write a sidecar.
+    db.execute_batch(
+        "DROP TABLE IF EXISTS main.pex_mirror_origin;
+         CREATE TABLE main.pex_mirror_origin(origin TEXT NOT NULL);",
+    )
+    .map_err(io::Error::other)?;
+    db.execute(
+        "INSERT INTO main.pex_mirror_origin(rowid, origin) VALUES (1, ?1)",
+        [serde_json::to_string(origin)?],
+    )
+    .map_err(io::Error::other)?;
     if !dst.try_exists()? && !has_sidecars(dst)? {
         drop(db);
         staged.persist_noclobber(dst).map_err(|err| err.error)?;
@@ -526,12 +569,16 @@ fn is_corruption(error: &rusqlite::Error) -> bool {
     )
 }
 
+pub(super) fn guide_mirror_matches(src: &Path, dst: &Path) -> bool {
+    matches!(read_mirror_origin(dst), Ok(Some(MirrorOrigin::Guide(path))) if path == src)
+}
+
 fn sync_mirror(src: &Path, dst: &Path, force: bool) -> io::Result<bool> {
-    if !force && !mirror_due(dst) {
+    if !force && !mirror_due(dst) && guide_mirror_matches(src, dst) {
         return Ok(false);
     }
     // Committed WAL frames can change without any change to the main DB file.
-    copy_sqlite_snapshot(src, dst)?;
+    copy_with_origin(src, dst, false, &MirrorOrigin::Guide(src.to_owned()))?;
     fs::write(last_sync_marker_path(dst), b"ok")?;
     Ok(true)
 }
@@ -549,14 +596,7 @@ pub(super) fn sync_library_db_from_source(
     match source {
         LibrarySource::Snapshots(dir) => snapshots::refresh(dir, &dst, report),
         LibrarySource::Live(src) => recover_library(src, &dst, force, report),
-        LibrarySource::Manual(_) => {
-            for marker in [provenance_path(&dst), last_sync_marker_path(&dst)] {
-                if marker.try_exists().map_err(|e| e.to_string())? {
-                    return Err("The local library mirror belongs to a previous connection. Choose its live library or completed snapshot folder in Connect to Plex, or select Guide only.".into());
-                }
-            }
-            Ok("Using the manually supplied local library snapshot.".into())
-        }
+        LibrarySource::Manual(_) => manual_library_snapshot(&dst).map_err(|e| e.to_string()),
     }
 }
 
@@ -564,33 +604,25 @@ fn provenance_path(dst: &Path) -> PathBuf {
     PathBuf::from(format!("{}.snapshot.json", dst.display()))
 }
 
-// Older builds wrote the human-readable provenance directly. A snapshot-folder receipt
-// (a JSON object), or a message for a different server, must not satisfy live refresh.
-fn previous_live_snapshot(src: &Path, dst: &Path) -> Option<String> {
-    let bytes = match fs::read(provenance_path(dst)) {
-        Ok(bytes) => bytes,
-        // Older portable installs and user-supplied mirrors may have no provenance.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Some("Previous local library snapshot (source and date unknown).".into());
-        }
-        Err(_) => return None,
-    };
-    let message = serde_json::from_slice::<String>(&bytes).ok()?;
-    if message.starts_with(&format!(
-        "Library snapshot: live source {}, copied ",
-        src.display()
-    )) {
-        return Some(message);
+fn manual_library_snapshot(dst: &Path) -> io::Result<String> {
+    if read_mirror_origin(dst)?.is_some()
+        || provenance_path(dst).try_exists()?
+        || last_sync_marker_path(dst).try_exists()?
+    {
+        return Err(io::Error::other("The local library mirror belongs to a previous connection. Choose its live library or completed snapshot folder in Connect to Plex, or select Guide only."));
     }
-    let (date, detail) = message
-        .strip_prefix("Library snapshot: Plex backup dated ")?
-        .split_once(", ")?;
-    let (path, _) = detail
-        .rsplit_once(". Owned and recording badges reflect that date.")
-        .or_else(|| detail.rsplit_once(". Library-based badges reflect that date."))?;
-    (chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
-        && path == format!("{}-{date}", src.display()))
-    .then_some(message)
+    Ok("Using the manually supplied local library snapshot.".into())
+}
+
+fn previous_live_snapshot(src: &Path, dst: &Path, allow_backup: bool) -> Option<String> {
+    // A legacy sidecar can survive replacement of the database. Only the origin
+    // installed in the same SQLite transaction identifies the mirror's contents.
+    let (source, message) = match read_mirror_origin(dst).ok()?? {
+        MirrorOrigin::LiveLibrary { source, message } => (source, message),
+        MirrorOrigin::LiveLibraryBackup { source, message } if allow_backup => (source, message),
+        _ => return None,
+    };
+    (source == src && usable_library(dst)).then_some(message)
 }
 
 fn backup_candidates(src: &Path) -> io::Result<Vec<(String, PathBuf)>> {
@@ -639,25 +671,28 @@ fn recover_library(
 ) -> Result<String, String> {
     source_guard::check(dst, [src]).map_err(|e| e.to_string())?;
     if !force && !mirror_due(dst) {
-        if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
+        if let Some(previous) = previous_live_snapshot(src, dst, false) {
             return Ok(previous);
         }
     }
     report("Checking the live Plex library before copying...".into());
-    let failure = match copy_validated_snapshot(src, dst, true, false) {
+    let message = format!(
+        "Library snapshot: live source {}, copied {}.",
+        src.display(),
+        chrono::Local::now().format("%Y-%m-%d %H:%M")
+    );
+    let origin = MirrorOrigin::LiveLibrary {
+        source: src.to_path_buf(),
+        message: message.clone(),
+    };
+    let failure = match copy_with_origin(src, dst, false, &origin) {
         Ok(_) => {
-            let message = format!(
-                "Library snapshot: live source {}, copied {}.",
-                src.display(),
-                chrono::Local::now().format("%Y-%m-%d %H:%M")
-            );
-            let _ = fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
             let _ = fs::write(last_sync_marker_path(dst), b"ok");
             return Ok(message);
         }
         Err(error) => error,
     };
-    if let Some(previous) = previous_live_snapshot(src, dst).filter(|_| usable_library(dst)) {
+    if let Some(previous) = previous_live_snapshot(src, dst, true) {
         return Ok(format!("Live library unavailable ({failure}). Keeping {previous} Use Retry owned scan when Plex is idle."));
     }
     report("Live copy unavailable; checking completed dated Plex library backups...".into());
@@ -665,13 +700,15 @@ fn recover_library(
     match backup_candidates(src) {
         Ok(candidates) => {
             for (date, backup) in candidates {
-                match copy_validated_snapshot(&backup, dst, true, true) {
+                let message = format!("Library snapshot: Plex backup dated {date}, {}. Owned and recording badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
+                let origin = MirrorOrigin::LiveLibraryBackup {
+                    source: src.to_path_buf(),
+                    message: message.clone(),
+                };
+                match copy_with_origin(&backup, dst, true, &origin) {
                     Ok(_) => {
-                        let message = format!("Library snapshot: Plex backup dated {date}, {}. Owned and recording badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
                         // Keep this mirror due so the next launch tries the live source again.
                         let _ = fs::remove_file(last_sync_marker_path(dst));
-                        let _ =
-                            fs::write(provenance_path(dst), serde_json::to_vec(&message).unwrap());
                         return Ok(message);
                     }
                     Err(e) => rejected.push(format!("{}: {e}", backup.display())),
@@ -757,7 +794,7 @@ pub(crate) fn spawn_poster_prep(tx: Sender<PrepMsg>) {
                 Err(err) => {
                     let message = format!("Copying Plex EPG from {} failed: {err}", src.display());
                     warn!("{message}");
-                    if !db_path.exists() {
+                    if !guide_mirror_matches(src, &db_path) {
                         send(PrepMsg::Error(message));
                         return;
                     }
@@ -1171,7 +1208,13 @@ mod mirror_tests {
                 .unwrap_err();
             assert!(missing_plex_extension(&err), "{err}");
             drop(db);
-            copy_validated_snapshot(&src, &dst, true, tokenizer).unwrap();
+            copy_with_origin(
+                &src,
+                &dst,
+                tokenizer,
+                &MirrorOrigin::LibrarySnapshot(src.clone()),
+            )
+            .unwrap();
             assert!(usable_library(&dst));
             let db = Connection::open(&dst).unwrap();
             let title: String = db
@@ -1207,7 +1250,13 @@ mod mirror_tests {
         file.write_all(&[0xff]).unwrap();
         drop(file);
 
-        assert!(copy_validated_snapshot(&src, &dst, true, true).is_err());
+        assert!(copy_with_origin(
+            &src,
+            &dst,
+            true,
+            &MirrorOrigin::LibrarySnapshot(src.clone())
+        )
+        .is_err());
         assert_eq!(fs::read(&dst).unwrap(), previous);
     }
 
@@ -1272,18 +1321,45 @@ mod mirror_tests {
         assert!(usable_library(&dst));
         assert!(mirror_due(&dst));
         assert!(!last_sync_marker_path(&dst).exists());
-        // The DVR preview used different wording in receipts for the same backup.
-        let preview = message.replace("Owned and recording badges", "Library-based badges");
-        fs::write(provenance_path(&dst), serde_json::to_vec(&preview).unwrap()).unwrap();
-        assert_eq!(previous_live_snapshot(&src, &dst), Some(preview));
-        assert!(previous_live_snapshot(&dir.path().join("another.db"), &dst).is_none());
+        assert_eq!(previous_live_snapshot(&src, &dst, true), Some(message));
+        assert!(previous_live_snapshot(&dir.path().join("another.db"), &dst, true).is_none());
+        // An old freshness marker may survive an interrupted backup installation.
+        fs::write(last_sync_marker_path(&dst), b"ok").unwrap();
         fs::remove_file(sqlite_sidecar_path(&src, "journal")).unwrap();
         let live = recover_library(&src, &dst, false, |_| {}).unwrap();
         assert!(live.contains("live source"));
         assert!(!mirror_due(&dst));
-        assert!(fs::read_to_string(provenance_path(&dst))
+        assert_eq!(previous_live_snapshot(&src, &dst, false), Some(live));
+    }
+
+    #[test]
+    fn untagged_library_requires_manual_mode_or_a_verified_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("unavailable.db");
+        let dst = dir.path().join("local.db");
+        library(&dst);
+        assert!(manual_library_snapshot(&dst).is_ok());
+        assert!(recover_library(&src, &dst, false, |_| {}).is_err());
+
+        let legacy = format!(
+            "Library snapshot: live source {}, copied yesterday.",
+            src.display()
+        );
+        fs::write(provenance_path(&dst), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::write(last_sync_marker_path(&dst), b"ok").unwrap();
+        assert!(recover_library(&src, &dst, false, |_| {}).is_err());
+        library(&src);
+        recover_library(&src, &dst, false, |_| {}).unwrap();
+        fs::remove_file(provenance_path(&dst)).unwrap();
+        fs::remove_file(last_sync_marker_path(&dst)).unwrap();
+        assert!(manual_library_snapshot(&dst)
+            .unwrap_err()
+            .to_string()
+            .contains("previous connection"));
+        fs::remove_file(&src).unwrap();
+        assert!(recover_library(&src, &dst, false, |_| {})
             .unwrap()
-            .contains("live source"));
+            .contains("Keeping"));
     }
 
     #[test]
@@ -1328,7 +1404,13 @@ mod mirror_tests {
              UPDATE metadata_items SET title='Uncommitted';",
             )
             .unwrap();
-        assert!(copy_validated_snapshot(&src, &dst, true, false).is_err());
+        assert!(copy_with_origin(
+            &src,
+            &dst,
+            false,
+            &MirrorOrigin::LibrarySnapshot(src.clone())
+        )
+        .is_err());
         writer.execute_batch("ROLLBACK").unwrap();
         drop(writer);
         let mirror = Connection::open(&dst).unwrap();
@@ -1383,12 +1465,16 @@ mod mirror_tests {
         let src = dir.path().join("source.db");
         let dst = dir.path().join("local.db");
         library(&src);
-        copy_validated_snapshot(&src, &dst, true, false).unwrap();
+        let origin = MirrorOrigin::LiveLibrary {
+            source: src.clone(),
+            message: "Initial fixture".into(),
+        };
+        copy_with_origin(&src, &dst, false, &origin).unwrap();
         let old = fs::read(&dst).unwrap();
         let error = copy_snapshot_with_hooks(
             &src,
             &dst,
-            true,
+            &origin,
             false,
             || {},
             || {
@@ -1421,7 +1507,10 @@ mod mirror_tests {
         let err = copy_snapshot_with_hooks(
             &src,
             &dst,
-            true,
+            &MirrorOrigin::LiveLibrary {
+                source: src.clone(),
+                message: "Fixture".into(),
+            },
             false,
             || {
                 writer
@@ -1538,6 +1627,32 @@ mod mirror_tests {
         fs::write(last_sync_marker_path(&dst), b"ok").unwrap();
         assert!(sync_mirror(&src, &dst, false).unwrap());
         assert_eq!(count(&dst), 1);
+    }
+
+    #[test]
+    fn changing_guide_source_rejects_the_old_lineup_even_with_a_fresh_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("lineup-a.db");
+        let b = dir.path().join("lineup-b.db");
+        let dst = dir.path().join("guide.db");
+        drop(source(&a));
+        source(&b)
+            .execute("INSERT INTO metadata_items VALUES (2)", [])
+            .unwrap();
+        assert!(sync_mirror(&a, &dst, false).unwrap());
+
+        let journal = sqlite_sidecar_path(&b, "journal");
+        fs::write(&journal, b"recording in progress").unwrap();
+        assert!(sync_mirror(&b, &dst, false).is_err());
+        assert!(!guide_mirror_matches(&b, &dst));
+        assert!(guide_mirror_matches(&a, &dst));
+        assert_eq!(count(&dst), 1);
+
+        fs::remove_file(journal).unwrap();
+        assert!(sync_mirror(&b, &dst, false).unwrap());
+        assert!(guide_mirror_matches(&b, &dst));
+        assert_eq!(count(&dst), 2);
+        assert_eq!(read_mirror_origin(&b).unwrap(), None);
     }
 
     #[test]
