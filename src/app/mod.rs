@@ -40,9 +40,6 @@ pub mod filters;
 pub mod gfx;
 #[cfg(test)]
 mod guide_ui_tests;
-mod live_dvr_settings;
-pub(crate) mod live_schedule;
-mod live_schedule_worker;
 pub mod owned;
 mod path_checks;
 pub mod prefetch;
@@ -141,13 +138,10 @@ pub struct PexApp {
     rating_rx: Option<Receiver<RatingMsg>>,
     rating_states: HashMap<String, RatingState>,
     rating_key_editor: Option<rating_key::RatingKeyEditor>,
-    live_dvr_editor: Option<live_dvr_settings::LiveDvrEditor>,
     has_ratings_key: bool,
     rating_key_feedback: Option<&'static str>,
 
     scheduled_index: Option<Box<ScheduledIndex>>,
-    live_dvr: live_schedule_worker::LiveDvr,
-    live_dvr_status: Option<String>,
     scheduled_match_stats: ScheduledMatchStats,
 
     // search/filter/sort controls
@@ -248,15 +242,12 @@ impl Default for PexApp {
             rating_rx: None,
             rating_states: HashMap::new(),
             rating_key_editor: None,
-            live_dvr_editor: None,
             has_ratings_key: cfg
                 .tmdb_api_key
                 .as_deref()
                 .is_some_and(|s| !s.trim().is_empty()),
             rating_key_feedback: None,
             scheduled_index: None,
-            live_dvr: Default::default(),
-            live_dvr_status: None,
             scheduled_match_stats: ScheduledMatchStats::default(),
 
             search_query: String::new(),
@@ -469,13 +460,7 @@ impl PexApp {
 
 impl PexApp {
     fn apply_scheduled_flags(&mut self) {
-        // A successful schedule query also tells us when Plex has cancelled a booking.
-        if let Some(index) = self
-            .live_dvr
-            .index
-            .as_deref()
-            .or(self.scheduled_index.as_deref())
-        {
+        if let Some(index) = &self.scheduled_index {
             self.scheduled_match_stats = index.apply(&mut self.rows);
         } else {
             self.scheduled_match_stats = ScheduledMatchStats {
@@ -929,14 +914,11 @@ impl eframe::App for PexApp {
 
 impl PexApp {
     pub(crate) fn update_ui(&mut self, ctx: &eg::Context) {
-        self.poll_live_dvr();
         self.update_guide_ui(ctx);
         self.ui_render_rating_key(ctx);
-        self.render_live_dvr_settings(ctx);
         // Poll workers while they have results to deliver. Idle guides only need
         // a periodic clock tick; egui wakes immediately for input.
         let busy = self.connection.checking()
-            || self.live_dvr_busy()
             || self.prep_rx.is_some()
             || self.owned_scan_in_progress
             || self.in_flight() > 0

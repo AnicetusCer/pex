@@ -151,11 +151,11 @@ the accompanying WAL/SHM files) exist on disk.
 
 ## Getting Started
 
-For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip the library scan, then **Save and load guide**. PEX saves your settings automatically.
+For a portable download, extract into a writable folder and launch `pex.exe` on Windows (or `./pex` on Linux). **Connect to Plex** appears on an unconfigured install. Browse to the server's `Plug-in Support/Databases` folder, or paste a UNC path and choose **Find databases**. Select a guide when several are listed. Choose **Guide only** to skip owned and scheduled-recording badges, then **Save and load guide**. Settings are saved automatically; a TMDb key is optional.
 
 Choose **Set up ratings…** on **Connect to Plex**, or click **⭐ Rating** in a film’s details. If you need a key, the **TMDb ratings key** window accepts it in a masked field. **Save key** stores the key in your active config and resumes a lookup started from film details. Use **Advanced → Ratings key…** at any time to replace the key or select **Remove key**. **Cancel** closes the window without saving. The portable ZIP preserves your saved `pex-config.json` on upgrade.
 
-A live owned refresh checks the library and its write-ahead log (WAL) twice before transferring them. If they look stable, PEX copies them once, checks for changes and validates them locally. If Plex is busy, PEX keeps its usable local mirror. When there is no usable mirror, it can use an existing completed dated backup alongside the library. The guide shows the library snapshot source and date, and offers **Retry owned scan**.
+A live owned refresh checks the library and its write-ahead log (WAL) twice before transferring them. If they look stable, PEX copies them once, checks for changes and validates them locally. If Plex is busy, PEX keeps its usable local mirror. When there is no usable mirror, it can use an existing completed dated backup alongside the library. The guide shows the source and date used for owned and recording badges, and offers **Retry owned scan**.
 
 If completed backups already exist, choose **Completed snapshots** in **Connect to Plex** and select their folder. PEX checks for a newer backup on refresh and reuses its validated local mirror when the backup is unchanged. Both modes need only read access to a local directory or mounted/network share. [Portable setup instructions](make_portable/README.md#refresh-from-completed-snapshots)
 
@@ -179,8 +179,7 @@ Pex reads config in this order: `PEX_CONFIG` (if set), `pex-config.json` next to
 | `plex_epg_db_source` | string or `null` | `null` | When set, Pex copies the live Plex EPG SQLite file into `db/plex_epg.db` no more than once every 24 hours. Leave unset if you manage `db/plex_epg.db` yourself. |
 | `plex_library_db_source` | string or `null` | `null` | Live Plex library used for `db/plex_library.db`. PEX refreshes the mirror on a 24-hour cadence or when you choose **Refresh owned scan**. Leave unset if you manage the local mirror yourself. |
 | `library_snapshot_dir` | string or `null` | `null` | Use existing completed library backups from this directory for owned/recording badges. The live library path can stay configured. |
-| `guide_only` | boolean | `false` | Skip the library scan and library-based badges. An explicitly connected live DVR schedule still works. |
-| `live_dvr` | object or `null` | `null` | Optional `server_url` and `token` for reading the server’s DVR schedule. Manage in **Advanced → Plex DVR Schedule…**. Selecting a different guide file clears the saved connection. |
+| `guide_only` | boolean | `false` | Skip owned scanning and recording badges, including a manually supplied local library. |
 | `cache_dir` | string or `null` | `.pex_cache` | Root folder for poster caches, owned sidecars, and UI prefs. |
 | `tmdb_api_key` | string or `null` | `null` | Optional personal TMDb v3 API key for on-demand film ratings. Manage it in **Advanced → Ratings key…**. |
 | `log_level` | string | `info` | Sets the default tracing level when `RUST_LOG` is unset. Controls tracing output (`trace`, `debug`, `info`, `warn`, `error`). |
@@ -238,7 +237,7 @@ Map the server path to a readable client path when PEX runs on another machine. 
 - `db/plex_epg.db` — working copy of the Plex EPG database (plus WAL/SHM files
   created on demand).
 - `db/plex_library.db` — optional working copy of Plex’s library database, populated from the selected live library or snapshot folder.
-- Recording badges use DVR metadata from the local library copy by default. Connect **Advanced → Plex DVR Schedule…** to read the server’s current bookings using a read-only `GET /media/subscriptions/scheduled`. Enter the server address and a Plex token with DVR access, then choose **Save and refresh**. PEX stores the token in plain text in the active config. Use HTTPS or a trusted local network. [Plex Media Server API](https://developer.plex.tv/pms/#tag/Subscriptions/operation/mediaSubscriptionsGetScheduled)
+- Recording badges use the local library snapshot (`db/plex_library.db`) and the guide’s airing and subscription details. **Advanced → Refresh owned scan** refreshes the badges. On upgrade from the live DVR preview, PEX removes its saved server address and token from the active, writable config on launch.
 - `.pex_cache/` — posters, channel icons, owned sidecars, and UI
   preference files. Poster images older than 14 days are pruned automatically
   on startup.
@@ -281,7 +280,7 @@ producing a self-contained ZIP using the provided PowerShell/Bash scripts.
 - **Status bar stuck on Stage 2/4 (DB copy):** verify the `plex_epg_db_source` and
   `plex_library_db_source` paths are reachable and readable.
 - **Owned scan never completes:** check the Advanced panel for the latest message. In snapshot mode, verify that the client can read the selected folder and that it contains a completed library backup. In live mode, verify the configured library path.
-- If a **REC** badge is missing, check **Other showings**. With a live DVR connection, **Advanced → Refresh DVR schedule** checks for changes without copying a database. A successful response replaces older library bookings, including cancellations. If the server is unreachable, Advanced shows the error and PEX falls back to the available library snapshot. In library-only mode, **Refresh owned scan** updates those badges. **Film REC** means the film request is known but PEX cannot identify a particular showing.
+- If a **REC** badge is missing, check **Other showings** for the scheduled slot. After a new recording request, choose **Advanced → Refresh owned scan**. Badges reflect the date of the library snapshot used. When a one-off request only lists a past airtime, **Film REC** can still appear if the guide and library link the same request to that film. Plex’s **Live TV & DVR → DVR Schedule** shows the current recording time.
 - If a NAS disconnects, choose **Advanced → Refresh path status** to check the configured sources, local mirrors and cache. You can use the guide while PEX checks the paths in the background.
 - **Missing posters:** confirm outbound network access to the artwork URLs and
   that the cache directory is writable. Pex prunes posters older than 14 days

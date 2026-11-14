@@ -41,6 +41,10 @@ fn main() -> eframe::Result<()> {
         }))
         .try_init();
 
+    if let Err(error) = pex::config::remove_retired_dvr_config() {
+        tracing::warn!("Could not finish checking the config for a retired DVR setting: {error}");
+    }
+
     #[cfg(target_os = "linux")]
     {
         info!("WSL_DISTRO_NAME={:?}", env::var_os("WSL_DISTRO_NAME"));

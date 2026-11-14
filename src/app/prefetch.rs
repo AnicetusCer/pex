@@ -229,7 +229,6 @@ mod tests {
         PosterRow {
             title: "Uncached film".into(),
             film_key: key.into(),
-            guide_media_id: 1,
             movie_subscription_id: None,
             url: format!("https://posters.example.invalid/{key}.jpg"),
             key: key.into(),

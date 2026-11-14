@@ -188,7 +188,7 @@ impl PexApp {
             for (i, guide) in self.connection.guides.iter().enumerate() {
                 ui.radio_value(&mut self.connection.selected, i, guide.file_name().unwrap_or_default().to_string_lossy());
             }
-            ui.checkbox(&mut self.connection.guide_only, "Guide only (skip the library scan)");
+            ui.checkbox(&mut self.connection.guide_only, "Guide only (skip owned library and recording badges)");
             if self.connection.library.is_none() && self.connection.guide_only && !self.connection.guides.is_empty() {
                 ui.label("To use library backups, uncheck Guide only and choose Completed snapshots.");
             }

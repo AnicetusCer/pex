@@ -24,13 +24,6 @@ pub struct AppConfig {
     pub plex_library_db_source: Option<PathBuf>,
     pub library_snapshot_dir: Option<PathBuf>,
     pub tmdb_api_key: Option<String>,
-    pub live_dvr: Option<LiveDvrConnection>,
-}
-
-#[derive(Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
-pub struct LiveDvrConnection {
-    pub server_url: String,
-    pub token: String,
 }
 
 #[derive(Deserialize)]
@@ -46,7 +39,6 @@ struct RawConfig {
     #[serde(alias = "omdb_api_key")]
     #[serde(alias = "the_movie_db_api_key")]
     tmdb_api_key: Option<String>,
-    live_dvr: Option<serde_json::Value>,
 }
 
 pub fn base_dir() -> &'static Path {
@@ -176,14 +168,6 @@ pub fn load_config() -> AppConfig {
         match parse_config(&path, &raw) {
             Ok(mut parsed) => {
                 cfg.guide_only = parsed.guide_only;
-                // A damaged optional DVR setting must not prevent loading the guide.
-                cfg.live_dvr = parsed.live_dvr.and_then(|value| match serde_json::from_value(value) {
-                    Ok(connection) => Some(connection),
-                    Err(_) => {
-                        warn!("Invalid live DVR connection. Open Advanced → Plex DVR Schedule to reconnect.");
-                        None
-                    }
-                });
                 cfg.library_snapshot_dir = parsed
                     .library_snapshot_dir
                     .as_deref()
@@ -305,6 +289,32 @@ pub fn config_problem() -> Option<String> {
         .err()
 }
 
+/// Remove the discontinued DVR preview's saved credential from the active config.
+/// Upgrade in place, including when a legacy filename or symlink is in use.
+pub fn remove_retired_dvr_config() -> Result<(), String> {
+    let Some((source, raw)) = read_config_source() else {
+        return Ok(());
+    };
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| config_json_problem(&source, &e))?;
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if object.remove("live_dvr").is_none() {
+        return Ok(());
+    }
+    parse_config(&source, &raw)?;
+    let target = fs::canonicalize(&source).map_err(|e| e.to_string())?;
+    if fs::metadata(&target)
+        .map_err(|e| e.to_string())?
+        .permissions()
+        .readonly()
+    {
+        return Err(format!("{} is read-only.", source.display()));
+    }
+    write_config(&target, &value, Some(&raw))
+}
+
 /// Retain settings, but migrate legacy files on explicit save so an upgraded ZIP's
 /// bundled config.json cannot replace the user's connection.
 pub fn save_connection(
@@ -328,16 +338,6 @@ pub fn save_connection_with_snapshots(
     guide_only: bool,
 ) -> Result<PathBuf, String> {
     update_config(|object| {
-        let previous_guide = object
-            .get("plex_epg_db_source")
-            .or_else(|| object.get("plex_db_source"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(resolve_relative_path);
-        if object.contains_key("live_dvr") && previous_guide != Some(resolve_relative_path(epg)) {
-            object.remove("live_dvr");
-        }
         object.remove("plex_db_source");
         object.insert("plex_epg_db_source".into(), serde_json::json!(epg));
         object.insert("plex_library_db_source".into(), serde_json::json!(library));
@@ -347,16 +347,6 @@ pub fn save_connection_with_snapshots(
             object.remove("library_snapshot_dir");
         }
         object.insert("guide_only".into(), serde_json::json!(guide_only));
-    })
-}
-
-pub(crate) fn save_live_dvr(connection: Option<&LiveDvrConnection>) -> Result<PathBuf, String> {
-    update_config(|object| {
-        if let Some(connection) = connection {
-            object.insert("live_dvr".into(), serde_json::json!(connection));
-        } else {
-            object.remove("live_dvr");
-        }
     })
 }
 
@@ -406,6 +396,7 @@ fn update_config(
         )
     })?;
     update(object);
+    object.remove("live_dvr");
     RawConfig::deserialize(&value).map_err(|updated_error| {
         // The edited value has no line numbers. Recover the location from the user's file.
         let error = serde_json::from_str::<RawConfig>(raw)
@@ -413,18 +404,35 @@ fn update_config(
             .unwrap_or(updated_error);
         config_json_problem(input_path, &error)
     })?;
+    write_config(&path, &value, None)?;
+    Ok(path)
+}
+
+fn write_config(
+    path: &Path,
+    value: &serde_json::Value,
+    original: Option<&str>,
+) -> Result<(), String> {
     let parent = path.parent().ok_or("Config has no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
     use std::io::Write;
     staged
-        .write_all(serde_json::to_string_pretty(&value).unwrap().as_bytes())
+        .write_all(serde_json::to_string_pretty(value).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
     staged.as_file().sync_all().map_err(|e| e.to_string())?;
+    if let Some(original) = original {
+        if fs::read(path).map_err(|e| e.to_string())? != original.as_bytes() {
+            return Err(format!(
+                "{} was edited during the upgrade. PEX will retry at next launch.",
+                path.display()
+            ));
+        }
+    }
     staged
-        .persist(&path)
+        .persist(path)
         .map_err(|e| format!("Cannot save {}: {e}", path.display()))?;
-    Ok(path)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -473,7 +481,21 @@ mod tests {
         });
         let mut original = other_settings.clone();
         original["omdb_api_key"] = serde_json::json!("legacy-fixture-key");
-        fs::write(&legacy, original.to_string()).unwrap();
+        let mut preview = original.clone();
+        preview["live_dvr"] =
+            serde_json::json!({"server_url":"http://nas.test","token":"retired-fixture"});
+        fs::write(&legacy, preview.to_string()).unwrap();
+        remove_retired_dvr_config().unwrap();
+        assert!(!saved.exists());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&legacy).unwrap()).unwrap(),
+            original
+        );
+        // A subsequent launch leaves the original formatting alone.
+        let compact = original.to_string();
+        fs::write(&legacy, &compact).unwrap();
+        remove_retired_dvr_config().unwrap();
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), compact);
         assert_eq!(
             load_config().tmdb_api_key.as_deref(),
             Some("legacy-fixture-key")
@@ -491,6 +513,8 @@ mod tests {
 
         let explicit = portable.join("override.json");
         env::set_var("PEX_CONFIG", &explicit);
+        remove_retired_dvr_config().unwrap();
+        assert!(!explicit.exists());
         assert_eq!(save_tmdb_api_key(Some("replacement")).unwrap(), explicit);
         assert_eq!(load_config().tmdb_api_key.as_deref(), Some("replacement"));
         assert_eq!(read(&saved), expected);
@@ -502,33 +526,20 @@ mod tests {
         assert_eq!(read(&explicit), other_settings);
         assert!(load_config().tmdb_api_key.is_none());
 
-        // The DVR connection belongs to the selected guide. Preserve it when
-        // switching library modes, and clear it when the guide source changes.
-        let connection = LiveDvrConnection {
-            server_url: "http://localhost:32400/".into(),
-            token: "local-dvr-fixture".into(),
-        };
-        assert_eq!(save_live_dvr(Some(&connection)).unwrap(), explicit);
-        assert!(load_config().live_dvr.as_ref() == Some(&connection));
-        save_connection(&portable.join("relative/guide.db"), None, true).unwrap();
-        assert!(load_config().live_dvr.as_ref() == Some(&connection));
-        save_connection(&portable.join("second/guide.db"), None, true).unwrap();
-        assert!(load_config().live_dvr.is_none());
-        assert!(read(&explicit).get("live_dvr").is_none());
-        let mut broken = read(&explicit);
-        broken["live_dvr"] = serde_json::json!({"token": true});
-        fs::write(&explicit, broken.to_string()).unwrap();
-        let cfg = load_config();
-        assert!(cfg.live_dvr.is_none());
-        assert_eq!(
-            cfg.plex_epg_db_source,
-            Some(portable.join("second/guide.db"))
-        );
-        save_live_dvr(None).unwrap();
-        assert_eq!(
-            read(&explicit)["custom_setting"],
-            other_settings["custom_setting"]
-        );
+        let invalid_preview = r#"{"guide_only":"wrong","live_dvr":{"token":"retired-fixture"}}"#;
+        fs::write(&explicit, invalid_preview).unwrap();
+        let error = remove_retired_dvr_config().unwrap_err();
+        assert!(!error.contains("retired-fixture"));
+        assert_eq!(fs::read_to_string(&explicit).unwrap(), invalid_preview);
+
+        fs::write(&explicit, preview.to_string()).unwrap();
+        let permissions = fs::metadata(&explicit).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&explicit, readonly).unwrap();
+        assert!(remove_retired_dvr_config().is_err());
+        assert_eq!(read(&explicit), preview);
+        fs::set_permissions(&explicit, permissions).unwrap();
 
         for invalid in ["{invalid", "[]"] {
             fs::write(&explicit, invalid).unwrap();

@@ -8,7 +8,7 @@
 4. PEX lists `tv.plex.providers.epg.cloud*.db` guide databases. If several are listed, choose the one for your DVR guide. PEX also finds `com.plexapp.plugins.library.db` in the same folder.
 5. When PEX finds a library, owned/HD and scheduled recording badges are enabled. Check **Guide only** if you just want listings. Click **Save and load guide**.
 
-Plex DVR/EPG must be enabled on your server. You can browse the guide and use library snapshots without a Plex token or TMDb key. Poster downloads need internet access.
+Plex DVR/EPG must be enabled on your server. No Plex token or TMDb key is needed. Poster downloads need internet access; listings and local caches remain usable without it.
 
 Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the executable. Keep this portable folder writable. Use **Connect to Plex** in the guide to change the connection later; saving is available after active scans and downloads finish.
 
@@ -22,15 +22,7 @@ Select a film and expand **Other showings (N)** for the channel and UTC time of 
 
 **REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 
-Plex can keep the original airtime in its database after moving a one-off recording. If the guide and library still identify the same film and request, PEX shows **Film REC**. To see which repeat Plex has picked, connect its DVR schedule.
-
-### Connect the live DVR schedule
-
-1. Choose **Advanced → Plex DVR Schedule…**. Enter the address of the Plex Media Server that supplies your guide, such as `http://your-nas:32400` on your trusted home network, or its HTTPS address. Use the server address without `/web`.
-2. Enter a Plex token for a user with DVR access, then choose **Save and refresh**. The **Find your Plex token** link in the window opens Plex’s instructions. PEX saves the token in plain text in your active local config. Keep this file private. [Plex’s token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
-3. Use **Advanced → Refresh DVR schedule** after scheduling, moving or cancelling a recording. PEX reads the server schedule on startup and on refresh. A refresh reads only the list of recordings and works in **Guide only** mode.
-
-When the server confirms the film, channel and airing, the guide shows **REC** on that showing. For example, a film listed at 22:00 can carry **REC** even if Plex starts recording at 21:50. If the server is unavailable, Advanced shows the reason and PEX uses the library snapshot when available. **Disconnect** removes the saved DVR connection.
+Plex can keep the original airtime in its database after moving a one-off recording. If the guide and library still identify the same film and request, PEX shows **Film REC**. Open **Live TV & DVR → DVR Schedule** in Plex to see which repeat it currently plans to record.
 
 For an owned film, expand **Owned Details** to see why PEX matched it and the title, year and file path Plex recorded. A matching Plex identifier takes priority, followed by a matching title and year. If the only title matches are a year earlier and a year later, PEX lists both. **Copy file path** copies the path as Plex sees it on the server.
 
@@ -46,7 +38,7 @@ In **Live library** mode, **Refresh owned scan** checks the database and its SQL
 
 If Plex starts writing during the transfer, PEX limits the read to the file sizes it saw at the start and discards a copy that fails its consistency checks. When the live copy is unavailable, PEX keeps a usable previous mirror from the configured source. If there is no usable mirror, PEX looks for an existing, completed `com.plexapp.plugins.library.db-YYYY-MM-DD` backup alongside the live library. It tries the newest dates first and checks that each candidate is complete, stable and readable as a Plex library.
 
-The guide shows the library snapshot source and date. A backup can predate new films, recording requests or cancellations. Choose **Retry owned scan** to check the live library again. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
+The guide shows the source and date used for owned and scheduled recording badges. A backup can predate new films, recording requests or cancellations. Choose **Retry owned scan** to check the live library again. If the share is unavailable, you can keep browsing using the saved mirror or select **Guide only**.
 
 Saved owned badges belong to the library that produced them. When you change libraries, the first successful scan fills in the new badges. After an upgrade, the next owned scan updates older badges using the recording’s resolution and source channel.
 
@@ -60,6 +52,8 @@ If you already have completed Plex backups, you can use them directly. In **Conn
 
 Close PEX and extract the new ZIP over your existing portable folder. Your saved `pex-config.json`, local databases and caches stay in place. If you are upgrading an older install with settings only in `config.json`, copy that file to `pex-config.json` before extracting. The ZIP replaces the starter `config.json`.
 
+If you tried the preview that connected directly to Plex, PEX removes its saved server address and token from the active, writable config on launch. Recording badges use your guide and library databases. Choose **Advanced → Refresh owned scan** to update them.
+
 PEX searches for `PEX_CONFIG`, `pex-config.json` beside the executable, that filename in the current directory, `~/.pex-config.json`, then legacy `config.json` beside the executable/current directory. Local manually supplied `db/plex_epg.db` and `db/plex_library.db` remain supported. Existing configs do not require the new `guide_only` key.
 
 Saving a connection or ratings key preserves other settings. PEX saves to `pex-config.json` when starting from the bundled or a legacy `config.json`. Your saved connection and key survive the next portable ZIP upgrade. Existing preferred/home configs are updated in place, and an explicit `PEX_CONFIG` destination is always honored. Malformed JSON is reported and must be repaired before saving; it is not overwritten. The bundled empty `config.json` starts the setup screen. Extract a preview or update into a separate folder to try it without changing your working installation.
@@ -71,8 +65,7 @@ Saving a connection or ratings key preserves other settings. PEX saves to `pex-c
 | `plex_epg_db_source` | Live guide database path, filled in by setup. |
 | `plex_library_db_source` | Live library database path, filled in by setup; optional. |
 | `library_snapshot_dir` | Folder of completed library snapshots as seen by PEX. When set, owned refreshes use this folder. |
-| `guide_only` | `true` skips the library scan and its badges. An explicitly connected live DVR schedule still works. Default `false`. |
-| `live_dvr` | Optional server address and token for the live schedule. Manage these in **Advanced → Plex DVR Schedule…**. Selecting a different guide file clears this connection. |
+| `guide_only` | `true` skips the owned scan and recording badges, including existing library mirrors. Default `false`. |
 | `cache_dir` | Cache location; relative paths resolve beside the executable. Default `.pex_cache`. |
 | `tmdb_api_key` | Optional personal TMDb V3 key for on-demand ratings. |
 | `log_level` | Logging level, default `info`. |

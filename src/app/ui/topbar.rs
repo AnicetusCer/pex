@@ -373,25 +373,6 @@ impl crate::app::PexApp {
                         }));
                     });
                     ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Plex DVR Schedule…").clicked() {
-                            self.open_live_dvr_settings();
-                        }
-                        if self.live_dvr_configured()
-                            && ui
-                                .add_enabled(
-                                    !self.live_dvr_busy(),
-                                    eg::Button::new("Refresh DVR schedule"),
-                                )
-                                .clicked()
-                        {
-                            self.refresh_live_dvr();
-                        }
-                    });
-                    if let Some(status) = &self.live_dvr_status {
-                        ui.label(status);
-                    }
-                    ui.separator();
                     ui.strong("Path status");
                     self.advanced_paths.show(ui);
                     ui.separator();

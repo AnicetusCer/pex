@@ -8,6 +8,7 @@ use std::{
     env, fs,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command},
     thread,
@@ -96,7 +97,7 @@ fn launch(app: &Path, config: &Value, expected_title: &str, live_copy: bool) -> 
     let mut command = Command::new(app.join(format!("pex{}", env::consts::EXE_SUFFIX)));
     command
         .current_dir(root)
-        .env("PEX_CONFIG", config_file)
+        .env_remove("PEX_CONFIG")
         .env("PEX_DISABLE_PREFETCH", "1")
         .env_remove("PEX_BASE_DIR")
         .env("HOME", root)
@@ -211,10 +212,32 @@ fn packaged_app_reads_live_busy_and_completed_sources() -> Result {
     let library = data.join(LIBRARY);
     seed(&guide, "Snapshot Fixture")?;
     seed(&library, "Live Library")?;
-    let live_config = json!({"plex_epg_db_source": guide, "plex_library_db_source": library});
+    let live_config = json!({
+        "plex_epg_db_source": guide,
+        "plex_library_db_source": library,
+        "tmdb_api_key": "fixture-ratings-key",
+        "custom_setting": {"preserve": true}
+    });
+    // Upgrade an extracted installation with the direct-DVR preview's saved token.
+    // A queued connection reveals a startup request even after the child has exited.
+    let old_server = TcpListener::bind("127.0.0.1:0")?;
+    old_server.set_nonblocking(true)?;
+    let mut preview_config = live_config.clone();
+    preview_config["live_dvr"] = json!({
+        "server_url": format!("http://{}/", old_server.local_addr()?),
+        "token": "fixture-retired-dvr-token"
+    });
     with_read_only_sources(&[&data], || {
-        launch(&app, &live_config, "Live Library", true)
+        launch(&app, &preview_config, "Live Library", true)
     })?;
+    let migrated: Value = serde_json::from_reader(File::open(app.join("pex-config.json"))?)?;
+    assert_eq!(migrated, live_config);
+    assert!(
+        old_server
+            .accept()
+            .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock),
+        "PEX contacted the retired DVR server"
+    );
 
     let marker = app.join(LIVE_MARKER);
     let old = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);

@@ -125,7 +125,7 @@ fn read_guide_airings(
         "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
         {extra_data}, m.summary, m.audience_rating, m.rating, {preferred}, {secondary},
         {width} AS airing_width, {height} AS airing_height, CAST({resolution} AS TEXT) AS airing_resolution,
-        {metadata_extra} AS movie_metadata, mi.id AS guide_media_id
+        {metadata_extra} AS movie_metadata
         FROM metadata_items m JOIN media_items mi ON mi.metadata_item_id = m.id
         WHERE m.metadata_type = 1 AND mi.begins_at >= 0 AND trim(m.title) <> ''
         ORDER BY mi.begins_at, m.id, mi.id"
@@ -185,7 +185,6 @@ fn read_guide_airings(
         list.push(PrepItem {
             airing_quality,
             film_key,
-            guide_media_id: row.get("guide_media_id")?,
             movie_subscription_id: row
                 .get_ref("movie_metadata")?
                 .as_bytes()
@@ -586,10 +585,9 @@ fn previous_live_snapshot(src: &Path, dst: &Path) -> Option<String> {
     let (date, detail) = message
         .strip_prefix("Library snapshot: Plex backup dated ")?
         .split_once(", ")?;
-    let path = detail
-        .rsplit_once(". Library-based badges reflect that date.")
-        .or_else(|| detail.rsplit_once(". Owned and recording badges reflect that date."))?
-        .0;
+    let (path, _) = detail
+        .rsplit_once(". Owned and recording badges reflect that date.")
+        .or_else(|| detail.rsplit_once(". Library-based badges reflect that date."))?;
     (chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok()
         && path == format!("{}-{date}", src.display()))
     .then_some(message)
@@ -669,7 +667,7 @@ fn recover_library(
             for (date, backup) in candidates {
                 match copy_validated_snapshot(&backup, dst, true, true) {
                     Ok(_) => {
-                        let message = format!("Library snapshot: Plex backup dated {date}, {}. Library-based badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
+                        let message = format!("Library snapshot: Plex backup dated {date}, {}. Owned and recording badges reflect that date. Live source is still configured; use Retry owned scan to update.", backup.display());
                         // Keep this mirror due so the next launch tries the live source again.
                         let _ = fs::remove_file(last_sync_marker_path(dst));
                         let _ =
@@ -909,7 +907,6 @@ impl crate::app::PexApp {
 
                                 crate::app::PosterRow {
                                     film_key: item.film_key,
-                                    guide_media_id: item.guide_media_id,
                                     movie_subscription_id: item.movie_subscription_id,
                                     title: item.title,
                                     url: item.thumb_url,
@@ -1275,6 +1272,11 @@ mod mirror_tests {
         assert!(usable_library(&dst));
         assert!(mirror_due(&dst));
         assert!(!last_sync_marker_path(&dst).exists());
+        // The DVR preview used different wording in receipts for the same backup.
+        let preview = message.replace("Owned and recording badges", "Library-based badges");
+        fs::write(provenance_path(&dst), serde_json::to_vec(&preview).unwrap()).unwrap();
+        assert_eq!(previous_live_snapshot(&src, &dst), Some(preview));
+        assert!(previous_live_snapshot(&dir.path().join("another.db"), &dst).is_none());
         fs::remove_file(sqlite_sidecar_path(&src, "journal")).unwrap();
         let live = recover_library(&src, &dst, false, |_| {}).unwrap();
         assert!(live.contains("live source"));
