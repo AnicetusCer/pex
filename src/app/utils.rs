@@ -226,8 +226,8 @@ pub fn humanize_channel(raw: &str) -> String {
     }
 }
 
-/// Dimensions describe the airing itself. Older guides may only supply a
-/// resolution label or mark the station as HD/SD in its name or call sign.
+/// Use dimensions from analysed media first. Otherwise look for an explicit
+/// resolution or station designation; the channel number is never a resolution.
 pub(super) fn airing_quality(
     width: Option<i64>,
     height: Option<i64>,
@@ -255,26 +255,27 @@ pub(super) fn airing_quality(
         Some(1..=720) => return Sd,
         _ => {}
     }
-    if let Some(quality) = resolution.and_then(|s| from_resolution(&s.trim().to_ascii_lowercase()))
-    {
-        return quality;
-    }
+    let mut reported = resolution.and_then(|s| from_resolution(&s.trim().to_ascii_lowercase()));
     for name in [call_sign, channel_title].into_iter().flatten() {
         let name = name.trim().to_ascii_lowercase();
-        if let Some(quality) = name
+        for quality in name
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|token| token.chars().any(|c| c.is_ascii_alphabetic()))
-            .find_map(from_resolution)
+            .filter_map(from_resolution)
+            // Some providers omit the space, e.g. BBCONEHD or SkyCinemaSD.
+            .chain(if name.ends_with("hd") || name.ends_with("4k") {
+                Some(Hd)
+            } else if name.ends_with("sd") {
+                Some(Sd)
+            } else {
+                None
+            })
         {
-            return quality;
-        }
-        // Some EPG providers omit the space, e.g. BBCONEHD or SkyCinemaSD.
-        if name.ends_with("hd") || name.ends_with("4k") {
-            return Hd;
-        }
-        if name.ends_with("sd") {
-            return Sd;
+            if reported.is_some_and(|existing| existing != quality) {
+                return Unknown;
+            }
+            reported = Some(quality);
         }
     }
-    Unknown
+    reported.unwrap_or(Unknown)
 }

@@ -16,7 +16,7 @@ Settings are saved automatically. PEX creates `db/` and `.pex_cache/` beside the
 
 The guide opens when listings are ready. Posters load in the background, and films without artwork still show their title and airtime. Your date range and filters determine which showing appears on each film’s card.
 
-Select a film and expand **Other showings (N)** for the channel, UTC time and picture quality of each additional airing. PEX checks the airing’s dimensions or resolution and can also recognise HD and SD in station names. **Airing quality unknown** means the guide lacks enough information. **HD only** shows confirmed HD airings.
+Select a film and expand **Other showings (N)** for the channel, UTC time and picture quality of each additional airing. Some Plex guides give every programme on a station the same nominal dimensions. PEX uses those dimensions only when Plex marks the media as analysed. Otherwise it looks for an explicit resolution or HD/SD station label. If the evidence is missing or conflicting, the listing shows **Airing quality unknown** and remains visible in the normal guide. **HD only** and the **HD ↑** upgrade badge require confirmed HD.
 
 **REC** marks a scheduled showing. **Other REC** points to another scheduled showing in the filtered list. When Plex lists several stations for the same recording request, PEX checks which of them carry the film at the booked time. **REC?** means the time is booked and the channel is still unclear. **Film REC** means Plex has a recording request for the film without a confirmed showing.
 

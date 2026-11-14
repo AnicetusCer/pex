@@ -267,6 +267,7 @@ ui:
 hd_logic:
   broadcast_hd_inference:
     fn: "utils::airing_quality(width, height, resolution, call_sign, channel_title) -> AiringQuality (Hd, Sd or Unknown)"
+    evidence: "read_guide_airings passes dimensions only for positive media_analysis_version. On unanalysed and older guides, look for explicit resolution or station quality. Missing or conflicting evidence gives Unknown."
   owned_hd_inference:
     stored in owned_titles_v4.json with the source and owned keys
   better_hd_available_rule:

@@ -13,6 +13,11 @@ fn distinguish_booked_and_unresolved_simulcasts() {
     run_portable_test("app::guide_ui_tests::portable_simulcasts");
 }
 
+#[test]
+fn hd_upgrade_requires_evidence_for_the_airing() {
+    run_portable_test("app::guide_ui_tests::portable_sky_mix_quality");
+}
+
 fn run_portable_test(test: &str) {
     let dir = tempfile::tempdir().unwrap();
     let result = Command::new(env::current_exe().unwrap())
@@ -36,6 +41,97 @@ fn run_portable_test(test: &str) {
 
 #[test]
 #[ignore = "parent creates an isolated portable install"]
+fn portable_sky_mix_quality() {
+    use super::types::AiringQuality;
+
+    let portable = std::path::PathBuf::from(env::var_os("PEX_GUIDE_DETAILS_FIXTURE").unwrap());
+    let source = portable.join("source");
+    fs::create_dir(&source).unwrap();
+    let guide = source.join("guide.db");
+    let library = source.join("library.db");
+    let start = chrono::Utc::now().timestamp() + 1800;
+    for path in [&guide, &library] {
+        database(path);
+        Connection::open(path).unwrap().execute_batch(
+            "UPDATE metadata_items SET title='Sky Mix Fixture', original_title='Sky Mix Fixture',
+                year=1997, user_thumb_url=NULL;"
+        ).unwrap();
+    }
+    {
+        let db = Connection::open(&guide).unwrap();
+        db.execute_batch(
+            "ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;
+             DELETE FROM media_items;",
+        )
+        .unwrap();
+        for (time, call_sign, label, number) in [
+            (start, "SKYMIX", "011 SKYMIX (Sky Mix)", "011"),
+            (start + 3600, "SKYMIXHD", "141 SKYMIXHD (Sky Mix HD)", "141"),
+        ] {
+            let channel = serde_json::json!({
+                "at:channelVcn":number, "at:channelCallSign":call_sign, "at:channelTitle":label,
+            });
+            db.execute(
+                "INSERT INTO media_items(metadata_item_id,begins_at,width,height,media_analysis_version,extra_data)
+                 VALUES(1,?1,1280,720,0,?2)", params![time,channel.to_string()]
+            ).unwrap();
+        }
+        let db = Connection::open(&library).unwrap();
+        db.execute_batch(
+            "UPDATE media_items SET width=718,height=432;
+             UPDATE media_parts SET file='/fixture/Sky Mix Fixture (1997).mkv';
+             CREATE TABLE media_grabs(status INTEGER, extra_data TEXT);
+             CREATE TABLE media_subscriptions(id INTEGER, extra_data TEXT);
+             CREATE TABLE metadata_subscription_desired_items(sub_id INTEGER, remote_id TEXT);",
+        )
+        .unwrap();
+    }
+
+    config::save_connection(&guide, Some(&library), false).unwrap();
+    let mut ui = TestUi::default();
+    ui.frames_until("owned SD film with both Sky Mix showings", |app| {
+        app.rows.len() == 2 && app.rows.iter().all(|r| r.owned && !r.owned_hd)
+    });
+    let plain = ui
+        .app
+        .rows
+        .iter()
+        .position(|r| r.channel_raw.as_deref() == Some("SKYMIX"))
+        .unwrap();
+    let hd = ui
+        .app
+        .rows
+        .iter()
+        .position(|r| r.channel_raw.as_deref() == Some("SKYMIXHD"))
+        .unwrap();
+    assert_eq!(ui.app.rows[plain].airing_quality, AiringQuality::Unknown);
+    assert_eq!(ui.app.rows[hd].airing_quality, AiringQuality::Hd);
+    assert_eq!(ui.app.filtered_showings_for(plain), [plain, hd]);
+    let upgrade_visible = |ui: &mut TestUi| {
+        ui.frame(Vec::new())
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape, eframe::egui::Shape::Text(t) if t.galley.text() == "HD ↑"))
+    };
+    // A card represents its earliest matching showing. The later HD airing mustn't
+    // lend its upgrade badge to the earlier, unanalysed listing on channel 011.
+    assert_eq!(ui.app.filtered_guide().days[0].1, [plain]);
+    assert!(!upgrade_visible(&mut ui));
+    let card = ui
+        .ctx
+        .read_response(eframe::egui::Id::new(("card_sel", plain)))
+        .unwrap();
+    ui.click(card.rect.center());
+    ui.label("Airing quality unknown");
+    ui.press("Filters");
+    ui.press("HD only");
+    assert_eq!(ui.app.filtered_showings_for(hd), [hd]);
+    assert_eq!(ui.app.filtered_guide().days[0].1, [hd]);
+    assert!(upgrade_visible(&mut ui));
+}
+
+#[test]
+#[ignore = "parent creates an isolated portable install"]
 fn portable_simulcasts() {
     use super::scheduled::RecordingStatus;
     use super::types::AiringQuality;
@@ -55,7 +151,8 @@ fn portable_simulcasts() {
     {
         let db = Connection::open(&guide).unwrap();
         db.execute_batch(
-            "UPDATE metadata_items SET user_thumb_url=NULL;
+            "ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;
+             UPDATE metadata_items SET user_thumb_url=NULL;
              DELETE FROM media_items;
              INSERT INTO metadata_items(id,title,year,metadata_type,guid)
              VALUES(2,'Unresolved Fixture',2025,1,'imdb://tt2345678');",
@@ -85,8 +182,8 @@ fn portable_simulcasts() {
                     "at:channelCallSign": call_sign, "at:channelTitle": label,
                 });
                 db.execute(
-                    "INSERT INTO media_items(metadata_item_id,begins_at,width,height,extra_data)
-                     VALUES(?1,?2,?3,?4,?5)",
+                    "INSERT INTO media_items(metadata_item_id,begins_at,width,height,extra_data,media_analysis_version)
+                     VALUES(?1,?2,?3,?4,?5,8)",
                     params![movie, time, width, height, channel.to_string()],
                 )
                 .unwrap();
@@ -171,17 +268,20 @@ fn portable_guide_details() {
     database(&library);
     {
         let db = Connection::open(&guide).unwrap();
-        db.execute("UPDATE metadata_items SET user_thumb_url=NULL", [])
-            .unwrap();
+        db.execute_batch(
+            "ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;
+             UPDATE metadata_items SET user_thumb_url=NULL;",
+        )
+        .unwrap();
         db.execute(
-            "UPDATE media_items SET begins_at=?1,extra_data=?2",
+            "UPDATE media_items SET begins_at=?1,extra_data=?2,media_analysis_version=8",
             params![start, r#"{"at:channelCallSign":"Channel One"}"#],
         )
         .unwrap();
         for (channel, width, height) in [("Channel Two", 720, 576), ("Channel Three", 1920, 1080)] {
             db.execute(
-                "INSERT INTO media_items (metadata_item_id,begins_at,width,height,extra_data)
-                 VALUES(1,?1,?2,?3,?4)",
+                "INSERT INTO media_items (metadata_item_id,begins_at,width,height,extra_data,media_analysis_version)
+                 VALUES(1,?1,?2,?3,?4,8)",
                 params![
                     repeat,
                     width,

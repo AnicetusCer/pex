@@ -78,8 +78,17 @@ fn read_guide_airings(
     };
     let preferred = column(&metadata, "m", "user_thumb_url");
     let secondary = column(&metadata, "m", "thumb_url");
-    let width = column(&media, "mi", "width");
-    let height = column(&media, "mi", "height");
+    // An unanalysed EPG entry can repeat nominal dimensions for every programme
+    // on a station. Only pass measured dimensions to the quality classifier.
+    let analyzed_dimension = |name: &str| {
+        if media.contains("media_analysis_version") && media.contains(name) {
+            format!("CASE WHEN CAST(mi.media_analysis_version AS INTEGER) > 0 THEN mi.{name} END")
+        } else {
+            "NULL".to_owned()
+        }
+    };
+    let width = analyzed_dimension("width");
+    let height = analyzed_dimension("height");
     let resolution = column(&media, "mi", "video_resolution");
     let sql = format!(
         "SELECT m.id, m.title, mi.begins_at, m.year, m.guid, m.tags_genre,
@@ -967,6 +976,7 @@ mod guide_tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(include_str!("test_fixtures.sql")).unwrap();
         db.execute_batch(r#"
+            ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER;
             ALTER TABLE media_items ADD COLUMN video_resolution TEXT;
             UPDATE metadata_items SET tags_genre='HD|Drama';
             INSERT INTO media_items(id,metadata_item_id,begins_at,width,height,video_resolution,extra_data) VALUES
@@ -974,9 +984,10 @@ mod guide_tests {
                 (3,1,3,0,0,'1080i',NULL),
                 (4,1,4,NULL,NULL,NULL,'{"at:channelCallSign":"StationSD"}'),
                 (5,1,5,NULL,NULL,NULL,'{"at:channelTitle":"Cinema 720"}'),
-                (6,1,6,NULL,NULL,NULL,'{"at:channelCallSign":"Cinema","at:channelTitle":"Cinema HD"}'),
+                (6,1,6,1280,720,NULL,'{"at:channelCallSign":"Cinema","at:channelTitle":"Cinema HD"}'),
                 (7,1,7,NULL,NULL,'SD',NULL),
                 (8,1,8,1280,NULL,NULL,NULL);
+            UPDATE media_items SET media_analysis_version=8 WHERE id IN (1,2,8);
         "#).unwrap();
         let qualities = || {
             read_guide_airings(&db, |_| {})
@@ -986,6 +997,11 @@ mod guide_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(qualities(), [Hd, Sd, Hd, Sd, Unknown, Hd, Sd, Hd]);
+        // Older guides without an analysis marker still have useful resolution
+        // and station labels. Dimensions alone cannot confirm an upgrade.
+        db.execute_batch("ALTER TABLE media_items DROP COLUMN media_analysis_version;")
+            .unwrap();
+        assert_eq!(qualities(), [Unknown, Hd, Hd, Sd, Unknown, Hd, Sd, Unknown]);
         db.execute_batch(
             "ALTER TABLE media_items DROP COLUMN width;
                           ALTER TABLE media_items DROP COLUMN height;
@@ -996,6 +1012,40 @@ mod guide_tests {
             qualities(),
             [Unknown, Hd, Unknown, Sd, Unknown, Hd, Unknown, Unknown]
         );
+    }
+
+    #[test]
+    fn nominal_dimensions_need_independent_quality_evidence() {
+        use crate::app::types::AiringQuality::{Hd, Sd, Unknown};
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("test_fixtures.sql")).unwrap();
+        db.execute_batch(
+            "ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER DEFAULT 0;
+            ALTER TABLE media_items ADD COLUMN video_resolution TEXT;",
+        )
+        .unwrap();
+        for (station, resolution, expected) in [
+            ("011 Provider", None, Unknown),
+            ("Provider SD", None, Sd),
+            ("ProviderHD", None, Hd),
+            ("Provider", Some("576i"), Sd),
+            ("Provider SD", Some("1080i"), Unknown),
+            ("Provider HD / SD", None, Unknown),
+        ] {
+            db.execute(
+                "UPDATE media_items SET width=1280,height=720,extra_data=?1,video_resolution=?2",
+                rusqlite::params![
+                    serde_json::json!({"at:channelTitle":station}).to_string(),
+                    resolution
+                ],
+            )
+            .unwrap();
+            let airings = read_guide_airings(&db, |_| {}).unwrap();
+            assert_eq!(
+                airings[0].airing_quality, expected,
+                "{station} {resolution:?}"
+            );
+        }
     }
 
     #[test]

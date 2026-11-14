@@ -256,7 +256,7 @@ Map the server path to a readable client path when PEX runs on another machine. 
 
 ### Daily usage
 - Choose your day range and filters. Each film gets one card showing its next matching airing, or the most recent matching airing when all have started. Films with the same title but different release years can have separate cards.
-- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime, channel, picture quality and recording status. PEX uses the airing’s dimensions or resolution, then station labels where needed. Listings with insufficient information show **Airing quality unknown**. The **HD only** filter includes confirmed HD airings.
+- Select a film and expand **Other showings (N)** in its details. The count covers additional airings that match your current filters. Each lists its UTC airtime, channel, picture quality and recording status. PEX uses pixel dimensions when Plex marks the media as analysed. Otherwise it checks the guide’s explicit resolution and the station’s HD or SD label. If those signals are missing or disagree, the showing stays in the guide as **Airing quality unknown**. Only confirmed HD airings qualify for **HD only** and the **HD ↑** upgrade badge.
 - **Owned Details** gives priority to a matching Plex identifier, then a title and exact year. When the best title matches are one year earlier and one year later, both are listed with their Plex file paths.
 - If `plex_epg_db_source` or `plex_library_db_source` is set, Pex checks once per
   day whether the respective database copy needs refreshing.

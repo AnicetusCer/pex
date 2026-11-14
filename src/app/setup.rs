@@ -496,6 +496,7 @@ mod tests {
         if scenario == "grouped_airings" {
             let db = rusqlite::Connection::open(&guide).unwrap();
             db.execute_batch(r#"
+                ALTER TABLE media_items ADD COLUMN media_analysis_version INTEGER DEFAULT 8;
                 UPDATE metadata_items SET user_thumb_url='plex://unusable', thumb_url='https://fixture.invalid/shared.jpg';
                 UPDATE media_items SET begins_at=unixepoch('now')-172800;
                 INSERT INTO media_items (id,metadata_item_id,begins_at,extra_data) VALUES
